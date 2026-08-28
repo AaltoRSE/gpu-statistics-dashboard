@@ -349,13 +349,13 @@ def _match_scontrol_partition(name, scontrol_parts):
     """
     norm = name.replace("_", "-")
     matches = [p for p in scontrol_parts if norm in p["name"].replace("_", "-")]
-    if not matches:
-        return None
-    nodes = ",".join(p["nodes"] for p in matches if p["nodes"])
-    states = {p["state"] for p in matches}
-    return {"name": matches[0]["name"], "nodes": nodes,
-            "state": "UP" if states == {"UP"} else "+".join(sorted(states)),
-            "slurm_partitions": [p["name"] for p in matches]}
+    nodes = sorted({
+        n for p in matches for n in p["nodes"].split(",")
+        if n and n != "(null)"
+    })
+    state = "UP" if {p["state"] for p in matches} == {"UP"} else "MIXED"
+    return {"name": matches[0]["name"], "nodes": ",".join(nodes),
+            "state": state, "slurm_partitions": [p["name"] for p in matches]}
 
 
 @app.get("/api/partitions")

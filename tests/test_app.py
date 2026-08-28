@@ -205,8 +205,7 @@ def test_match_scontrol_partition():
         {"name": "gpu-h200-71g-ia-ellis", "nodes": "gpu[8-11]", "state": "DOWN"},
         {"name": "batch-csl", "nodes": "csl[1-48]", "state": "UP"},
     ]
-    m = appmod._match_scontrol_partition("b300", sparts)
-    assert m["nodes"] == "gpu[64-67],gpu[60-63]"
+    assert m["nodes"] == "gpu[60-63],gpu[64-67]"
     assert m["state"] == "UP"
     assert len(m["slurm_partitions"]) == 2
     h200 = appmod._match_scontrol_partition("h200", sparts)
