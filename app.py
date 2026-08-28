@@ -270,10 +270,11 @@ def api_job_detail(jobid: str, since_hours: float = Query(24, gt=0, le=168)):
             {"metric": s["metric"], "values": _series_values(s)} for s in vram
         ],
     }
+    start_iso = datetime.fromtimestamp(start, tz=timezone.utc).strftime("%Y-%m-%d")
     meta = _cached(
-        ("sacct", (jobid,), datetime.now(timezone.utc).strftime("%Y-%m-%d")),
+        ("sacct", (jobid,), start_iso),
         300,
-        lambda: sacct_jobs([jobid], datetime.now(timezone.utc).strftime("%Y-%m-%d")).get(jobid),
+        lambda: sacct_jobs([jobid], start_iso).get(jobid),
     )
     return {"jobid": jobid, "window": {"start": start, "end": now}, "step": step,
             "metadata": meta, "series": series}
