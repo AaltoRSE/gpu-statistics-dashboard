@@ -352,12 +352,14 @@ def _match_scontrol_partition(name, scontrol_parts):
     if not matches:
         return None
 
-    nodes = sorted({
-        n for p in matches for n in p["nodes"].split(",")
-        if n and n != "(null)"
-    })
+    seen = []
+    for p in matches:
+        for n in p["nodes"].split(","):
+            if n and n != "(null)" and n not in seen:
+                seen.append(n)
+
     state = "UP" if {p["state"] for p in matches} == {"UP"} else "MIXED"
-    return {"name": matches[0]["name"], "nodes": ",".join(nodes),
+    return {"name": matches[0]["name"], "nodes": ",".join(seen),
             "state": state, "slurm_partitions": [p["name"] for p in matches]}
 
 
