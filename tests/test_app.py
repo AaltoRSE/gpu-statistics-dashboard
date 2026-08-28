@@ -139,6 +139,13 @@ def test_jobs_user_filter(client):
     assert filtered["count"] == 0
 
 
+
+def test_jobs_name_search(client):
+    r = client.get("/api/jobs", params={"since_hours": 24, "search": "train.sh"})
+    assert r.status_code == 200
+    data = r.json()
+    assert data["count"] == 1
+    assert data["jobs"][0]["name"] == "train.sh"
 def test_job_detail_200(client):
     r = client.get("/api/jobs/1", params={"since_hours": 24})
     assert r.status_code == 200

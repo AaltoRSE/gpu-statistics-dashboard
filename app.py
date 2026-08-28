@@ -223,14 +223,16 @@ def api_jobs(
         jobs = [j for j in jobs if j["partition"] == partition]
     if user:
         jobs = [j for j in jobs if j["user"] == user.lower()]
+    # Bound the sacct enrichment cost before it; name search therefore only
+    # covers the top-``limit`` jobs by effective GPU hours.
+    jobs = jobs[:limit]
+    _enrich(jobs, since_hours)
     if search:
         needle = search.lower()
         jobs = [
             j for j in jobs
-            if needle in j["jobid"] or needle in j.get("name", "").lower()
+            if needle in j["jobid"] or needle in (j.get("name") or "").lower()
         ]
-    jobs = jobs[:limit]
-    _enrich(jobs, since_hours)
     partitions = sorted({j["partition"] for j in jobs if j["partition"]})
     return {
         "window": {"start": start, "end": now},
