@@ -1,0 +1,224 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Triton GPU Efficiency Dashboard</title>
+<script src="https://cdn.plot.ly/plotly-2.26.0.min.js"></script>
+<style>
+:root { --bg:#0f1420; --panel:#171e2e; --panel2:#1e2740; --line:#2a3552;
+       --text:#dce3f2; --dim:#8b98b8; --acc:#4fc3f7; --ok:#66bb6a; --warn:#ffa726; --bad:#ef5350; }
+* { box-sizing: border-box; }
+body { margin:0; font-family: -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+       background: var(--bg); color: var(--text); }
+header { padding: 14px 22px; border-bottom: 1px solid var(--line); display:flex; align-items:baseline; gap:16px; }
+header h1 { font-size: 18px; margin:0; font-weight: 600; }
+header .sub { color: var(--dim); font-size: 12px; }
+header .live { margin-left:auto; font-size:12px; color: var(--dim); }
+header .live b { color: var(--ok); }
+nav.tabs { display:flex; gap:4px; padding: 10px 22px 0; }
+nav.tabs button { background:none; border:none; border-bottom: 2px solid transparent; color: var(--dim);
+  font-size: 14px; padding: 8px 16px; cursor:pointer; }
+nav.tabs button.active { color: var(--text); border-bottom-color: var(--acc); }
+main { padding: 16px 22px 40px; }
+.tabpage { display:none; }
+.tabpage.active { display:block; }
+.controls { display:flex; flex-wrap:wrap; gap:14px; align-items:flex-end; margin-bottom:14px;
+  background: var(--panel); border:1px solid var(--line); border-radius:8px; padding:12px 14px; }
+.controls label { display:flex; flex-direction:column; gap:4px; font-size:11px; color:var(--dim); text-transform:uppercase; letter-spacing:.05em; }
+.controls input, .controls select { background: var(--panel2); color: var(--text); border:1px solid var(--line);
+  border-radius:6px; padding:6px 10px; font-size:13px; min-width: 150px; }
+.controls input[type=checkbox]{ accent-color: var(--acc); }
+.grid { display:grid; gap:14px; }
+.grid.two { grid-template-columns: 1fr 1fr; }
+@media (max-width: 1100px) { .grid.two { grid-template-columns: 1fr; } }
+.card { background: var(--panel); border:1px solid var(--line); border-radius:8px; padding:12px 14px; }
+.card h2 { font-size:14px; margin:0 0 8px; color:var(--text); font-weight:600; }
+.card .hint { font-size:11px; color:var(--dim); margin-top:6px; }
+table { width:100%; border-collapse: collapse; font-size: 12.5px; }
+th { text-align:left; color:var(--dim); font-weight:600; font-size:11px; text-transform:uppercase;
+     letter-spacing:.04em; padding:6px 8px; border-bottom:1px solid var(--line); cursor:pointer; user-select:none; white-space:nowrap; }
+th.num, td.num { text-align:right; font-family: "SFMono-Regular", Consolas, monospace; }
+td { padding:5px 8px; border-bottom:1px solid var(--line); white-space:nowrap; }
+tr.row { cursor:pointer; }
+tr.row:hover td { background: var(--panel2); }
+tr.row.sel td { background: #233052; }
+.badge { display:inline-block; padding:1px 8px; border-radius:10px; font-size:11px; font-weight:600; }
+.badge.RUNNING { background:#1b3a2a; color:var(--ok); }
+.badge.COMPLETED { background:#1e2740; color:var(--acc); }
+.badge.PENDING, .badge.IDLE { background:#26304a; color:var(--dim); }
+.badge.FAILED, .badge.CANCELLED, .badge.TIMEOUT { background:#3a1e22; color:var(--bad); }
+.badge.DRAIN, .badge.DOWN, .badge.DRAINING { background:#3a2c14; color:var(--warn); }
+.bar { display:inline-block; height:8px; border-radius:4px; background: var(--acc); vertical-align:middle; }
+.bar.lo { background: var(--bad); } .bar.mid { background: var(--warn); } .bar.hi { background: var(--ok); }
+.chart { width:100%; height:340px; }
+.chart.tall { height:420px; }
+#jobDetailPlot, #nodeDetailPlot { min-height: 360px; }
+.empty { color:var(--dim); font-size:13px; padding:18px 0; text-align:center; }
+#status { position: fixed; right: 14px; bottom: 12px; font-size: 11px; color: var(--dim);
+  background: var(--panel); border:1px solid var(--line); border-radius:6px; padding:4px 10px; opacity:.85; }
+.err { color: var(--bad); font-size: 12px; padding: 8px 10px; background:#2a1518; border:1px solid var(--bad);
+  border-radius:6px; margin: 8px 0; display:none; }
+.small { font-size: 11px; color: var(--dim); }
+</style>
+</head>
+<body>
+<header>
+  <h1>Triton GPU Efficiency Dashboard</h1>
+  <span class="sub">live data: sacct &middot; scontrol &middot; Prometheus</span>
+  <span class="live" id="health">checking&hellip;</span>
+</header>
+<nav class="tabs">
+  <button data-tab="jobs" class="active">Jobs</button>
+  <button data-tab="partitions">Partitions</button>
+  <button data-tab="nodes">Nodes</button>
+</nav>
+<main>
+  <div class="err" id="errBox"></div>
+
+  <!-- ============ JOBS ============ -->
+  <section class="tabpage active" id="tab-jobs">
+    <div class="controls">
+      <label>Window
+        <select id="jWindow">
+          <option value="24">last 24 h</option>
+          <option value="72">last 3 days</option>
+          <option value="168" selected>last 7 days</option>
+        </select>
+      </label>
+      <label>User
+        <input id="jUser" type="text" placeholder="username" style="min-width:130px">
+      </label>
+      <label>Partition
+        <select id="jPartition"><option value="">all</option></select>
+      </label>
+      <label>Search (job id / name)
+        <input id="jSearch" type="text" placeholder="e.g. 19807768" style="min-width:170px">
+      </label>
+      <span class="small" id="jMeta" style="align-self:center"></span>
+    </div>
+    <div class="card">
+      <h2>Top jobs by effective GPU hours &mdash; click a bar or table row for detail</h2>
+      <div class="chart" id="jobBarPlot"></div>
+    </div>
+    <div class="card" style="margin-top:14px">
+      <h2>Job table <span class="small" id="jCount"></span></h2>
+      <div style="overflow-x:auto; max-height:520px; overflow-y:auto">
+        <table id="jobTable">
+          <thead><tr>
+            <th data-k="jobid">Job</th><th data-k="name">Name</th><th data-k="user">User</th>
+            <th data-k="partition">Partition</th><th data-k="state">State</th>
+            <th data-k="start">Start</th><th data-k="gpus">GPUs</th>
+            <th class="num" data-k="mean_util">Mean util %</th><th class="num" data-k="max_util">Max %</th>
+            <th class="num" data-k="gpu_hours_eff">Eff. GPU-h</th>
+            <th class="num" data-k="efficiency">Efficiency %</th><th class="num" data-k="vram_avg">VRAM %</th>
+          </tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+      <div class="hint">Eff. GPU-h = allocated GPU-hours &times; mean utilization. Efficiency = mean utilization of the job&rsquo;s GPUs (max subtask per node). Click a column header to sort.</div>
+    </div>
+    <div class="card" id="jobDetailCard" style="margin-top:14px; display:none">
+      <h2 id="jobDetailTitle">Job detail</h2>
+      <div id="jobDetailPlot" class="chart tall"></div>
+      <div class="hint" id="jobDetailMeta"></div>
+    </div>
+  </section>
+
+  <!-- ============ PARTITIONS ============ -->
+  <section class="tabpage" id="tab-partitions">
+    <div class="controls">
+      <label>Window
+        <select id="pWindow">
+          <option value="24">last 24 h</option>
+          <option value="72">last 3 days</option>
+          <option value="168" selected>last 7 days</option>
+        </select>
+      </label>
+      <label>Group by
+        <select id="pGroup">
+          <option value="partition" selected>partition</option>
+          <option value="gpu_type">GPU type</option>
+        </select>
+      </label>
+    </div>
+    <div class="grid two">
+      <div class="card">
+        <h2>Mean utilization by group</h2>
+        <div class="chart" id="partBarPlot"></div>
+      </div>
+      <div class="card">
+        <h2>Utilization trend over time</h2>
+        <div class="chart" id="partTrendPlot"></div>
+      </div>
+    </div>
+    <div class="card" style="margin-top:14px">
+      <h2>Partition table <span class="small" id="pCount"></span></h2>
+      <div style="overflow-x:auto">
+        <table id="partTable">
+          <thead><tr>
+            <th data-k="name">Partition</th><th data-k="state">State</th><th>Nodes</th>
+            <th class="num" data-k="job_count">Jobs</th>
+            <th class="num" data-k="mean_util">Mean util %</th><th class="num" data-k="max_util">Max %</th>
+          </tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+      <div class="hint">Mean utilization is time-weighted over the window; GPU devices are collapsed to a per-job/per-node max, so it measures &ldquo;how busy&rdquo; rather than aggregate GPU-hours. Slurm node lists come from <code>scontrol show partitions</code>.</div>
+    </div>
+  </section>
+
+  <!-- ============ NODES ============ -->
+  <section class="tabpage" id="tab-nodes">
+    <div class="controls">
+      <label>Search (node)
+        <input id="nSearch" type="text" placeholder="e.g. gpu3" style="min-width:130px">
+      </label>
+      <label>State
+        <select id="nState"><option value="">all</option></select>
+      </label>
+      <label>GPU type
+        <select id="nGpuType"><option value="">all</option></select>
+      </label>
+      <label style="flex-direction:row; align-items:center; gap:6px; text-transform:none">
+        <input id="nBusy" type="checkbox"> busy only
+      </label>
+      <label style="flex-direction:row; align-items:center; gap:6px; text-transform:none">
+        <input id="nGpuOnly" type="checkbox" checked> GPU nodes only
+      </label>
+      <span class="small" id="nMeta" style="align-self:center"></span>
+    </div>
+    <div class="card">
+      <h2>Nodes <span class="small" id="nCount"></span></h2>
+      <div style="overflow-x:auto; max-height:560px; overflow-y:auto">
+        <table id="nodeTable">
+          <thead><tr>
+            <th data-k="name">Node</th><th data-k="state">State</th><th data-k="gpu_type">GPU type</th>
+            <th class="num" data-k="gpus">GPUs</th><th class="num" data-k="current_util">Util now %</th>
+            <th class="num" data-k="current_vram">VRAM %</th><th class="num" data-k="cpus">CPUs</th>
+            <th>Partitions</th><th>Active jobs</th>
+          </tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+      <div class="hint">Instant values from Prometheus (<code>slurm_job_*</code> exporter); states from <code>scontrol show nodes</code>. Click a row for the node&rsquo;s GPU time series.</div>
+    </div>
+    <div class="card" id="nodeDetailCard" style="margin-top:14px; display:none">
+      <h2 id="nodeDetailTitle">Node detail</h2>
+      <div class="controls" style="margin:8px 0">
+        <label>Window
+          <select id="ndWindow">
+            <option value="1">last 1 h</option>
+            <option value="6" selected>last 6 h</option>
+            <option value="24">last 24 h</option>
+          </select>
+        </label>
+      </div>
+      <div id="nodeDetailPlot" class="chart tall"></div>
+    </div>
+  </section>
+</main>
+<div id="status"></div>
+<script src="/static/app.js"></script>
+</body>
+</html>
