@@ -220,15 +220,11 @@ async function loadJobDetail(jobid) {
   if (m.end) metaBits.push("end " + m.end);
   $("jobDetailMeta").textContent = metaBits.join(" · ");
   const traces = [];
-  const utilPts = []; // [ts_ms, value] across all utilization series
   data.series.utilization.forEach((s, i) => {
     const dev = s.metric.gpu !== undefined ? "GPU " + s.metric.gpu : s.metric.instance;
-    const x = s.values.map((v) => v[0] * 1000);
-    const y = s.values.map((v) => v[1]);
-    x.forEach((t, j) => utilPts.push([t, y[j]]));
     traces.push({
       type: "scatter", mode: "lines", name: dev + " util %",
-      x, y,
+      x: s.values.map((v) => v[0] * 1000), y: s.values.map((v) => v[1]),
       line: { width: 1.5, color: COLORS[i % COLORS.length] },
     });
   });
@@ -242,28 +238,27 @@ async function loadJobDetail(jobid) {
     });
   });
   // Timeline delimiters: an open circle where the utilization line starts
-  // and a triangle where it ends, sitting on the line (y = mean across the
-  // job's GPUs at that timestamp). Hidden from the legend.
-  if (utilPts.length) {
-    let firstTs = Infinity, lastTs = -Infinity;
-    utilPts.forEach((p) => {
-      if (p[0] < firstTs) firstTs = p[0];
-      if (p[0] > lastTs) lastTs = p[0];
+  // and a triangle where it ends, at the actual endpoint (t, y) of the
+  // first series to reach that timestamp (strict comparisons keep the
+  // first-encountered point on ties). Hidden from the legend.
+  let startPt = null, endPt = null;
+  data.series.utilization.forEach((s) => {
+    s.values.forEach((v) => {
+      const t = v[0] * 1000;
+      if (!startPt || t < startPt[0]) startPt = [t, v[1]];
+      if (!endPt || t > endPt[0]) endPt = [t, v[1]];
     });
-    const meanAt = (ts) => {
-      let sum = 0, n = 0;
-      utilPts.forEach((p) => { if (p[0] === ts) { sum += p[1]; n += 1; } });
-      return sum / n;
-    };
+  });
+  if (startPt) {
     traces.push({
       type: "scatter", mode: "markers", name: "Job start", showlegend: false,
-      x: [firstTs], y: [meanAt(firstTs)],
+      x: [startPt[0]], y: [startPt[1]],
       marker: { symbol: "circle-open", size: 11, color: "#dce3f2",
                 line: { width: 2 } },
     });
     traces.push({
       type: "scatter", mode: "markers", name: "Job end", showlegend: false,
-      x: [lastTs], y: [meanAt(lastTs)],
+      x: [endPt[0]], y: [endPt[1]],
       marker: { symbol: "triangle-up", size: 11, color: "#ffa726" },
     });
   }
