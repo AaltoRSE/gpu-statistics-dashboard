@@ -86,7 +86,7 @@ async function checkHealth() {
 /* ---------------- tabs ---------------- */
 
 const loaded = { jobs: false, partitions: false, nodes: false };
-const nodeFilters = { search: "", state: "", gputype: "", busy: false, gpuOnly: true };
+const nodeFilters = { search: "", gputype: "", busy: false, gpuOnly: true };
 
 function showTab(name) {
   document.querySelectorAll("nav.tabs button").forEach((b) =>
@@ -118,9 +118,9 @@ let jobSort = { key: "gpu_hours_eff", dir: "desc" };
 
 async function loadJobs() {
   const params = new URLSearchParams({ since_hours: $("jWindow").value, limit: "500" });
+  if ($("jRunning").checked) params.set("running_only", "true");
   if ($("jUser").value.trim()) params.set("user", $("jUser").value.trim());
   if ($("jPartition").value) params.set("partition", $("jPartition").value);
-  if ($("jSearch").value.trim()) params.set("search", $("jSearch").value.trim());
   status("loading jobs…");
   const data = await api("/api/jobs?" + params);
   jobRows = data.jobs;
@@ -237,6 +237,25 @@ async function loadJobDetail(jobid) {
       yaxis: "y2",
     });
   });
+  // Lifecycle markers on the utilization axis: open circle at job start,
+  // triangle at job end. Only drawn inside the returned window; running
+  // jobs have no end marker.
+  const w0 = data.window.start * 1000, w1 = data.window.end * 1000;
+  if (m.start_epoch && m.start_epoch * 1000 >= w0 && m.start_epoch * 1000 <= w1) {
+    traces.push({
+      type: "scatter", mode: "markers", name: "Job start",
+      x: [m.start_epoch * 1000], y: [102],
+      marker: { symbol: "circle-open", size: 11, color: "#dce3f2",
+                line: { width: 2 } },
+    });
+  }
+  if (m.end_epoch && m.end_epoch * 1000 >= w0 && m.end_epoch * 1000 <= w1) {
+    traces.push({
+      type: "scatter", mode: "markers", name: "Job end",
+      x: [m.end_epoch * 1000], y: [102],
+      marker: { symbol: "triangle-up", size: 11, color: "#ffa726" },
+    });
+  }
   Plotly.newPlot("jobDetailPlot", traces, {
     margin: { l: 46, r: 46, t: 10, b: 34 },
     paper_bgcolor: "rgba(0,0,0,0)", plot_bgcolor: "rgba(0,0,0,0)",
@@ -254,6 +273,10 @@ function jobControlsChanged() {
   jobDebounce = setTimeout(loadJobs, 350);
 }
 $("jWindow").addEventListener("change", () => { loadJobs(); });
+$("jRunning").addEventListener("change", (e) => {
+  $("jWindow").disabled = e.target.checked;
+  loadJobs();
+});
 $("jUser").addEventListener("input", jobControlsChanged);
 $("jSearch").addEventListener("input", jobControlsChanged);
 $("jobTable").querySelectorAll("th[data-k]").forEach((th) =>
@@ -272,9 +295,8 @@ let partRows = [];
 let partSort = { key: "mean_util", dir: "desc" };
 
 async function loadPartitions() {
-  const params = new URLSearchParams({
-    since_hours: $("pWindow").value, group_by: $("pGroup").value,
-  });
+  const params = new URLSearchParams({ since_hours: $("pWindow").value });
+  if ($("pRunning").checked) params.set("running_only", "true");
   status("loading partitions…");
   const data = await api("/api/partitions?" + params);
   partRows = data.partitions;
@@ -292,19 +314,19 @@ function renderPartBar() {
   const rows = partRows.slice().sort((a, b) => a.name.localeCompare(b.name));
   Plotly.newPlot("partBarPlot", [{
     type: "bar",
-    y: rows.map((p) => p.name),
-    x: rows.map((p) => p.mean_util),
+    x: rows.map((p) => p.name),
+    y: rows.map((p) => p.mean_util),
     marker: {
       color: rows.map((p) =>
         p.mean_util < 40 ? "#ef5350" : p.mean_util < 75 ? "#ffa726" : "#66bb6a"),
     },
-    hovertemplate: "<b>%{y}</b><br>mean %{x:.1f}%<extra></extra>",
+    hovertemplate: "<b>%{x}</b><br>mean %{y:.1f}%<extra></extra>",
   }], {
-    margin: { l: 110, r: 20, t: 10, b: 30 },
+    margin: { l: 46, r: 20, t: 10, b: 60 },
     paper_bgcolor: "rgba(0,0,0,0)", plot_bgcolor: "rgba(0,0,0,0)",
     font: { color: "#dce3f2", size: 11 },
-    xaxis: { title: "mean utilization %", range: [0, 105], gridcolor: "#2a3552" },
-    yaxis: { autorange: "reversed", gridcolor: "#2a3552" },
+    yaxis: { title: "mean utilization %", range: [0, 105], gridcolor: "#2a3552" },
+    xaxis: { tickangle: -30, automargin: true, gridcolor: "#2a3552" },
   }, PLOT_CFG);
 }
 
@@ -329,8 +351,7 @@ function renderPartTable() {
   tb.innerHTML = partRows.map((p) => `
     <tr>
       <td>${p.name}</td>
-      <td>${stateBadge(p.state)}</td>
-      <td class="small">${p.nodes || "—"}</td>
+      <td class="num" title="allocated / total GPUs">${p.gpus_alloc}/${p.gpus_total}</td>
       <td class="num">${fmtInt(p.job_count)}</td>
       <td class="num">${pctBar(p.mean_util)}</td>
       <td class="num">${fmt(p.max_util)}</td>
@@ -339,7 +360,10 @@ function renderPartTable() {
 
 function partControlsChanged() { loadPartitions(); }
 $("pWindow").addEventListener("change", partControlsChanged);
-$("pGroup").addEventListener("change", partControlsChanged);
+$("pRunning").addEventListener("change", (e) => {
+  $("pWindow").disabled = e.target.checked;
+  loadPartitions();
+});
 $("partTable").querySelectorAll("th[data-k]").forEach((th) =>
   th.addEventListener("click", () => {
     const k = th.dataset.k;
@@ -361,29 +385,38 @@ $("partTable").querySelectorAll("th[data-k]").forEach((th) =>
 let nodeRows = [];
 let nodeSort = { key: "name", dir: "asc" };
 
-async function loadNodes() {
+async function loadNodes(force = false) {
   const params = new URLSearchParams({ gpu_only: String($("nGpuOnly").checked) });
+  if (force) params.set("refresh", "true");
+  const btn = $("nRefresh");
+  btn.disabled = true;
   status("loading nodes…");
-  const data = await api("/api/nodes?" + params);
-  nodeRows = data.nodes;
-  const t = new Date(data.time * 1000).toISOString().slice(11, 16);
-  $("nMeta").textContent = data.count + " GPU nodes · snapshot " + t + " UTC";
-  const fill = (id, values) => {
-    const sel = $(id);
-    if (sel.options.length > 1) return;
-    sel.innerHTML = '<option value="">all</option>' +
-      values.map((v) => "<option>" + v + "</option>").join("");
-  };
-  fill("nState", [...new Set(nodeRows.map((n) => n.state))].sort());
-  fill("nGpuType", [...new Set(nodeRows.map((n) => n.gpu_type).filter(Boolean))].sort());
-  renderNodeTable();
-  loaded.nodes = true;
+  try {
+    const data = await api("/api/nodes?" + params);
+    nodeRows = data.nodes;
+    const t = new Intl.DateTimeFormat("en-GB", {
+      timeZone: "Europe/Helsinki", hour: "2-digit", minute: "2-digit",
+      hour12: false, timeZoneName: "short",
+    }).format(data.time * 1000);
+    $("nMeta").textContent = data.count + " GPU nodes · snapshot " + t + " (Europe/Helsinki)";
+    fill("nGpuType", [...new Set(nodeRows.map((n) => n.gpu_type).filter(Boolean))].sort());
+    renderNodeTable();
+    loaded.nodes = true;
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+function fill(id, values) {
+  const sel = $(id);
+  if (sel.options.length > 1) return;
+  sel.innerHTML = '<option value="">all</option>' +
+    values.map((v) => "<option>" + v + "</option>").join("");
 }
 
 function filteredNodes() {
   return nodeRows.filter((n) => {
     if (nodeFilters.search && !n.name.toLowerCase().includes(nodeFilters.search)) return false;
-    if (nodeFilters.state && n.state !== nodeFilters.state) return false;
     if (nodeFilters.gputype && n.gpu_type !== nodeFilters.gputype) return false;
     if (nodeFilters.busy && !(n.current_util > 0)) return false;
     return true;
@@ -403,7 +436,6 @@ function renderNodeTable() {
     return `
     <tr class="row" data-node="${n.name}" style="${busy ? "" : "opacity:.55"}">
       <td>${n.name}</td>
-      <td>${stateBadge(n.state)}</td>
       <td>${n.gpu_type || "—"}</td>
       <td class="num" title="allocated / total GPUs">${n.gpus_alloc !== undefined ? n.gpus_alloc : 0}/${n.gpus}</td>
       <td class="num">${u === null ? "idle" : pctBar(u)}</td>
@@ -430,7 +462,7 @@ async function loadNodeDetail(name) {
   $("nodeDetailCard").style.display = "block";
   $("nodeDetailTitle").textContent = "Node " + name + " — loading…";
   $("nodeDetailCard").scrollIntoView({ behavior: "smooth", block: "nearest" });
-  const data = await api("/api/nodes/" + name + "?window_hours=" + $("ndWindow").value);
+  const data = await api("/api/nodes/" + name + "?view=" + $("ndWindow").value);
   if (token !== nodeDetailToken) return;
   setUrl("/node/" + name);
   $("nodeDetailTitle").textContent = "Node " + name;
@@ -476,10 +508,6 @@ $("nSearch").addEventListener("input", (e) => {
   nodeFilters.search = e.target.value.trim().toLowerCase();
   nodeControlsChanged();
 });
-$("nState").addEventListener("change", (e) => {
-  nodeFilters.state = e.target.value;
-  nodeControlsChanged();
-});
 $("nGpuType").addEventListener("change", (e) => {
   nodeFilters.gputype = e.target.value;
   nodeControlsChanged();
@@ -488,7 +516,8 @@ $("nBusy").addEventListener("change", (e) => {
   nodeFilters.busy = e.target.checked;
   nodeControlsChanged();
 });
-$("nGpuOnly").addEventListener("change", loadNodes);
+$("nGpuOnly").addEventListener("change", () => loadNodes());
+$("nRefresh").addEventListener("click", () => { loadNodes(true); });
 $("ndWindow").addEventListener("change", () => {
   if (nodeDetailName) loadNodeDetail(nodeDetailName);
 });

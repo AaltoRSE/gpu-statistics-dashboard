@@ -6,7 +6,7 @@ efficiency on the Triton cluster. A FastAPI backend collects data **on demand**
 collection) from:
 
 - **`sacct`** — job metadata (name, user, state, start/end, GPU allocation)
-- **`scontrol`** — node and partition state, node lists
+- **`scontrol`** — node state and GPU capacity
 - **Prometheus** (`stats.triton.aalto.fi`) — `slurm_job_*` exporter metrics:
   per-GPU utilization and VRAM, live and historical
 
@@ -17,26 +17,33 @@ interactive tabs.
 
 ### Jobs tab
 - Job table (top 500 by effective GPU-hours in the window) with **search** by
-  job id or job name, **user filter**, **partition filter**, and window
-  selection (24 h / 3 d / 7 d).
+  job id or job name, **user filter**, **partition filter**, window
+  selection (24 h / 3 d / 7 d), and a **Running only** toggle (jobs with a
+  live Prometheus GPU series).
 - Clickable column sorting; click a row (or a bar in the chart) for a
-  per-GPU utilization + VRAM time-series detail view with sacct metadata.
+  per-GPU utilization + VRAM time-series detail view with sacct metadata
+  and job start/end markers.
 - Effective GPU-hours = allocated GPU-hours × mean utilization;
   efficiency = mean utilization of the job's GPUs.
 
 ### Partitions tab
-- Mean utilization per group (partition or GPU type), time-weighted over the
-  window, plus a utilization trend chart.
-- Slurm node lists and states joined in from `scontrol show partitions`
-  (Prometheus labels are shortened, e.g. `h200` → all `gpu-h200-*` partitions).
+- GPU-type view: mean utilization per GPU type (time-weighted over the
+  window), a utilization trend chart, and GPU capacity per type.
+- **Running only** toggle restricts both charts and the table to jobs with
+  a live Prometheus GPU series.
+- `GPUs` shows allocated/total: when a group's nodes all resolve to one
+  scontrol GPU type the total spans every node of that type (idle capacity
+  included), otherwise only the observed instances count.
 
 ### Nodes tab
 - All GPU nodes with live utilization/VRAM (instant Prometheus query),
-  scontrol state, GPU type/count, and the active jobs on each node.
-- **Search**, **state** and **GPU type** filters, busy-only toggle,
-  GPU-nodes-only toggle.
-- Click a row for the node's per-GPU utilization + VRAM time series
-  (1 h / 6 h / 24 h).
+  GPU type/count, and the active jobs on each node.
+- **Search** and **GPU type** filters, busy-only and GPU-nodes-only
+  toggles; the snapshot time is shown in Europe/Helsinki.
+- **refresh** forces a bypass of the 30-second scontrol/Prometheus cache.
+- Click a row for the node's per-GPU utilization + VRAM time series,
+  defaulting to **since job start** (earliest sacct start of the jobs
+  actively reporting on that node; 1 h / 6 h / 24 h windows available).
 
 ## Running
 
@@ -59,20 +66,19 @@ Prometheus connection settings are read in this order:
 2. `jobgraph.conf` — `$JOBGRAPH_CONFIG`, `/etc/jobgraph.conf`,
    `~/.config/jobgraph.conf` (shared with the jobgraph tool; keys
    `prom_url`, `username`, `password`, `timeout`)
-
 Cluster access is **strictly read-only**: the app only issues `sacct -j`,
-`scontrol show nodes/partitions`, and Prometheus read queries.
+`scontrol show nodes`, and Prometheus read queries.
 
 ## API
 
 | Endpoint | Purpose |
 |---|---|
 | `GET /api/health` | backend + Prometheus connectivity |
-| `GET /api/jobs?since_hours=&user=&partition=&search=&limit=` | job table (Prometheus discovery + sacct enrichment) |
-| `GET /api/jobs/{jobid}?since_hours=` | per-GPU utilization/VRAM series + metadata |
-| `GET /api/partitions?since_hours=&group_by=partition\|gpu_type` | utilization by group + trend + scontrol node lists |
-| `GET /api/nodes?gpu_only=` | node states + live utilization/VRAM + active jobs |
-| `GET /api/nodes/{name}?window_hours=` | per-GPU utilization/VRAM series for one node |
+| `GET /api/jobs?since_hours=&user=&partition=&search=&limit=&running_only=` | job table (Prometheus discovery + sacct enrichment; `running_only=true` keeps only jobs with a live GPU series) |
+| `GET /api/jobs/{jobid}?since_hours=` | per-GPU utilization/VRAM series + metadata (incl. parsed `start_epoch`/`end_epoch`) |
+| `GET /api/partitions?since_hours=&running_only=` | utilization per GPU type + trend + allocated/total GPU capacity |
+| `GET /api/nodes?gpu_only=&refresh=` | node states + live utilization/VRAM + active jobs (`refresh=true` bypasses the 30 s cache) |
+| `GET /api/nodes/{name}?view=job_start\|1\|6\|24` | per-GPU utilization/VRAM series for one node (`job_start` = since the earliest active job started) |
 
 Short in-memory TTL caches (30–300 s) avoid re-hitting the same query while
 the admin drags filters around; every interaction still fetches live data.
@@ -93,6 +99,7 @@ the admin drags filters around; every interaction still fetches live data.
 $ .venv/bin/python -m pytest tests/ -q
 ```
 
-26 tests: parsers (sacct/scontrol/prom shapes, edge cases) and endpoints
-(fixed fake Prometheus + Slurm; asserts utilization math is not trivially
-100%, filters, and detail endpoints).
+Endpoint and parser tests: parsers (sacct/scontrol/prom shapes, edge
+cases) and endpoints (fixed fake Prometheus + Slurm; asserts utilization
+math is not trivially 100%, running-only filtering, GPU capacity joins,
+job-start windows, and detail endpoints).
