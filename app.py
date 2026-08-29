@@ -5,6 +5,7 @@ scontrol live (with short in-memory TTL caches). No background collection.
 """
 
 import os
+import re
 import time
 from collections import defaultdict
 from datetime import datetime, timezone
@@ -15,7 +16,7 @@ from fastapi.staticfiles import StaticFiles
 
 from config import ConfigError, load_config
 from prom import PromClient, PrometheusError
-from slurm import SlurmError, sacct_jobs, show_nodes, show_partitions
+from slurm import SlurmError, sacct_jobs, show_nodes
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 STATIC = os.path.join(HERE, "static")
@@ -80,6 +81,43 @@ def _series_values(series):
 def _job_window(since_hours, now=None):
     now = now or int(time.time())
     return now - int(since_hours * 3600), now
+
+
+def _invalidate_cache(*keys):
+    """Drop cache entries; used by the forced-refresh path."""
+    import threading
+
+    global _cache_lock
+    if _cache_lock is None:
+        _cache_lock = threading.Lock()
+    with _cache_lock:
+        for key in keys:
+            _cache.pop(key, None)
+
+
+def _running_gpu_job_ids():
+    """Job IDs with a live Prometheus GPU-utilization series.
+
+    A live series is the shared definition of "running" for both the Jobs
+    and Partitions running-only controls; it avoids an unbounded sacct scan.
+    """
+    series = get_prom().query_instant(
+        "count by (slurmjobid) (slurm_job_utilization_gpu)")
+    return {s["metric"]["slurmjobid"] for s in series
+            if s["metric"].get("slurmjobid")}
+
+
+def _jobid_matcher(job_ids):
+    """PromQL selector fragment matching exactly one of a set of job IDs."""
+    return 'slurmjobid=~"^(?:' + "|".join(re.escape(j) for j in sorted(job_ids)) + ')$"'
+
+
+def _sacct_epoch(value):
+    """sacct start/end string to epoch seconds; None when missing/invalid."""
+    try:
+        return datetime.fromisoformat(value).timestamp()
+    except (TypeError, ValueError):
+        return None
 
 
 def _fetch_job_window(since_hours, include_vram=True):
@@ -240,8 +278,19 @@ def api_jobs(
     user: str = "",
     search: str = "",
     limit: int = Query(500, ge=1, le=2000),
+    running_only: bool = Query(False),
 ):
+    if running_only:
+        # Live-ID check first: with no running GPU jobs we must not issue
+        # the broad window range query at all.
+        live = _running_gpu_job_ids()
+        if not live:
+            start, now = _job_window(since_hours)
+            return {"window": {"start": start, "end": now}, "count": 0,
+                    "partitions": [], "jobs": []}
     jobs, start, now, _ = _fetch_job_window(since_hours)
+    if running_only:
+        jobs = [j for j in jobs if j["jobid"] in live]
     if partition:
         jobs = [j for j in jobs if j["partition"] == partition]
     if user:
@@ -299,47 +348,72 @@ def api_job_detail(jobid: str, since_hours: float = Query(24, gt=0, le=168)):
         300,
         lambda: sacct_jobs([jobid], start_iso).get(jobid),
     )
+    if meta:
+        # Parsed epochs let the frontend draw lifecycle markers; the
+        # human-readable start/end strings are preserved as-is.
+        meta["start_epoch"] = _sacct_epoch(meta.get("start"))
+        meta["end_epoch"] = _sacct_epoch(meta.get("end"))
     return {"jobid": jobid, "window": {"start": start, "end": now}, "step": step,
             "metadata": meta, "series": series}
 
 
-def _partition_window(since_hours, group_by="partition", now=None):
+def _partition_window(since_hours, running_only=False, now=None):
+    """GPU-type utilization window.
+
+    Summary data keeps the ``slurmjobid`` label (per-job/per-node max, so the
+    job identity survives for running-only matching); trend data is a plain
+    ``avg by (gpu_type)`` and has no job identity, so the matcher must be
+    injected into the metric selector before the aggregation.
+    """
     start, now = _job_window(since_hours, now)
     step = _step_for_range(now - start)
-    label = "job" if group_by == "partition" else "gpu_type"
+    sel = ""
+    if running_only:
+        live = _running_gpu_job_ids()
+        if not live:
+            return [], {}, {}, start, now, step
+        sel = "{" + _jobid_matcher(live) + "}"
 
     def fetch():
         stats = get_prom().query_range(
-            "max by (slurmjobid, instance, %s) (slurm_job_utilization_gpu)" % label,
+            "max by (slurmjobid, instance, gpu_type) (slurm_job_utilization_gpu%s)"
+            % sel,
             start, now, step,
         )
         trend = get_prom().query_range(
-            "avg by (%s) (slurm_job_utilization_gpu)" % label,
+            "avg by (gpu_type) (slurm_job_utilization_gpu%s)" % sel,
             start, now, step,
         )
         return stats, trend, start, now, step
 
-    key = ("parts", since_hours, group_by)
+    key = ("parts", since_hours, running_only)
     stats, trend, start, now, step = _cached(key, 60, fetch)
-
-    out = aggregate_partition_stats(stats, label)
+    out = aggregate_partition_stats(stats)
     trend_out = {
-        s["metric"].get(label, "unknown"): _series_values(s) for s in trend
+        s["metric"].get("gpu_type", "unknown"): _series_values(s) for s in trend
     }
-    return out, trend_out, start, now, step
+    # Observed instances per group, for the capacity join in api_partitions.
+    instances = {}
+    for s in stats:
+        m = s["metric"]
+        inst = m.get("instance", "")
+        if inst:
+            instances.setdefault(m.get("gpu_type", "unknown"), set()).add(inst)
+    return out, trend_out, instances, start, now, step
 
 
-def aggregate_partition_stats(stats, label):
-    """Time-weighted mean utilization per group from collapsed-max series.
+def aggregate_partition_stats(stats):
+    """Time-weighted mean utilization per GPU type from collapsed-max series.
 
     Each series is the per-(job, node) max utilization across its window;
     averaging samples is a time-weighted mean (GPU devices are collapsed, so
-    this is utilization, not GPU-hours).
+    this is utilization, not GPU-hours). Groups are keyed by the ``gpu_type``
+    label.
     """
     parts = {}
     for s in stats:
         m = s["metric"]
-        name = m.get(label, "unknown")
+        name = m.get("gpu_type", "unknown")
         values = _series_values(s)
         if not values:
             continue
@@ -364,44 +438,46 @@ def aggregate_partition_stats(stats, label):
     return out
 
 
+def _gpu_capacity(groups, instances, nodes, allocs):
+    """Join observed metric instances to scontrol node capacity.
 
-def _match_scontrol_partition(name, scontrol_parts):
-    """Map a Prometheus short partition label to full Slurm partition(s).
-
-    Prometheus ``job`` labels are shortened (``b300``, ``v100_32g``); Slurm
-    names are full (``gpu-b300-288g-ellis``). Normalize ``_`` to ``-`` and
-    match on substring. A Prometheus partition may map to several Slurm
-    partitions (e.g. ``h200`` -> many ``gpu-h200-*``).
+    ``instances`` maps gpu_type -> observed instance names (built in
+    ``_partition_window``). For each GPU-type group: resolve the short
+    scontrol ``gpu_type`` of the observed nodes. If exactly one type covers
+    the whole group, capacity is summed over **all** scontrol nodes of that
+    type (idle capacity included). Otherwise (unresolved or ambiguous
+    mapping) only the observed instances count, avoiding a guessed cross-type
+    total. Allocated is capped at total.
     """
-    norm = name.replace("_", "-")
-    matches = [p for p in scontrol_parts if norm in p["name"].replace("_", "-")]
-    if not matches:
-        return None
-
-    seen = []
-    for p in matches:
-        for n in p["nodes"].split(","):
-            if n and n != "(null)" and n not in seen:
-                seen.append(n)
-
-    state = "UP" if {p["state"] for p in matches} == {"UP"} else "MIXED"
-    return {"name": matches[0]["name"], "nodes": ",".join(seen),
-            "state": state, "slurm_partitions": [p["name"] for p in matches]}
+    nodes_by_name = {n["name"]: n for n in nodes}
+    for g in groups:
+        observed = [nodes_by_name[i]
+                    for i in instances.get(g["name"], ())
+                    if i in nodes_by_name]
+        types = {n["gpu_type"] for n in observed if n["gpu_type"]}
+        if len(types) == 1:
+            short = next(iter(types))
+            scope = [n for n in nodes if n["gpu_type"] == short]
+        else:
+            scope = observed
+        total = sum(n["gpus"] for n in scope)
+        alloc = sum(allocs.get(n["name"], 0) for n in scope)
+        g["gpus_alloc"] = int(min(alloc, total))
+        g["gpus_total"] = int(total)
+    return groups
 
 
 @app.get("/api/partitions")
 def api_partitions(since_hours: float = Query(24, gt=0, le=168),
-                   group_by: str = Query("partition", pattern="^(partition|gpu_type)$")):
-    parts, trend, start, now, step = _partition_window(since_hours, group_by)
-    scontrol_parts = _cached("scontrol_partitions", 300, show_partitions)
-    for p in parts:
-        sp = _match_scontrol_partition(p["name"], scontrol_parts)
-        if sp:
-            p.update(sp)
+                   running_only: bool = Query(False)):
+    groups, trend, instances, start, now, step = _partition_window(since_hours, running_only)
+    nodes = _cached("scontrol_nodes", 30, show_nodes)
+    _, _, allocs = _node_current()
+    _gpu_capacity(groups, instances, nodes, allocs)
     return {
         "window": {"start": start, "end": now},
         "step": step,
-        "partitions": parts,
+        "partitions": groups,
         "trend": trend,
     }
 
@@ -447,7 +523,11 @@ def _node_current():
 
 
 @app.get("/api/nodes")
-def api_nodes(gpu_only: bool = True):
+def api_nodes(gpu_only: bool = True, refresh: bool = Query(False)):
+    if refresh:
+        # Forced refresh bypasses the dashboard's normal 30-second
+        # scontrol/Prometheus cache instead of redrawing cached data.
+        _invalidate_cache("scontrol_nodes", "node_current")
     nodes = _cached("scontrol_nodes", 30, show_nodes)
     if gpu_only:
         nodes = [n for n in nodes if n["gpus"]]
@@ -471,9 +551,48 @@ def api_nodes(gpu_only: bool = True):
     }
 
 
+def _node_job_start(name, now):
+    """Earliest sacct start of jobs actively reporting on a node.
+
+    Falls back to a six-hour window when the node has no live GPU jobs,
+    sacct is unavailable, or no start value parses. Starts older than seven
+    days are clamped to bound the window (and the payload).
+    """
+    fallback_start = now - 6 * 3600
+    try:
+        live = {
+            s["metric"]["slurmjobid"]
+            for s in get_prom().query_instant(
+                'count by (slurmjobid) (slurm_job_utilization_gpu{instance="%s"})'
+                % name
+            )
+            if s["metric"].get("slurmjobid")
+        }
+    except PrometheusError:
+        return fallback_start
+    if not live:
+        return fallback_start
+    start_iso = datetime.fromtimestamp(
+        now - 7 * 86400, tz=timezone.utc
+    ).strftime("%Y-%m-%d")
+    try:
+        meta = sacct_jobs(sorted(live), start_iso)
+    except SlurmError:
+        return fallback_start
+    starts = [e for e in (_sacct_epoch((meta.get(j) or {}).get("start"))
+                          for j in live) if e]
+    if not starts:
+        return fallback_start
+    return max(min(starts), now - 7 * 86400)
+
+
 @app.get("/api/nodes/{name}")
-def api_node_detail(name: str, window_hours: float = Query(1, gt=0, le=48)):
-    start, now = _job_window(window_hours)
+def api_node_detail(name: str, view: str = Query("job_start", pattern="^(job_start|1|6|24)$")):
+    now = int(time.time())
+    if view == "job_start":
+        start = _node_job_start(name, now)
+    else:
+        start = now - int(float(view) * 3600)
     step = _step_for_range(now - start)
     prom = get_prom()
 
@@ -491,9 +610,10 @@ def api_node_detail(name: str, window_hours: float = Query(1, gt=0, le=48)):
         )
         return util, vram
 
-    util, vram = _cached(("nodedetail", name, window_hours), 30, fetch)
+    util, vram = _cached(("nodedetail", name, view, start), 30, fetch)
     return {
         "node": name,
+        "view": view,
         "window": {"start": start, "end": now},
         "step": step,
         "series": {
