@@ -220,11 +220,15 @@ async function loadJobDetail(jobid) {
   if (m.end) metaBits.push("end " + m.end);
   $("jobDetailMeta").textContent = metaBits.join(" · ");
   const traces = [];
+  const utilPts = []; // [ts_ms, value] across all utilization series
   data.series.utilization.forEach((s, i) => {
     const dev = s.metric.gpu !== undefined ? "GPU " + s.metric.gpu : s.metric.instance;
+    const x = s.values.map((v) => v[0] * 1000);
+    const y = s.values.map((v) => v[1]);
+    x.forEach((t, j) => utilPts.push([t, y[j]]));
     traces.push({
       type: "scatter", mode: "lines", name: dev + " util %",
-      x: s.values.map((v) => v[0] * 1000), y: s.values.map((v) => v[1]),
+      x, y,
       line: { width: 1.5, color: COLORS[i % COLORS.length] },
     });
   });
@@ -237,22 +241,29 @@ async function loadJobDetail(jobid) {
       yaxis: "y2",
     });
   });
-  // Lifecycle markers on the utilization axis: open circle at job start,
-  // triangle at job end. Only drawn inside the returned window; running
-  // jobs have no end marker.
-  const w0 = data.window.start * 1000, w1 = data.window.end * 1000;
-  if (m.start_epoch && m.start_epoch * 1000 >= w0 && m.start_epoch * 1000 <= w1) {
+  // Timeline delimiters: an open circle where the utilization line starts
+  // and a triangle where it ends, sitting on the line (y = mean across the
+  // job's GPUs at that timestamp). Hidden from the legend.
+  if (utilPts.length) {
+    let firstTs = Infinity, lastTs = -Infinity;
+    utilPts.forEach((p) => {
+      if (p[0] < firstTs) firstTs = p[0];
+      if (p[0] > lastTs) lastTs = p[0];
+    });
+    const meanAt = (ts) => {
+      let sum = 0, n = 0;
+      utilPts.forEach((p) => { if (p[0] === ts) { sum += p[1]; n += 1; } });
+      return sum / n;
+    };
     traces.push({
-      type: "scatter", mode: "markers", name: "Job start",
-      x: [m.start_epoch * 1000], y: [102],
+      type: "scatter", mode: "markers", name: "Job start", showlegend: false,
+      x: [firstTs], y: [meanAt(firstTs)],
       marker: { symbol: "circle-open", size: 11, color: "#dce3f2",
                 line: { width: 2 } },
     });
-  }
-  if (m.end_epoch && m.end_epoch * 1000 >= w0 && m.end_epoch * 1000 <= w1) {
     traces.push({
-      type: "scatter", mode: "markers", name: "Job end",
-      x: [m.end_epoch * 1000], y: [102],
+      type: "scatter", mode: "markers", name: "Job end", showlegend: false,
+      x: [lastTs], y: [meanAt(lastTs)],
       marker: { symbol: "triangle-up", size: 11, color: "#ffa726" },
     });
   }
