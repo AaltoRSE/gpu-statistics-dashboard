@@ -49,11 +49,18 @@ tr.row.sel td { background: #233052; }
 .badge.PENDING, .badge.IDLE { background:#26304a; color:var(--dim); }
 .badge.FAILED, .badge.CANCELLED, .badge.TIMEOUT { background:#3a1e22; color:var(--bad); }
 .badge.DRAIN, .badge.DOWN, .badge.DRAINING { background:#3a2c14; color:var(--warn); }
-.bar { display:inline-block; height:8px; border-radius:4px; background: var(--acc); vertical-align:middle; }
+.bar-track { display:inline-block; width:64px; height:8px; border-radius:4px; background:var(--panel2);
+  vertical-align:middle; margin-right:6px; overflow:hidden; }
+.bar { display:block; height:100%; border-radius:4px; background: var(--acc); }
 .bar.lo { background: var(--bad); } .bar.mid { background: var(--warn); } .bar.hi { background: var(--ok); }
+th.sorted-asc, th.sorted-desc { color: var(--text); font-weight: 700; }
+th.sorted-asc::after { content:" \25B2"; font-size:9px; color:var(--acc); }
+th.sorted-desc::after { content:" \25BC"; font-size:9px; color:var(--acc); }
+.joblink { color: var(--acc); text-decoration: none; }
+.joblink:hover { text-decoration: underline; }
 .chart { width:100%; height:340px; }
 .chart.tall { height:420px; }
-#jobDetailPlot, #nodeDetailPlot { min-height: 360px; }
+#jobDetailPlot, #nodeDetailUtilPlot, #nodeDetailVramPlot { min-height: 360px; }
 .empty { color:var(--dim); font-size:13px; padding:18px 0; text-align:center; }
 #status { position: fixed; right: 14px; bottom: 12px; font-size: 11px; color: var(--dim);
   background: var(--panel); border:1px solid var(--line); border-radius:6px; padding:4px 10px; opacity:.85; }
@@ -194,14 +201,14 @@ tr.row.sel td { background: #233052; }
         <table id="nodeTable">
           <thead><tr>
             <th data-k="name">Node</th><th data-k="state">State</th><th data-k="gpu_type">GPU type</th>
-            <th class="num" data-k="gpus">GPUs</th><th class="num" data-k="current_util">Util now %</th>
-            <th class="num" data-k="current_vram">VRAM %</th><th class="num" data-k="cpus">CPUs</th>
-            <th>Partitions</th><th>Active jobs</th>
+            <th class="num" data-k="gpus_alloc">GPUs</th><th class="num" data-k="current_util">Util now %</th>
+            <th class="num" data-k="current_vram">VRAM %</th><th class="num" data-k="cpus_alloc">CPUs</th>
+            <th>Active jobs</th>
           </tr></thead>
           <tbody></tbody>
         </table>
       </div>
-      <div class="hint">Instant values from Prometheus (<code>slurm_job_*</code> exporter); states from <code>scontrol show nodes</code>. Click a row for the node&rsquo;s GPU time series.</div>
+      <div class="hint">Instant values from Prometheus (<code>slurm_job_*</code> exporter); states from <code>scontrol show nodes</code>. GPUs/CPUs show allocated/total. Click a row for the node&rsquo;s GPU time series.</div>
     </div>
     <div class="card" id="nodeDetailCard" style="margin-top:14px; display:none">
       <h2 id="nodeDetailTitle">Node detail</h2>
@@ -214,7 +221,10 @@ tr.row.sel td { background: #233052; }
           </select>
         </label>
       </div>
-      <div id="nodeDetailPlot" class="chart tall"></div>
+      <h3 class="small" style="margin:10px 0 4px">GPU utilization %</h3>
+      <div id="nodeDetailUtilPlot" class="chart"></div>
+      <h3 class="small" style="margin:14px 0 4px">GPU VRAM %</h3>
+      <div id="nodeDetailVramPlot" class="chart"></div>
     </div>
   </section>
 </main>

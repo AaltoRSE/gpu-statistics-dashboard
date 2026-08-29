@@ -56,8 +56,8 @@ function pctBar(v) {
   if (v === null || v === undefined) return "";
   const p = Math.max(0, Math.min(100, v));
   const cls = p < 40 ? "lo" : p < 75 ? "mid" : "hi";
-  const w = p * 1.2;
-  return '<span class="bar ' + cls + '" style="width:' + w.toFixed(0) + 'px"></span> ' + p.toFixed(0) + "%";
+  return '<span class="bar-track"><span class="bar ' + cls +
+    '" style="width:' + p.toFixed(0) + '%"></span></span>' + p.toFixed(0) + "%";
 }
 
 function stateBadge(s) {
@@ -93,19 +93,28 @@ function showTab(name) {
     b.classList.toggle("active", b.dataset.tab === name));
   document.querySelectorAll(".tabpage").forEach((p) =>
     p.classList.toggle("active", p.id === "tab-" + name));
-  if (name === "jobs" && !loaded.jobs) loadJobs();
-  if (name === "partitions" && !loaded.partitions) loadPartitions();
-  if (name === "nodes" && !loaded.nodes) loadNodes();
+  let p = Promise.resolve();
+  if (name === "jobs" && !loaded.jobs) p = loadJobs();
+  if (name === "partitions" && !loaded.partitions) p = loadPartitions();
+  if (name === "nodes" && !loaded.nodes) p = loadNodes();
   window.dispatchEvent(new Event("resize")); // refit hidden plots
+  return p;
 }
 
-document.querySelectorAll("nav.tabs button").forEach((b) =>
-  b.addEventListener("click", () => showTab(b.dataset.tab)));
+
+/* ---------------- sort indicators ---------------- */
+
+function markSort(tableEl, key, dir) {
+  tableEl.querySelectorAll("th").forEach((th) => {
+    th.classList.toggle("sorted-asc", th.dataset.k === key && dir === "asc");
+    th.classList.toggle("sorted-desc", th.dataset.k === key && dir === "desc");
+  });
+}
 
 /* ---------------- jobs ---------------- */
 
 let jobRows = [];
-let jobSortKey = null;
+let jobSort = { key: "gpu_hours_eff", dir: "desc" };
 
 async function loadJobs() {
   const params = new URLSearchParams({ since_hours: $("jWindow").value, limit: "500" });
@@ -125,16 +134,17 @@ async function loadJobs() {
     data.count + " jobs · " + tsToDate(w.start) + " → " + tsToDate(w.end) + " UTC";
   renderJobBar();
   renderJobTable(sortJobRows());
+  markSort($("jobTable"), jobSort.key, jobSort.dir);
   loaded.jobs = true;
 }
 
 function sortJobRows() {
   const rows = jobRows.slice();
-  const k = jobSortKey || "gpu_hours_eff";
+  const k = jobSort.key, s = jobSort.dir === "asc" ? 1 : -1;
   rows.sort((a, b) => {
     const va = a[k], vb = b[k];
-    if (typeof va === "number" && typeof vb === "number") return vb - va;
-    return String(va || "").localeCompare(String(vb || ""));
+    if (typeof va === "number" && typeof vb === "number") return (va - vb) * s;
+    return String(va || "").localeCompare(String(vb || "")) * s;
   });
   return rows;
 }
@@ -198,6 +208,7 @@ async function loadJobDetail(jobid) {
   $("jobDetailCard").scrollIntoView({ behavior: "smooth", block: "nearest" });
   const data = await api("/api/jobs/" + jobid + "?since_hours=" + $("jWindow").value);
   if (token !== jobDetailToken) return;
+  setUrl("/job/" + jobid);
   const m = data.metadata || {};
   $("jobDetailTitle").textContent =
     "Job " + jobid + " — " + (m.name || "?") + " (" + (m.user || "?") + ") · " + (m.state || "?");
@@ -245,16 +256,20 @@ function jobControlsChanged() {
 $("jWindow").addEventListener("change", () => { loadJobs(); });
 $("jUser").addEventListener("input", jobControlsChanged);
 $("jSearch").addEventListener("input", jobControlsChanged);
-$("jPartition").addEventListener("change", loadJobs);
 $("jobTable").querySelectorAll("th[data-k]").forEach((th) =>
   th.addEventListener("click", () => {
-    jobSortKey = th.dataset.k === jobSortKey ? null : th.dataset.k;
+    const k = th.dataset.k;
+    jobSort = (k === jobSort.key)
+      ? { key: k, dir: jobSort.dir === "desc" ? "asc" : "desc" }
+      : { key: k, dir: "desc" };
     renderJobTable(sortJobRows());
+    markSort($("jobTable"), jobSort.key, jobSort.dir);
   }));
 
 /* ---------------- partitions ---------------- */
 
 let partRows = [];
+let partSort = { key: "mean_util", dir: "desc" };
 
 async function loadPartitions() {
   const params = new URLSearchParams({
@@ -269,6 +284,7 @@ async function loadPartitions() {
   renderPartBar();
   renderPartTrend(data.trend);
   renderPartTable();
+  markSort($("partTable"), partSort.key, partSort.dir);
   loaded.partitions = true;
 }
 
@@ -327,21 +343,23 @@ $("pGroup").addEventListener("change", partControlsChanged);
 $("partTable").querySelectorAll("th[data-k]").forEach((th) =>
   th.addEventListener("click", () => {
     const k = th.dataset.k;
-    const newDir = th.dataset.dir === "desc" ? "asc" : "desc";
-    $("partTable").querySelectorAll("th").forEach((t) => delete t.dataset.dir);
-    th.dataset.dir = newDir;
-    const s = newDir === "asc" ? 1 : -1;
+    partSort = (k === partSort.key)
+      ? { key: k, dir: partSort.dir === "desc" ? "asc" : "desc" }
+      : { key: k, dir: "desc" };
+    const s = partSort.dir === "asc" ? 1 : -1;
     partRows.sort((a, b) => {
       const va = a[k], vb = b[k];
       if (typeof va === "number" && typeof vb === "number") return (va - vb) * s;
       return String(va || "").localeCompare(String(vb || "")) * s;
     });
     renderPartTable();
+    markSort($("partTable"), partSort.key, partSort.dir);
   }));
 
 /* ---------------- nodes ---------------- */
 
 let nodeRows = [];
+let nodeSort = { key: "name", dir: "asc" };
 
 async function loadNodes() {
   const params = new URLSearchParams({ gpu_only: String($("nGpuOnly").checked) });
@@ -378,27 +396,34 @@ function renderNodeTable() {
   tb.innerHTML = rows.map((n) => {
     const u = n.current_util;
     const busy = u !== null && u > 0;
+    const jobs = (n.active_jobs || []).map((j) =>
+      '<a class="joblink" data-job="' + j.jobid +
+      '" title="' + (j.user || "") + " · " + j.jobid + '">' + j.jobid + "</a>"
+    ).join(", ") || "—";
     return `
     <tr class="row" data-node="${n.name}" style="${busy ? "" : "opacity:.55"}">
       <td>${n.name}</td>
       <td>${stateBadge(n.state)}</td>
       <td>${n.gpu_type || "—"}</td>
-      <td class="num">${n.gpus}</td>
+      <td class="num" title="allocated / total GPUs">${n.gpus_alloc !== undefined ? n.gpus_alloc : 0}/${n.gpus}</td>
       <td class="num">${u === null ? "idle" : pctBar(u)}</td>
       <td class="num">${n.current_vram === null ? "—" : fmt(n.current_vram)}</td>
-      <td class="num">${n.cpus}</td>
-      <td class="small">${n.partitions}</td>
-      <td class="small">${(n.active_jobs || []).map((j) => j.jobid).join(", ") || "—"}</td>
+      <td class="num" title="allocated / total CPUs">${n.cpus_alloc !== undefined ? n.cpus_alloc : 0}/${n.cpus}</td>
+      <td class="small">${jobs}</td>
     </tr>`;
   }).join("");
   tb.querySelectorAll("tr.row").forEach((tr) =>
-    tr.addEventListener("click", () => loadNodeDetail(tr.dataset.node)));
+    tr.addEventListener("click", (e) => {
+      const link = e.target.closest("a.joblink");
+      if (link) { e.stopPropagation(); openJob(link.dataset.job); return; }
+      loadNodeDetail(tr.dataset.node);
+    }));
+  markSort($("nodeTable"), nodeSort.key, nodeSort.dir);
   $("nCount").textContent = rows.length + " / " + nodeRows.length;
 }
 
 let nodeDetailToken = 0;
 let nodeDetailName = null;
-
 async function loadNodeDetail(name) {
   nodeDetailName = name;
   const token = ++nodeDetailToken;
@@ -407,35 +432,39 @@ async function loadNodeDetail(name) {
   $("nodeDetailCard").scrollIntoView({ behavior: "smooth", block: "nearest" });
   const data = await api("/api/nodes/" + name + "?window_hours=" + $("ndWindow").value);
   if (token !== nodeDetailToken) return;
-  $("nodeDetailTitle").textContent = "Node " + name + " — GPU utilization";
-  const traces = [];
+  setUrl("/node/" + name);
+  $("nodeDetailTitle").textContent = "Node " + name;
+  const utilTraces = [];
   data.series.utilization.forEach((s, i) => {
     const dev = "GPU " + (s.metric.gpu !== undefined ? s.metric.gpu : "?");
     const job = s.metric.slurmjobid || "";
-    traces.push({
+    utilTraces.push({
       type: "scatter", mode: "lines", name: dev + (job ? " (job " + job + ")" : ""),
       x: s.values.map((v) => v[0] * 1000), y: s.values.map((v) => v[1]),
       line: { width: 1.5, color: COLORS[i % COLORS.length] },
     });
   });
+  const vramTraces = [];
   data.series.vram.forEach((s, i) => {
-    traces.push({
+    const dev = "GPU " + (s.metric.gpu !== undefined ? s.metric.gpu : "?");
+    const job = s.metric.slurmjobid || "";
+    vramTraces.push({
       type: "scatter", mode: "lines",
-      name: "VRAM " + (s.metric.gpu !== undefined ? s.metric.gpu : "") + " %",
+      name: dev + (job ? " (job " + job + ")" : ""),
       x: s.values.map((v) => v[0] * 1000), y: s.values.map((v) => v[1]),
-      line: { width: 1, dash: "dot", color: COLORS[(i + 5) % COLORS.length] },
-      yaxis: "y2",
+      line: { width: 1, dash: "dot", color: COLORS[i % COLORS.length] },
     });
   });
-  Plotly.newPlot("nodeDetailPlot", traces, {
-    margin: { l: 46, r: 46, t: 10, b: 34 },
+  const base = {
+    margin: { l: 46, r: 20, t: 10, b: 34 },
     paper_bgcolor: "rgba(0,0,0,0)", plot_bgcolor: "rgba(0,0,0,0)",
     font: { color: "#dce3f2", size: 11 },
-    showlegend: true, legend: { orientation: "h", y: -0.18 },
-    yaxis: { title: "util %", range: [0, 105], gridcolor: "#2a3552" },
-    yaxis2: { title: "VRAM %", overlaying: "y", side: "right", range: [0, 105], gridcolor: "#2a3552" },
+    showlegend: true, legend: { orientation: "h", y: -0.2 },
+    yaxis: { title: "%", range: [0, 105], gridcolor: "#2a3552" },
     xaxis: { type: "date", gridcolor: "#2a3552" },
-  }, PLOT_CFG);
+  };
+  Plotly.newPlot("nodeDetailUtilPlot", utilTraces, base, PLOT_CFG);
+  Plotly.newPlot("nodeDetailVramPlot", vramTraces, base, PLOT_CFG);
 }
 
 let nodeDebounce = null;
@@ -466,10 +495,10 @@ $("ndWindow").addEventListener("change", () => {
 $("nodeTable").querySelectorAll("th[data-k]").forEach((th) =>
   th.addEventListener("click", () => {
     const k = th.dataset.k;
-    const newDir = th.dataset.dir === "desc" ? "asc" : "desc";
-    $("nodeTable").querySelectorAll("th").forEach((t) => delete t.dataset.dir);
-    th.dataset.dir = newDir;
-    const s = newDir === "asc" ? 1 : -1;
+    nodeSort = (k === nodeSort.key)
+      ? { key: k, dir: nodeSort.dir === "desc" ? "asc" : "desc" }
+      : { key: k, dir: k === "name" ? "asc" : "desc" };
+    const s = nodeSort.dir === "asc" ? 1 : -1;
     nodeRows.sort((a, b) => {
       const va = a[k], vb = b[k];
       if (va === null || va === undefined) return 1;
@@ -480,7 +509,45 @@ $("nodeTable").querySelectorAll("th[data-k]").forEach((th) =>
     renderNodeTable();
   }));
 
+/* ---------------- deep links ----------------
+ * Shareable URLs: /job/<id> opens the Jobs tab with that job's detail,
+ * /node/<name> opens the Nodes tab with that node's detail, /jobs,
+ * /partitions and /nodes open the plain tabs. The server serves the SPA
+ * shell for all of them; this code restores the view from the path and
+ * keeps the URL in sync via history.pushState. */
+
+function setUrl(path) {
+  if (location.pathname + location.search !== path) {
+    history.pushState({ path }, "", path);
+  }
+}
+
+function openJob(jobid) {
+  showTab("jobs").then(() => loadJobDetail(jobid)).catch(() => {});
+}
+
+function restoreFromUrl() {
+  let m = location.pathname.match(/^\/job\/([^/]+)\/?$/);
+  if (m) { showTab("jobs").then(() => loadJobDetail(m[1])).catch(() => {}); return; }
+  m = location.pathname.match(/^\/node\/([^/]+)\/?$/);
+  if (m) { showTab("nodes").then(() => loadNodeDetail(m[1])).catch(() => {}); return; }
+  if (location.pathname === "/jobs") { showTab("jobs"); return; }
+  if (location.pathname === "/partitions") { showTab("partitions"); return; }
+  if (location.pathname === "/nodes") { showTab("nodes"); return; }
+}
+
+window.addEventListener("popstate", restoreFromUrl);
+document.querySelectorAll("nav.tabs button").forEach((b) =>
+  b.addEventListener("click", () => {
+    showTab(b.dataset.tab);
+    setUrl("/" + b.dataset.tab);
+  }));
+
 /* ---------------- init ---------------- */
 
 checkHealth();
-loadJobs().catch(() => {});
+if (location.pathname === "/" || location.pathname === "") {
+  loadJobs().catch(() => {});
+} else {
+  restoreFromUrl();
+}
