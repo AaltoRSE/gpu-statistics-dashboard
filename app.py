@@ -99,7 +99,7 @@ def _fetch_job_window(since_hours, include_vram=True):
         vram = []
         if include_vram:
             vram = get_prom().query_range(
-                "avg by (slurmjobid, instance, job) (slurm_job_memory_usage_gpu / "
+                "avg by (slurmjobid, instance, gpu) (slurm_job_memory_usage_gpu / "
                 "slurm_job_memory_total_gpu * 100)",
                 start, now, step,
             )
@@ -208,6 +208,29 @@ def health():
         "prometheus": get_prom().api_base,
         "time": datetime.now(timezone.utc).isoformat(),
     }
+
+
+# Deep-link routes: the SPA is a single page, so every view path serves the
+# same shell and the frontend (app.js) restores state from the URL path.
+_VIEW_PATHS = ["/jobs", "/partitions", "/nodes"]
+
+
+for _p in _VIEW_PATHS:
+    app.add_api_route(
+        _p,
+        lambda: FileResponse(os.path.join(STATIC, "index.html")),
+        include_in_schema=False,
+    )
+
+
+@app.get("/job/{jobid}")
+def job_page(jobid: str):
+    return FileResponse(os.path.join(STATIC, "index.html"))
+
+
+@app.get("/node/{nodename}")
+def node_page(nodename: str):
+    return FileResponse(os.path.join(STATIC, "index.html"))
 
 
 @app.get("/api/jobs")
@@ -395,9 +418,14 @@ def _node_current():
         active = prom.query_instant(
             "max by (instance, slurmjobid, job, user) (slurm_job_utilization_gpu)"
         )
-        return inst_util, inst_vram, active
+        # The exporter publishes one utilization series per allocated GPU, so
+        # the series count per node equals the allocated GPU count. The ``gpu``
+        # label is job-local (every 1-GPU job says gpu="0"), so it must not be
+        # used for allocation accounting.
+        alloc = prom.query_instant("count by (instance) (slurm_job_utilization_gpu)")
+        return inst_util, inst_vram, active, alloc
 
-    inst_util, inst_vram, active = _cached("node_current", 30, fetch)
+    inst_util, inst_vram, active, alloc = _cached("node_current", 30, fetch)
     cur = {}
     for s in inst_util:
         cur[s["metric"]["instance"]] = {"util": float(s["value"][1])}
@@ -414,7 +442,8 @@ def _node_current():
                 "util": float(s["value"][1]),
             }
         )
-    return cur, jobs_by_node
+    allocs = {s["metric"]["instance"]: int(float(s["value"][1])) for s in alloc}
+    return cur, jobs_by_node, allocs
 
 
 @app.get("/api/nodes")
@@ -423,13 +452,14 @@ def api_nodes(gpu_only: bool = True):
     if gpu_only:
         nodes = [n for n in nodes if n["gpus"]]
     try:
-        cur, jobs_by_node = _node_current()
+        cur, jobs_by_node, allocs = _node_current()
     except PrometheusError:
-        cur, jobs_by_node = {}, {}
+        cur, jobs_by_node, allocs = {}, {}, {}
     for n in nodes:
         c = cur.get(n["name"], {})
         n["current_util"] = c.get("util")
         n["current_vram"] = c.get("vram")
+        n["gpus_alloc"] = min(allocs.get(n["name"], 0), n["gpus"])
         n["active_jobs"] = sorted(
             jobs_by_node.get(n["name"], []),
             key=lambda j: j["util"], reverse=True,
@@ -453,7 +483,9 @@ def api_node_detail(name: str, window_hours: float = Query(1, gt=0, le=48)):
             start, now, step,
         )
         vram = prom.query_range(
-            'avg by (gpu) (slurm_job_memory_usage_gpu{instance="%s"} / '
+            # ``gpu`` is job-local (every 1-GPU job reports gpu="0"), so the
+            # grouping must keep ``slurmjobid`` or co-located jobs merge.
+            'avg by (slurmjobid, gpu) (slurm_job_memory_usage_gpu{instance="%s"} / '
             'slurm_job_memory_total_gpu{instance="%s"} * 100)' % (name, name),
             start, now, step,
         )

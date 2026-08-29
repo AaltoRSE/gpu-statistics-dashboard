@@ -50,8 +50,13 @@ class FakeProm:
                      "values": [[1000, "12.5"], [1120, "13.5"]]},
                 ]
             if "instance=" in query:
+                # Two co-located 1-GPU jobs both report gpu="0" (job-local
+                # label) — they must stay separate series.
                 return [
-                    {"metric": {"gpu": "0"}, "values": [[1000, "30"], [1120, "32"]]},
+                    {"metric": {"slurmjobid": "1", "gpu": "0"},
+                     "values": [[1000, "30"], [1120, "32"]]},
+                    {"metric": {"slurmjobid": "2", "gpu": "0"},
+                     "values": [[1000, "45"], [1120, "47"]]},
                 ]
             return [
                 {"metric": {"slurmjobid": "1", "instance": "gpu1", "job": "p1"},
@@ -61,6 +66,11 @@ class FakeProm:
 
     def query_instant(self, query, time=None):
         self.calls.append(("instant", query))
+        if "count by (instance)" in query:
+            return [
+                {"metric": {"instance": "gpu1"}, "value": [1, "5"]},
+                {"metric": {"instance": "gpu2"}, "value": [1, "1"]},
+            ]
         if "instance) (slurm_job_utilization_gpu)" in query:
             return [
                 {"metric": {"instance": "gpu1"}, "value": [1, "55.5"]},
@@ -196,12 +206,30 @@ def test_nodes_endpoint(client):
     assert node["active_jobs"][0]["jobid"] == "9"
 
 
-def test_nodes_detail_200(client):
+def test_nodes_gpus_alloc(client):
+    r = client.get("/api/nodes")
+    node = r.json()["nodes"][0]
+    assert node["gpus_alloc"] == 5  # from count by (instance) fixture
+    assert node["cpus_alloc"] == 16  # from scontrol CPUAlloc
+
+
+def test_nodes_detail_vram_keeps_coresident_jobs(client):
     r = client.get("/api/nodes/gpu1", params={"window_hours": 1})
-    assert r.status_code == 200
     data = r.json()
-    assert data["series"]["utilization"]
-    assert data["series"]["vram"]
+    vram = data["series"]["vram"]
+    # Two co-located 1-GPU jobs both label their device gpu="0"; the fix
+    # keeps slurmjobid in the grouping so they must remain separate series.
+    assert len(vram) == 2
+    assert {s["metric"]["slurmjobid"] for s in vram} == {"1", "2"}
+
+
+def test_deep_link_routes_serve_spa(client):
+    for path in ["/jobs", "/partitions", "/nodes", "/job/19807768",
+                 "/node/dgx1"]:
+        r = client.get(path)
+        assert r.status_code == 200
+        assert r.headers["content-type"].startswith("text/html")
+        assert "Triton GPU Efficiency Dashboard" in r.text
 
 
 def test_match_scontrol_partition():
