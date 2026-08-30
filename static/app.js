@@ -973,9 +973,7 @@ function renderNodeTable() {
   tb.innerHTML = rows.map((n) => {
     const u = n.current_util;
     const busy = u !== null && u > 0;
-    const jobs = (n.active_jobs || []).map((j) =>
-      jobLink(j.jobid) + " " + userLink(j.user)
-    ).join(", ") || "—";
+    const jobs = (n.active_jobs || []).map((j) => jobLink(j.jobid)).join(", ") || "—";
     const name = escapeHtml(n.name);
     const gpuType = escapeHtml(n.gpu_type || "—");
     const gpusAlloc = escapeHtml(n.gpus_alloc !== undefined ? n.gpus_alloc : 0);
@@ -996,8 +994,6 @@ function renderNodeTable() {
   }).join("");
   tb.querySelectorAll("tr.row").forEach((tr) =>
     tr.addEventListener("click", (e) => {
-      const userEl = e.target.closest("a.userlink");
-      if (userEl) { e.stopPropagation(); openUser(userEl.dataset.user); return; }
       const link = e.target.closest("a.joblink");
       if (link) { e.stopPropagation(); openJob(link.dataset.job); return; }
       loadNodeDetail(tr.dataset.node);
