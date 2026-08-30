@@ -397,6 +397,11 @@ def node_page(nodename: str):
     return FileResponse(os.path.join(STATIC, "index.html"))
 
 
+@app.get("/partition/{partition}")
+def partition_page(partition: str):
+    return FileResponse(os.path.join(STATIC, "index.html"))
+
+
 @app.get("/user/{username}")
 def user_page(username: str):
     return FileResponse(os.path.join(STATIC, "index.html"))
@@ -587,12 +592,13 @@ def api_job_detail(jobid: str, since_hours: float = Query(24, gt=0, le=168)):
 
 
 def _partition_window(since_hours, running_only=False, now=None):
-    """GPU-type utilization window.
+    """Slurm-partition utilization window.
 
+    Groups are keyed by the Prometheus ``job`` label (the Slurm partition).
     Summary data keeps the ``slurmjobid`` label (per-job/per-node max, so the
     job identity survives for running-only matching); trend data is a plain
-    ``avg by (gpu_type)`` and has no job identity, so the matcher must be
-    injected into the metric selector before the aggregation.
+    ``avg by (job)`` and has no job identity, so the matcher must be injected
+    into the metric selector before the aggregation.
     """
     start, now = _job_window(since_hours, now)
     step = _step_for_range(now - start)
@@ -605,18 +611,18 @@ def _partition_window(since_hours, running_only=False, now=None):
 
     def fetch():
         stats = get_prom().query_range(
-            "max by (slurmjobid, instance, gpu_type) (slurm_job_utilization_gpu%s)"
+            "max by (slurmjobid, instance, job) (slurm_job_utilization_gpu%s)"
             % sel,
             start, now, step,
         )
         trend = get_prom().query_range(
-            "avg by (gpu_type) (slurm_job_utilization_gpu%s)" % sel,
+            "avg by (job) (slurm_job_utilization_gpu%s)" % sel,
             start, now, step,
         )
-        # Concurrent allocated GPUs per GPU type, for the window-average
+        # Concurrent allocated GPUs per partition, for the window-average
         # occupancy chart (same selector so running-only matches here too).
         occ = get_prom().query_range(
-            "count by (gpu_type) (slurm_job_utilization_gpu%s)" % sel,
+            "count by (job) (slurm_job_utilization_gpu%s)" % sel,
             start, now, step,
         )
         return stats, trend, occ, start, now, step
@@ -625,14 +631,14 @@ def _partition_window(since_hours, running_only=False, now=None):
     stats, trend, occ, start, now, step = _cached(key, 60, fetch)
     out = aggregate_partition_stats(stats)
     trend_out = {
-        s["metric"].get("gpu_type", "unknown"): _series_values(s) for s in trend
+        s["metric"].get("job", "unknown"): _series_values(s) for s in trend
     }
-    # Window-average allocated GPU count per GPU type, for mean occupancy.
+    # Window-average allocated GPU count per partition, for mean occupancy.
     occupancy = {}
     for s in occ:
         values = _series_values(s)
         if values:
-            name = s["metric"].get("gpu_type", "unknown")
+            name = s["metric"].get("job", "unknown")
             occupancy[name] = sum(v for _, v in values) / len(values)
     # Observed instances per group, for the capacity join in api_partitions.
     instances = {}
@@ -640,22 +646,22 @@ def _partition_window(since_hours, running_only=False, now=None):
         m = s["metric"]
         inst = m.get("instance", "")
         if inst:
-            instances.setdefault(m.get("gpu_type", "unknown"), set()).add(inst)
+            instances.setdefault(m.get("job", "unknown"), set()).add(inst)
     return out, trend_out, instances, occupancy, start, now, step
 
 
 def aggregate_partition_stats(stats):
-    """Time-weighted mean utilization per GPU type from collapsed-max series.
+    """Time-weighted mean utilization per partition from collapsed-max series.
 
     Each series is the per-(job, node) max utilization across its window;
     averaging samples is a time-weighted mean (GPU devices are collapsed, so
-    this is utilization, not GPU-hours). Groups are keyed by the ``gpu_type``
-    label.
+    this is utilization, not GPU-hours). Groups are keyed by the ``job``
+    label (the Slurm partition).
     """
     parts = {}
     for s in stats:
         m = s["metric"]
-        name = m.get("gpu_type", "unknown")
+        name = m.get("job", "unknown")
         values = _series_values(s)
         if not values:
             continue
@@ -681,30 +687,31 @@ def aggregate_partition_stats(stats):
 
 
 def _gpu_capacity(groups, instances, nodes, allocs):
-    """Join observed metric instances to scontrol node capacity.
+    """Join metric groups to scontrol partition capacity.
 
-    ``instances`` maps gpu_type -> observed instance names (built in
-    ``_partition_window``). For each GPU-type group: resolve the short
-    scontrol ``gpu_type`` of the observed nodes. If exactly one type covers
-    the whole group, capacity is summed over **all** scontrol nodes of that
-    type (idle capacity included). Otherwise (unresolved or ambiguous
-    mapping) only the observed instances count, avoiding a guessed cross-type
-    total. Allocated is capped at total.
+    ``instances`` maps partition -> observed instance names (built in
+    ``_partition_window``). Capacity is summed over **all** scontrol nodes
+    whose ``partitions`` list contains the group name (idle capacity
+    included); a node shared by several partitions therefore counts toward
+    each of them, matching how Slurm admits jobs to each. Allocated uses the
+    exact per-partition live GPU count from ``allocs`` (a shared node's
+    GPUs are counted only under the partition their jobs actually run in)
+    and is capped at total. Groups with no scontrol membership fall back to
+    their observed instances.
     """
     nodes_by_name = {n["name"]: n for n in nodes}
     for g in groups:
-        observed = [nodes_by_name[i]
-                    for i in instances.get(g["name"], ())
-                    if i in nodes_by_name]
-        types = {n["gpu_type"] for n in observed if n["gpu_type"]}
-        if len(types) == 1:
-            short = next(iter(types))
-            scope = [n for n in nodes if n["gpu_type"] == short]
+        members = [
+            n for n in nodes
+            if n["gpus"] and g["name"] in (n["partitions"] or "").split(",")
+        ]
+        if members:
+            scope = members
         else:
-            scope = observed
+            scope = [nodes_by_name[i] for i in instances.get(g["name"], ())
+                     if i in nodes_by_name]
         total = sum(n["gpus"] for n in scope)
-        alloc = sum(allocs.get(n["name"], 0) for n in scope)
-        g["gpus_alloc"] = int(min(alloc, total))
+        g["gpus_alloc"] = int(min(allocs.get(g["name"], 0), total))
         g["gpus_total"] = int(total)
     return groups
 
@@ -714,8 +721,8 @@ def api_partitions(since_hours: float = Query(24, gt=0, le=168),
                    running_only: bool = Query(False)):
     groups, trend, instances, occupancy, start, now, step = _partition_window(since_hours, running_only)
     nodes = _cached("scontrol_nodes", 30, show_nodes)
-    _, _, allocs = _node_current()
-    _gpu_capacity(groups, instances, nodes, allocs)
+    _, _, allocs_by_node, allocs_by_partition = _node_current()
+    _gpu_capacity(groups, instances, nodes, allocs_by_partition)
     for g in groups:
         avg_alloc = occupancy.get(g["name"])
         total = g.get("gpus_total") or 0
@@ -738,17 +745,17 @@ def api_partitions(since_hours: float = Query(24, gt=0, le=168),
 _VRAM_RECORD_CAP = 2000
 
 
-def _vram_job_records(since_hours, running_only=False, gpu_type=""):
+def _vram_job_records(since_hours, running_only=False, partition=""):
     """Per-job VRAM records for the utilization-filtered distribution chart.
 
-    Each record carries the job's time-weighted mean utilization, its
-    average per-GPU peak VRAM (GB), and its allocated GPU-hours from sacct.
-    Binning and the utilization range filter happen client-side so the
-    slider can rebin without refetching. A non-empty ``gpu_type`` keeps
-    only jobs of that GPU type, so the candidate ``total`` and the
-    enrichment cap apply to the selected type. Returns (records, total,
-    start, now, step) where ``total`` counts candidates before the
-    enrichment cap.
+    Each record carries the job's Slurm partition, its time-weighted mean
+    utilization, its average per-GPU peak VRAM (GB), and its allocated
+    GPU-hours from sacct. Binning and the utilization range filter happen
+    client-side so the slider can rebin without refetching. A non-empty
+    ``partition`` keeps only jobs of that partition, so the candidate
+    ``total`` and the enrichment cap apply to the selected partition.
+    Returns (records, total, start, now, step) where ``total`` counts
+    candidates before the enrichment cap.
     """
     start, now = _job_window(since_hours)
     step = _step_for_range(now - start)
@@ -760,8 +767,8 @@ def _vram_job_records(since_hours, running_only=False, gpu_type=""):
     jobs, start, now, step = _fetch_job_window(since_hours, include_vram=False)
     if live is not None:
         jobs = [j for j in jobs if j["jobid"] in live]
-    if gpu_type:
-        jobs = [j for j in jobs if j["gpu_type"] == gpu_type]
+    if partition:
+        jobs = [j for j in jobs if j["partition"] == partition]
     sel = "" if live is None else "{" + _jobid_matcher(live) + "}"
 
     def fetch():
@@ -788,6 +795,7 @@ def _vram_job_records(since_hours, running_only=False, gpu_type=""):
         records.append({
             "jobid": j["jobid"],
             "user": j["user"],
+            "partition": j["partition"],
             "gpu_type": j["gpu_type"],
             "mean_util": j["mean_util"],
             "vram_gb": round(sum(pk) / len(pk), 1),
@@ -813,8 +821,8 @@ def _vram_job_records(since_hours, running_only=False, gpu_type=""):
 @app.get("/api/partitions/vram")
 def api_part_vram(since_hours: float = Query(24, gt=0, le=168),
                   running_only: bool = Query(False),
-                  gpu_type: str = ""):
-    records, total, start, now, step = _vram_job_records(since_hours, running_only, gpu_type)
+                  partition: str = ""):
+    records, total, start, now, step = _vram_job_records(since_hours, running_only, partition)
     return {
         "window": {"start": start, "end": now},
         "step": step,
@@ -839,7 +847,8 @@ def _node_current():
         # the series count per node equals the allocated GPU count. The ``gpu``
         # label is job-local (every 1-GPU job says gpu="0"), so it must not be
         # used for allocation accounting.
-        alloc = prom.query_instant("count by (instance) (slurm_job_utilization_gpu)")
+        alloc = prom.query_instant(
+            "count by (instance, job) (slurm_job_utilization_gpu)")
         return inst_util, inst_vram, active, alloc
 
     inst_util, inst_vram, active, alloc = _cached("node_current", 30, fetch)
@@ -859,8 +868,18 @@ def _node_current():
                 "util": float(s["value"][1]),
             }
         )
-    allocs = {s["metric"]["instance"]: int(float(s["value"][1])) for s in alloc}
-    return cur, jobs_by_node, allocs
+    allocs_by_node = {}
+    allocs_by_partition = {}
+    for s in alloc:
+        m = s["metric"]
+        inst = m.get("instance", "")
+        if not inst:
+            continue
+        count = int(float(s["value"][1]))
+        allocs_by_node[inst] = allocs_by_node.get(inst, 0) + count
+        part = m.get("job", "unknown")
+        allocs_by_partition[part] = allocs_by_partition.get(part, 0) + count
+    return cur, jobs_by_node, allocs_by_node, allocs_by_partition
 
 
 @app.get("/api/nodes")
@@ -873,9 +892,9 @@ def api_nodes(gpu_only: bool = True, refresh: bool = Query(False)):
     if gpu_only:
         nodes = [n for n in nodes if n["gpus"]]
     try:
-        cur, jobs_by_node, allocs = _node_current()
+        cur, jobs_by_node, allocs, _ = _node_current()
     except PrometheusError:
-        cur, jobs_by_node, allocs = {}, {}, {}
+        cur, jobs_by_node, allocs, _ = {}, {}, {}, {}
     for n in nodes:
         c = cur.get(n["name"], {})
         n["current_util"] = c.get("util")

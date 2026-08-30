@@ -74,6 +74,10 @@ th.sorted-desc::after { content:" \25BC"; font-size:9px; color:var(--acc); }
 .joblink:hover { text-decoration: underline; }
 .userlink { color: var(--acc); text-decoration: none; }
 .userlink:hover { text-decoration: underline; }
+.nodelink { color: var(--acc); text-decoration: none; }
+.nodelink:hover { text-decoration: underline; }
+.partitionlink { color: var(--acc); text-decoration: none; }
+.partitionlink:hover { text-decoration: underline; }
 .chart { width:100%; height:340px; }
 .chart.tall { height:420px; }
 #jobDetailPlot, #nodeDetailUtilPlot, #nodeDetailVramPlot { min-height: 360px; }
@@ -207,11 +211,16 @@ header .theme-btn:hover { color:var(--text); }
       </div>
       <div class="results-loading">Data is loading&hellip;</div>
     </div>
-        <div class="card" id="jobDetailCard" style="margin-top:14px; display:none">
+    <div id="jobDetailResults" class="results-panel" style="display:none">
+      <div class="results-content">
+        <div class="card" id="jobDetailCard" style="margin-top:14px">
           <h2 id="jobDetailTitle">Job detail</h2>
           <div id="jobDetailPlot" class="chart tall"></div>
           <div class="hint" id="jobDetailMeta"></div>
         </div>
+      </div>
+      <div class="results-loading">Data is loading&hellip;</div>
+    </div>
   </section>
 
   <!-- ============ PARTITIONS ============ -->
@@ -224,17 +233,20 @@ header .theme-btn:hover { color:var(--text); }
           <option value="168" selected>last 7 days</option>
         </select>
       </label>
+      <label>Partition
+        <select id="pPartition"><option value="">all partitions</option></select>
+      </label>
       <label class="row"><input id="pRunning" type="checkbox"> Running only</label>
     </div>
     <div id="partitionsResults" class="results-panel">
       <div class="results-content">
       <div class="grid two">
         <div class="card">
-          <h2>Mean utilization by group</h2>
+          <h2>Mean utilization by partition</h2>
           <div class="chart" id="partBarPlot"></div>
         </div>
         <div class="card">
-          <h2>Mean occupancy by group</h2>
+          <h2>Mean occupancy by partition</h2>
           <div class="chart" id="partOccupancyPlot"></div>
         </div>
         <div class="card" style="grid-column:1 / -1">
@@ -242,14 +254,30 @@ header .theme-btn:hover { color:var(--text); }
           <div class="chart" id="partTrendPlot"></div>
         </div>
       </div>
-      <div class="results-panel" id="vramResults">
-        <div class="results-content">
+
+      <div class="card" style="margin-top:14px">
+        <h2>Partition table <span class="small" id="pCount"></span></h2>
+        <div style="overflow-x:auto">
+          <table id="partTable">
+            <thead><tr>
+              <th data-k="name">Partition</th>
+              <th class="num" data-k="gpus_total" title="allocated / total GPUs">GPUs</th>
+              <th class="num" data-k="job_count">Jobs</th>
+              <th class="num" data-k="mean_util">Mean util %</th>
+            </tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+        <div class="hint">Mean utilization is time-weighted over the window; GPU devices are collapsed to a per-job/per-node max, so it measures &ldquo;how busy&rdquo; rather than aggregate GPU-hours. Mean occupancy is the window-average share of the partition&rsquo;s capacity with an active job. GPUs show allocated/total capacity of the partition&rsquo;s nodes. Select a partition to scope the trend and the VRAM distribution to it.</div>
+      </div>
+      </div>
+      <div class="results-loading">Data is loading&hellip;</div>
+    </div>
+    <div id="vramResults" class="results-panel">
+      <div class="results-content">
         <div class="card" style="margin-top:14px">
         <h2>VRAM distribution by job</h2>
         <div class="controls bare">
-          <label>GPU type
-            <select id="vGpuType"><option value="">all GPU types</option></select>
-          </label>
           <label class="row"><input id="vNormalize" type="checkbox"> Normalize</label>
           <label>GPU utilization range
             <span class="range-slider">
@@ -266,25 +294,6 @@ header .theme-btn:hover { color:var(--text); }
         <div class="chart tall" id="partVramPlot"></div>
         <div class="hint" id="vramMeta"></div>
         </div>
-        </div>
-        <div class="results-loading">Data is loading&hellip;</div>
-      </div>
-
-      <div class="card" style="margin-top:14px">
-        <h2>GPU type table <span class="small" id="pCount"></span></h2>
-        <div style="overflow-x:auto">
-          <table id="partTable">
-            <thead><tr>
-              <th data-k="name">GPU type</th>
-              <th class="num" data-k="gpus_total" title="allocated / total GPUs">GPUs</th>
-              <th class="num" data-k="job_count">Jobs</th>
-              <th class="num" data-k="mean_util">Mean util %</th>
-            </tr></thead>
-            <tbody></tbody>
-          </table>
-        </div>
-        <div class="hint">Mean utilization is time-weighted over the window; GPU devices are collapsed to a per-job/per-node max, so it measures &ldquo;how busy&rdquo; rather than aggregate GPU-hours. Mean occupancy is the window-average share of the group&rsquo;s capacity with an active job. GPUs show allocated/total capacity of the node group.</div>
-      </div>
       </div>
       <div class="results-loading">Data is loading&hellip;</div>
     </div>
@@ -334,7 +343,12 @@ header .theme-btn:hover { color:var(--text); }
           </div>
           <div class="hint">GPU-hours = utilization-weighted GPU-hours over the window (mean util &times; GPU time); the selected user&rsquo;s job table below shows allocation-based effective GPU-hours. The user box filters the list as you type (no fetch). Press Enter &mdash; or click a table row &mdash; to finalize the selection; only then are that user&rsquo;s jobs fetched below. Click a column header to sort.</div>
         </div>
-        <div class="card" id="userJobsCard" style="margin-top:14px; display:none">
+      </div>
+      <div class="results-loading">Data is loading&hellip;</div>
+    </div>
+    <div id="userJobsResults" class="results-panel" style="display:none">
+      <div class="results-content">
+        <div class="card" id="userJobsCard">
           <h2 id="userJobsTitle">Jobs</h2>
           <div class="table-scroll" style="overflow-x:auto; max-height:420px; overflow-y:auto">
             <table id="userJobsTable">
@@ -390,7 +404,12 @@ header .theme-btn:hover { color:var(--text); }
         </div>
         <div class="hint">Instant values from Prometheus (<code>slurm_job_*</code> exporter). GPUs/CPUs show allocated/total. Click a row for the node&rsquo;s GPU time series.</div>
       </div>
-      <div class="card" id="nodeDetailCard" style="margin-top:14px; display:none">
+      </div>
+      <div class="results-loading">Data is loading&hellip;</div>
+    </div>
+    <div id="nodeDetailResults" class="results-panel" style="display:none">
+      <div class="results-content">
+      <div class="card" id="nodeDetailCard" style="margin-top:14px">
         <h2 id="nodeDetailTitle">Node detail</h2>
         <div class="controls" style="margin:8px 0">
           <label>Window

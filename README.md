@@ -66,25 +66,28 @@ OS-level preference applies when no choice has been saved.
   selected user's running jobs.
 
 ### Partitions tab
-- GPU-type view: mean utilization per GPU type (time-weighted over the
-  window), a utilization trend chart, a mean-occupancy chart (window
-  average of allocated GPUs / resolved capacity per type), and GPU capacity
-  per type.
+- Per-Slurm-partition view: mean utilization per partition (time-weighted
+  over the window), a utilization trend chart, a mean-occupancy chart
+  (window average of allocated GPUs / resolved capacity per partition),
+  and GPU capacity per partition.
 - **Running only** toggle restricts the bar, trend, and occupancy charts
   and the table to jobs with a live Prometheus GPU series.
-- `GPUs` shows allocated/total: when a group's nodes all resolve to one
-  scontrol GPU type the total spans every node of that type (idle capacity
-  included), otherwise only the observed instances count.
+- `GPUs` shows allocated/total: the total spans every scontrol node whose
+  partition list contains the partition (idle capacity included); the
+  allocated count is the exact per-partition live GPU count (a node shared
+  by several partitions counts only the GPUs its jobs actually use).
+- **Partition** selector: choosing one scopes the trend chart to that
+  partition and the VRAM distribution below (server-side filter); the URL
+  follows as `/partition/<name>` and restores on reload.
 - **VRAM distribution by job**: a histogram of jobs binned by their
   average per-GPU peak VRAM (16 GB bins) over the window, weighted by
-  allocated GPU-hours (sacct). A **GPU type** selector filters the
-  records server-side (same labels as the other three graphs); the
-  **Normalize** checkbox switches the bars to % of shown GPU-hours, and
-  the dual **GPU utilization range** slider filters jobs by mean
-  utilization client-side (no refetch). The card shares the tab's
-  window and **Running only** controls. While its fetch is in flight the
-  card shows a "Data is loading" popup on its own — the other graphs and
-  the table stay live and interactive.
+  allocated GPU-hours (sacct). The **Partition** selector filters the
+  records server-side; the **Normalize** checkbox switches the bars to %
+  of shown GPU-hours, and the dual **GPU utilization range** slider
+  filters jobs by mean utilization client-side (no refetch). The card
+  shares the tab's window and **Running only** controls. While its fetch
+  is in flight the card shows a "Data is loading" popup on its own — the
+  other graphs and the table stay live and interactive.
 
 ### Nodes tab
 - All GPU nodes with live utilization/VRAM (instant Prometheus query),
@@ -98,13 +101,16 @@ OS-level preference applies when no choice has been saved.
 
 ### Deep links and cross-tab links
 - Shareable URLs: `/job/<id>` (Jobs tab + job detail), `/node/<name>`
-  (Nodes tab + node detail), `/user/<name>` (Users tab with that user's
-  jobs fetched), plus `/jobs`, `/partitions`, `/users`, `/nodes` for the
-  plain tabs.
-- In the **Jobs** table the **User** column links to `/user/<name>`; in
-  the **Nodes** tab each active job's owner does the same (job IDs link
-  to the job detail); in the **Users** tab's job list each job ID links
-  to the job detail. Selecting a user anywhere keeps the URL in sync, so
+  (Nodes tab + node detail), `/partition/<name>` (Partitions tab scoped
+  to that partition — trend and VRAM), `/user/<name>` (Users tab with
+  that user's jobs fetched), plus `/jobs`, `/partitions`, `/users`,
+  `/nodes` for the plain tabs (plain `/partitions` clears any partition
+  selection).
+- Cross-tab links: in the **Jobs** and **Users** job tables the **User**,
+  **Partition**, and **Node** cells link to the Users, Partitions, and
+  Nodes tabs respectively; in the **Nodes** tab each node name links to
+  the node detail and each active job ID links to the job detail.
+  Selecting a user, node, or partition anywhere keeps the URL in sync, so
   a view can be shared after a single click.
 
 ## Running
@@ -138,8 +144,8 @@ Cluster access is **strictly read-only**: the app only issues `sacct -j`,
 | `GET /api/health` | backend + Prometheus connectivity |
 | `GET /api/jobs?since_hours=&user=&partition=&search=&limit=&running_only=` | job table (Prometheus discovery + sacct enrichment; `running_only=true` keeps only jobs with a live GPU series) plus `efficiency_high` / `efficiency_low` (30 most/least average-efficient jobs) |
 | `GET /api/jobs/{jobid}?since_hours=` | per-GPU utilization/VRAM series + metadata (incl. parsed `start_epoch`/`end_epoch`) |
-| `GET /api/partitions?since_hours=&running_only=` | utilization per GPU type + trend + `mean_occupancy` (window-average allocated share) + allocated/total GPU capacity |
-| `GET /api/partitions/vram?since_hours=&running_only=&gpu_type=` | per-job VRAM records for the distribution chart (average per-GPU peak VRAM in GB, mean utilization, allocated GPU-hours); `gpu_type` keeps only one GPU-type group. Binning and the utilization-range filter happen client-side. `total` counts all candidates in the window; `jobs` holds only the top 2000 by effective GPU-hours, since a `sacct -j` over the whole window would time out |
+| `GET /api/partitions?since_hours=&running_only=` | utilization per Slurm partition + trend + `mean_occupancy` (window-average allocated share) + allocated/total GPU capacity |
+| `GET /api/partitions/vram?since_hours=&running_only=&partition=` | per-job VRAM records for the distribution chart (average per-GPU peak VRAM in GB, mean utilization, allocated GPU-hours); `partition` keeps only one partition. Binning and the utilization-range filter happen client-side. `total` counts all candidates in the window; `jobs` holds only the top 2000 by effective GPU-hours, since a `sacct -j` over the whole window would time out |
 | `GET /api/nodes?gpu_only=&refresh=` | node states + live utilization/VRAM + active jobs (`refresh=true` bypasses the 30 s cache) |
 | `GET /api/nodes/{name}?view=job_start\|1\|6\|24` | per-GPU utilization/VRAM series for one node (`job_start` = since the earliest active job started) |
 

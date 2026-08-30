@@ -305,15 +305,13 @@ function renderJobTable(rows) {
   tb.innerHTML = rows.map((j) => {
     const jobid = escapeHtml(j.jobid);
     const rawName = j.name || "";
-    const partition = escapeHtml(j.partition);
-    const nodes = escapeList(j.nodes);
     const start = escapeHtml((j.start || "").slice(0, 16));
     const gpus = escapeHtml(j.gpus !== undefined ? j.gpus : "—");
     return `
     <tr class="row" data-job="${jobid}">
       <td>${jobid}</td><td title="${escapeHtml(rawName)}">${escapeHtml(rawName.slice(0, 40))}</td>
-      <td>${userLink(j.user)}</td><td>${partition}</td>
-      <td>${nodes}</td>
+      <td>${userLink(j.user)}</td><td>${partitionLink(j.partition)}</td>
+      <td>${nodeLinks(j.nodes)}</td>
       <td>${stateBadge(j.state)}</td><td>${start}</td>
       <td class="num">${gpus}</td>
       <td class="num">${pctBar(j.mean_util)}</td>
@@ -325,6 +323,10 @@ function renderJobTable(rows) {
     tr.addEventListener("click", (e) => {
       const link = e.target.closest("a.userlink");
       if (link) { e.stopPropagation(); openUser(link.dataset.user); return; }
+      const nlink = e.target.closest("a.nodelink");
+      if (nlink) { e.stopPropagation(); openNode(nlink.dataset.node); return; }
+      const plink = e.target.closest("a.partitionlink");
+      if (plink) { e.stopPropagation(); openPartition(plink.dataset.partition); return; }
       loadJobDetail(tr.dataset.job);
     }));
 }
@@ -373,14 +375,19 @@ let jobDetailToken = 0;
 let jobDetailData = null; // raw API payload; traces rebuild per theme
 async function loadJobDetail(jobid) {
   const token = ++jobDetailToken;
-  $("jobDetailCard").style.display = "block";
-  $("jobDetailTitle").textContent = "Job " + jobid + " — loading…";
-  $("jobDetailCard").scrollIntoView({ behavior: "smooth", block: "nearest" });
-  const data = await api("/api/jobs/" + jobid + "?since_hours=" + $("jWindow").value);
-  if (token !== jobDetailToken) return;
-  setUrl("/job/" + jobid);
-  jobDetailData = data;
-  renderJobDetail(data);
+  $("jobDetailResults").style.display = "block";
+  $("jobDetailTitle").textContent = "Job " + jobid;
+  setResultsLoading("jobDetailResults", true);
+  $("jobDetailResults").scrollIntoView({ behavior: "smooth", block: "nearest" });
+  try {
+    const data = await api("/api/jobs/" + jobid + "?since_hours=" + $("jWindow").value);
+    if (token !== jobDetailToken) return;
+    setUrl("/job/" + jobid);
+    jobDetailData = data;
+    renderJobDetail(data);
+  } finally {
+    if (token === jobDetailToken) setResultsLoading("jobDetailResults", false);
+  }
 }
 
 function renderJobDetail(data) {
@@ -549,12 +556,12 @@ function renderUserTable() {
 }
 
 /* Finalize a selection: only this path fetches the user's jobs. An
- * empty finalized value deselects (hides the jobs card). */
+ * empty finalized value deselects (hides the jobs panel). */
 function finalizeUser(name) {
   name = (name || "").trim();
   if (!name) {
     userSelected = null;
-    $("userJobsCard").style.display = "none";
+    $("userJobsResults").style.display = "none";
     renderUserTable();
     setUrl("/users");
     return;
@@ -572,10 +579,10 @@ function finalizeUser(name) {
 
 async function loadUserJobs(user) {
   const token = ++userJobsToken;
-  $("userJobsCard").style.display = "block";
+  $("userJobsResults").style.display = "block";
   $("userJobsTitle").textContent =
     "Jobs · " + user + " · last " + $("uWindow").value / 24 + " d";
-  setResultsLoading("usersResults", true);
+  setResultsLoading("userJobsResults", true);
   status("loading " + user + "’s jobs…");
   const params = new URLSearchParams({
     since_hours: $("uWindow").value, user, limit: "500",
@@ -587,7 +594,7 @@ async function loadUserJobs(user) {
     userJobs = data.jobs;
     renderUserJobsTable();
   } finally {
-    if (token === userJobsToken) setResultsLoading("usersResults", false);
+    if (token === userJobsToken) setResultsLoading("userJobsResults", false);
   }
 }
 
@@ -596,16 +603,14 @@ function renderUserJobsTable() {
   tb.innerHTML = userJobs.map((j) => {
     const jobid = escapeHtml(j.jobid);
     const rawName = j.name || "";
-    const partition = escapeHtml(j.partition);
-    const nodes = escapeList(j.nodes);
     const start = escapeHtml((j.start || "").slice(0, 16));
     const gpus = escapeHtml(j.gpus !== undefined ? j.gpus : "—");
     return `
     <tr class="row" data-job="${jobid}">
       <td>${jobLink(j.jobid)}</td>
       <td title="${escapeHtml(rawName)}">${escapeHtml(rawName.slice(0, 40))}</td>
-      <td>${partition}</td>
-      <td>${nodes}</td>
+      <td>${partitionLink(j.partition)}</td>
+      <td>${nodeLinks(j.nodes)}</td>
       <td>${stateBadge(j.state)}</td>
       <td>${start}</td>
       <td class="num">${gpus}</td>
@@ -617,14 +622,18 @@ function renderUserJobsTable() {
   tb.querySelectorAll("tr.row").forEach((tr) =>
     tr.addEventListener("click", (e) => {
       const link = e.target.closest("a.joblink");
-      if (link) { e.stopPropagation(); openJob(tr.dataset.job); return; }
+      if (link) { e.stopPropagation(); openJob(link.dataset.job); return; }
+      const nlink = e.target.closest("a.nodelink");
+      if (nlink) { e.stopPropagation(); openNode(nlink.dataset.node); return; }
+      const plink = e.target.closest("a.partitionlink");
+      if (plink) { e.stopPropagation(); openPartition(plink.dataset.partition); return; }
       openJob(tr.dataset.job);
     }));
 }
 
 $("uWindow").addEventListener("change", () => {
   userSelected = null;
-  $("userJobsCard").style.display = "none";
+  $("userJobsResults").style.display = "none";
   loadUsers();
 });
 $("uRunning").addEventListener("change", () => {
@@ -655,8 +664,30 @@ $("userTable").querySelectorAll("th[data-k]").forEach((th) =>
 
 let partRows = [];
 let partTrendData = {};
+let selectedPartition = ""; // deep-linked or chosen partition; "" = all
 let partSort = { key: "mean_util", dir: "desc" };
 let partitionsToken = 0;
+
+function applyPartitionSelection(name) {
+  selectedPartition = name || "";
+  const sel = $("pPartition");
+  const names = [...new Set(partRows.map((p) => p.name).filter(Boolean))].sort();
+  const options = ['<option value="">all partitions</option>'];
+  const listed = names.includes(selectedPartition);
+  names.forEach((n) =>
+    options.push('<option value="' + escapeHtml(n) + '">' + escapeHtml(n) + "</option>"));
+  if (selectedPartition && !listed) {
+    // A deep-linked partition absent from the current window stays selected
+    // so the URL keeps yielding the scoped (possibly empty) result.
+    options.push('<option value="' + escapeHtml(selectedPartition) + '">' +
+      escapeHtml(selectedPartition) + " (no data in window)</option>");
+  }
+  sel.innerHTML = options.join("");
+  sel.value = selectedPartition;
+  if (!sel.value) selectedPartition = "";
+  renderPartTrend(partTrendData);
+  setUrl(sel.value ? "/partition/" + encodeURIComponent(sel.value) : "/partitions");
+}
 
 async function loadPartitions() {
   const token = ++partitionsToken;
@@ -674,33 +705,22 @@ async function loadPartitions() {
   if (token !== partitionsToken) return; // a newer request supersedes this one
   partRows = data.partitions;
   const w = data.window;
-  $("pCount").textContent = data.partitions.length + " groups · " +
+  $("pCount").textContent = data.partitions.length + " partitions · " +
     tsToDate(w.start) + " → " + tsToDate(w.end) + " UTC";
   renderPartBar();
   renderPartOccupancy();
-  renderPartTrend(data.trend);
   partTrendData = data.trend;
+  applyPartitionSelection(selectedPartition);
   renderPartTable();
   markSort($("partTable"), partSort.key, partSort.dir);
   loaded.partitions = true;
-  // The GPU-type selector shares the tab's window / running-only controls;
-  // validate its selection against the fresh groups, then fetch the VRAM
-  // distribution for it. The VRAM fetch blurs only its own card, so the
-  // other graphs stay interactive while it loads.
-  refreshVramSelector(partRows);
+  // The summary panel is unblocked as soon as its response renders; the
+  // VRAM distribution then fetches independently under its own panel.
+  setResultsLoading("partitionsResults", false);
   if (token !== partitionsToken) return;
   await loadVram().catch(() => {});
-  if (token === partitionsToken) setResultsLoading("partitionsResults", false);
 }
 
-function refreshVramSelector(groups) {
-  const sel = $("vGpuType");
-  const cur = sel.value;
-  const types = [...new Set(groups.map((g) => g.name))].sort();
-  sel.innerHTML = '<option value="">all GPU types</option>' +
-    types.map((t) => '<option value="' + escapeHtml(t) + '">' + escapeHtml(t) + "</option>").join("");
-  sel.value = cur && types.includes(cur) ? cur : "";
-}
 
 function partBarColor(v) {
   const th = plotTheme();
@@ -753,7 +773,10 @@ function renderPartOccupancy() {
 
 function renderPartTrend(trend) {
   const th = plotTheme();
-  const traces = Object.entries(trend).map(([name, values], i) => ({
+  const entries = selectedPartition
+    ? Object.entries(trend).filter(([name]) => name === selectedPartition)
+    : Object.entries(trend);
+  const traces = entries.map(([name, values], i) => ({
     type: "scatter", mode: "lines", name,
     x: values.map((v) => v[0] * 1000), y: values.map((v) => v[1]),
     line: { width: 1.5, color: th.colors[i % th.colors.length] },
@@ -771,16 +794,22 @@ function renderPartTrend(trend) {
 function renderPartTable() {
   const tb = $("partTable").querySelector("tbody");
   tb.innerHTML = partRows.map((p) => `
-    <tr>
-      <td>${escapeHtml(p.name)}</td>
+    <tr class="row" data-partition="${escapeHtml(p.name)}">
+      <td>${partitionLink(p.name)}</td>
       <td class="num" title="allocated / total GPUs">${escapeHtml(p.gpus_alloc)}/${escapeHtml(p.gpus_total)}</td>
       <td class="num">${escapeHtml(fmtInt(p.job_count))}</td>
       <td class="num">${pctBar(p.mean_util)}</td>
     </tr>`).join("");
+  tb.querySelectorAll("tr.row").forEach((tr) =>
+    tr.addEventListener("click", () => openPartition(tr.dataset.partition)));
 }
 
 function partControlsChanged() { loadPartitions(); }
 $("pWindow").addEventListener("change", partControlsChanged);
+$("pPartition").addEventListener("change", () => {
+  applyPartitionSelection($("pPartition").value);
+  loadVram().catch(() => {});
+});
 $("pRunning").addEventListener("change", (e) => {
   $("pWindow").disabled = e.target.checked;
   loadPartitions();
@@ -812,17 +841,16 @@ let vramToken = 0;
 
 async function loadVram() {
   const token = ++vramToken;
-  // The VRAM fetch blurs only the VRAM card (vramResults), never the whole
-  // partitions panel: window / running-only / GPU-type changes here must
-  // not freeze the other graphs. Only clear when both this VRAM request
-  // and its originating partitions request are still the latest.
+  // The VRAM fetch blurs only the VRAM panel (vramResults), never the whole
+  // partitions tab: window / running-only / partition changes here must not
+  // freeze the other graphs.
   const origin = partitionsToken;
   setResultsLoading("vramResults", true);
   status("loading VRAM distribution…");
   try {
     const params = new URLSearchParams({ since_hours: $("pWindow").value });
     if ($("pRunning").checked) params.set("running_only", "true");
-    if ($("vGpuType").value) params.set("gpu_type", $("vGpuType").value);
+    if (selectedPartition) params.set("partition", selectedPartition);
     const data = await api("/api/partitions/vram?" + params);
     if (token !== vramToken) return; // a newer VRAM request supersedes this one
     vramJobs = data.jobs;
@@ -833,10 +861,6 @@ async function loadVram() {
       setResultsLoading("vramResults", false);
   }
 }
-// GPU-type selector: refetches only the VRAM distribution (window /
-// running-only changes are already owned by loadPartitions).
-function reloadVram() { loadVram(); }
-
 function renderVram() {
   const lo = Math.min(+$("vUtilMin").value, +$("vUtilMax").value);
   const hi = Math.max(+$("vUtilMin").value, +$("vUtilMax").value);
@@ -861,7 +885,7 @@ function renderVram() {
     truncated
       ? matched.length + " / " + vramJobs.length + " (top of " + vramTotal + ")"
       : matched.length + " jobs",
-    $("vGpuType").value,
+    selectedPartition,
   ].filter(Boolean);
   const y = normalize ? bins.map((h) => (h / allHours) * 100) : bins;
   const labels = Array.from({ length: nBins }, (_, i) =>
@@ -920,7 +944,6 @@ function vramSliderInput() {
 $("vNormalize").addEventListener("change", renderVram);
 $("vUtilMin").addEventListener("input", vramSliderInput);
 $("vUtilMax").addEventListener("input", vramSliderInput);
-$("vGpuType").addEventListener("change", reloadVram);
 
 /* ---------------- nodes ---------------- */
 
@@ -974,7 +997,8 @@ function renderNodeTable() {
     const u = n.current_util;
     const busy = u !== null && u > 0;
     const jobs = (n.active_jobs || []).map((j) => jobLink(j.jobid)).join(", ") || "—";
-    const name = escapeHtml(n.name);
+    const rawName = n.name;
+    const name = escapeHtml(rawName);
     const gpuType = escapeHtml(n.gpu_type || "—");
     const gpusAlloc = escapeHtml(n.gpus_alloc !== undefined ? n.gpus_alloc : 0);
     const gpus = escapeHtml(n.gpus);
@@ -983,7 +1007,7 @@ function renderNodeTable() {
     const cpus = escapeHtml(n.cpus);
     return `
     <tr class="row" data-node="${name}" style="${busy ? "" : "opacity:.55"}">
-      <td>${name}</td>
+      <td>${nodeLink(rawName)}</td>
       <td>${gpuType}</td>
       <td class="num" title="allocated / total GPUs">${gpusAlloc}/${gpus}</td>
       <td class="num">${u === null ? "idle" : pctBar(u)}</td>
@@ -996,6 +1020,8 @@ function renderNodeTable() {
     tr.addEventListener("click", (e) => {
       const link = e.target.closest("a.joblink");
       if (link) { e.stopPropagation(); openJob(link.dataset.job); return; }
+      const nlink = e.target.closest("a.nodelink");
+      if (nlink) { e.stopPropagation(); openNode(nlink.dataset.node); return; }
       loadNodeDetail(tr.dataset.node);
     }));
   markSort($("nodeTable"), nodeSort.key, nodeSort.dir);
@@ -1008,14 +1034,19 @@ let nodeDetailData = null; // raw API payload; traces rebuild per theme
 async function loadNodeDetail(name) {
   nodeDetailName = name;
   const token = ++nodeDetailToken;
-  $("nodeDetailCard").style.display = "block";
-  $("nodeDetailTitle").textContent = "Node " + name + " — loading…";
-  $("nodeDetailCard").scrollIntoView({ behavior: "smooth", block: "nearest" });
-  const data = await api("/api/nodes/" + name + "?view=" + $("ndWindow").value);
-  if (token !== nodeDetailToken) return;
-  setUrl("/node/" + name);
-  nodeDetailData = data;
-  renderNodeDetail(data, name);
+  $("nodeDetailResults").style.display = "block";
+  $("nodeDetailTitle").textContent = "Node " + name;
+  setResultsLoading("nodeDetailResults", true);
+  $("nodeDetailResults").scrollIntoView({ behavior: "smooth", block: "nearest" });
+  try {
+    const data = await api("/api/nodes/" + encodeURIComponent(name) + "?view=" + $("ndWindow").value);
+    if (token !== nodeDetailToken) return;
+    setUrl("/node/" + encodeURIComponent(name));
+    nodeDetailData = data;
+    renderNodeDetail(data, name);
+  } finally {
+    if (token === nodeDetailToken) setResultsLoading("nodeDetailResults", false);
+  }
 }
 
 function renderNodeDetail(data, name) {
@@ -1095,9 +1126,11 @@ $("nodeTable").querySelectorAll("th[data-k]").forEach((th) =>
 
 /* ---------------- deep links ----------------
  * Shareable URLs: /job/<id> opens the Jobs tab with that job's detail,
- * /node/<name> opens the Nodes tab with that node's detail, /user/<name>
- * opens the Users tab with that user's jobs fetched, and /jobs,
- * /partitions, /users and /nodes open the plain tabs. The server serves
+ * /node/<name> opens the Nodes tab with that node's detail,
+ * /partition/<name> opens the Partitions tab scoped to that partition
+ * (trend + VRAM), /user/<name> opens the Users tab with that user's jobs
+ * fetched, and /jobs, /partitions, /users and /nodes open the plain tabs
+ * (plain /partitions clears any partition selection). The server serves
  * the SPA shell for all of them; this code restores the view from the
  * path and keeps the URL in sync via history.pushState. */
 
@@ -1135,6 +1168,25 @@ function userLink(user) {
     '" title="open ' + safe + ' in the Users tab">' + safe + "</a>";
 }
 
+function nodeLink(node) {
+  if (!node) return "—";
+  const safe = escapeHtml(node);
+  return '<a class="nodelink" data-node="' + safe +
+    '" title="open ' + safe + ' in the Nodes tab">' + safe + "</a>";
+}
+
+function nodeLinks(values) {
+  const list = Array.isArray(values) ? values : values ? [values] : [];
+  return list.map(nodeLink).join(", ") || "—";
+}
+
+function partitionLink(partition) {
+  if (!partition) return "—";
+  const safe = escapeHtml(partition);
+  return '<a class="partitionlink" data-partition="' + safe +
+    '" title="open ' + safe + ' in the Partitions tab">' + safe + "</a>";
+}
+
 function openUser(user) {
   showTab("users").then(() => {
     // finalizeUser is the only path that fetches the user's jobs, and it
@@ -1144,19 +1196,53 @@ function openUser(user) {
   }).catch(() => {});
 }
 
+function openNode(node) {
+  showTab("nodes").then(() => loadNodeDetail(node)).catch(() => {});
+}
+
+function openPartition(partition) {
+  selectedPartition = partition;
+  const wasLoaded = loaded.partitions;
+  showTab("partitions").then(() => {
+    // applyPartitionSelection re-renders the trend and syncs the URL
+    // (/partition/<name>). A fresh loadPartitions already scoped the VRAM
+    // fetch on its own, so only a pre-loaded tab needs one here.
+    applyPartitionSelection(selectedPartition);
+    if (wasLoaded) loadVram().catch(() => {});
+  }).catch(() => {});
+}
+
+function clearPartitionSelection() {
+  if (!selectedPartition) return;
+  selectedPartition = "";
+  $("pPartition").value = "";
+  renderPartTrend(partTrendData);
+  if (loaded.partitions) loadVram().catch(() => {});
+}
+
 function restoreFromUrl() {
   let m = location.pathname.match(/^\/job\/([^/]+)\/?$/);
   if (m) { showTab("jobs").then(() => loadJobDetail(m[1])).catch(() => {}); return; }
   m = location.pathname.match(/^\/node\/([^/]+)\/?$/);
-  if (m) { showTab("nodes").then(() => loadNodeDetail(m[1])).catch(() => {}); return; }
+  if (m) {
+    const node = decodeURIComponent(m[1]);
+    showTab("nodes").then(() => loadNodeDetail(node)).catch(() => {});
+    return;
+  }
   m = location.pathname.match(/^\/user\/([^/]+)\/?$/);
   if (m) {
     const user = decodeURIComponent(m[1]);
     showTab("users").then(() => { finalizeUser(user); }).catch(() => {});
     return;
   }
+  m = location.pathname.match(/^\/partition\/([^/]+)\/?$/);
+  if (m) { openPartition(decodeURIComponent(m[1])); return; }
   if (location.pathname === "/jobs") { showTab("jobs"); return; }
-  if (location.pathname === "/partitions") { showTab("partitions"); return; }
+  if (location.pathname === "/partitions") {
+    clearPartitionSelection();
+    showTab("partitions");
+    return;
+  }
   if (location.pathname === "/users") { showTab("users"); return; }
   if (location.pathname === "/nodes") { showTab("nodes"); return; }
 }
@@ -1164,6 +1250,10 @@ function restoreFromUrl() {
 window.addEventListener("popstate", restoreFromUrl);
 document.querySelectorAll("nav.tabs button").forEach((b) =>
   b.addEventListener("click", () => {
+    // Plain /partitions clears any partition selection, matching the
+    // deep-link restore; clear before showTab so a fresh loadPartitions
+    // fetches unscoped.
+    if (b.dataset.tab === "partitions") clearPartitionSelection();
     showTab(b.dataset.tab);
     setUrl("/" + b.dataset.tab);
   }));
@@ -1174,7 +1264,7 @@ function rerenderAllPlots() {
     renderJobEffChart("jobLowBarPlot", jobBaseLow);
     renderJobsView();
   }
-  if (jobDetailData && $("jobDetailCard").style.display !== "none") {
+  if (jobDetailData && $("jobDetailResults").style.display !== "none") {
     renderJobDetail(jobDetailData);
   }
   if (loaded.partitions) {
@@ -1183,7 +1273,7 @@ function rerenderAllPlots() {
     renderPartTrend(partTrendData);
     if (vramJobs.length) renderVram();
   }
-  if (nodeDetailData && $("nodeDetailCard").style.display !== "none") {
+  if (nodeDetailData && $("nodeDetailResults").style.display !== "none") {
     renderNodeDetail(nodeDetailData, nodeDetailName);
   }
 }

@@ -90,19 +90,20 @@ class FakeProm:
         {"metric": {"slurmjobid": "1", "gpu": "0"},
          "values": [[1000, "50"], [1120, "50"]]},
     ]
-    # Partition summary keeps slurmjobid + instance so job identity and the
-    # capacity join survive aggregation.
+    # Partition summary keeps slurmjobid + instance + job so job identity,
+    # the capacity join, and the partition grouping survive aggregation.
+    # ``job`` is the Slurm partition (the metric's partition label).
     _PART_SUMMARY = [
-        {"metric": {"slurmjobid": "1", "instance": "gpu1", "gpu_type": "h100"},
+        {"metric": {"slurmjobid": "1", "instance": "gpu1", "job": "gpu-h100"},
          "values": [[1000, "40"], [1120, "60"]]},
-        {"metric": {"slurmjobid": "2", "instance": "gpu1", "gpu_type": "h100"},
+        {"metric": {"slurmjobid": "2", "instance": "gpu1", "job": "gpu-h100"},
          "values": [[1000, "10"]]},
-        {"metric": {"slurmjobid": "3", "instance": "gpu2", "gpu_type": "h200"},
+        {"metric": {"slurmjobid": "3", "instance": "gpu2", "job": "gpu-h200"},
          "values": [[1000, "90"], [1120, "95"]]},
     ]
     _PART_TREND = [
-        {"metric": {"gpu_type": "h100"}, "values": [[1000, "25.0"], [1120, "35.0"]]},
-        {"metric": {"gpu_type": "h200"}, "values": [[1000, "92.5"]]},
+        {"metric": {"job": "gpu-h100"}, "values": [[1000, "25.0"], [1120, "35.0"]]},
+        {"metric": {"job": "gpu-h200"}, "values": [[1000, "92.5"]]},
     ]
     _JOBS_UTIL = [
         {"metric": {"slurmjobid": "1", "instance": "gpu1", "job": "gpu-h100",
@@ -136,30 +137,30 @@ class FakeProm:
                 return self._JOB_DETAIL_UTIL
             if 'instance="' in query:  # node detail
                 return self._NODE_DETAIL_UTIL
-            if "count by (gpu_type)" in query:  # partition occupancy
-                # concurrent allocated series per GPU type
+            if "count by (job)" in query:  # partition occupancy
+                # concurrent allocated series per partition
                 ids = self._matchers(query)
                 n = {}
                 for s in self._PART_SUMMARY:
                     if ids is None or s["metric"]["slurmjobid"] in ids:
-                        g = s["metric"]["gpu_type"]
+                        g = s["metric"]["job"]
                         n[g] = n.get(g, 0) + 1
                 return [
-                    {"metric": {"gpu_type": g},
+                    {"metric": {"job": g},
                      "values": [[1000, str(c)], [1120, str(c)]]}
                     for g, c in sorted(n.items())
                 ]
-            if "avg by (gpu_type)" in query:  # partition trend
-                # a matched selector only yields types with matching jobs
+            if "avg by (job)" in query:  # partition trend
+                # a matched selector only yields partitions with matching jobs
                 ids = self._matchers(query)
                 if ids is None:
                     return self._PART_TREND
-                allowed = {s["metric"]["gpu_type"]
+                allowed = {s["metric"]["job"]
                            for s in self._PART_SUMMARY
                            if s["metric"]["slurmjobid"] in ids}
                 return [t for t in self._PART_TREND
-                        if t["metric"]["gpu_type"] in allowed]
-            if "max by (slurmjobid, instance, gpu_type)" in query:
+                        if t["metric"]["job"] in allowed]
+            if "max by (slurmjobid, instance, job)" in query:
                 return self._filter(self._PART_SUMMARY, self._matchers(query))
             jobs_util = self._JOBS_UTIL + self.extra_jobs
             return self._filter(jobs_util, self._matchers(query))
@@ -194,10 +195,12 @@ class FakeProm:
                         for j in sorted(self.job_start_ids)]
             return [{"metric": {"slurmjobid": j}, "value": [1, "1"]}
                     for j in sorted(self.live_ids)]
-        if "count by (instance)" in query:
+        if "count by (instance, job)" in query:
             return [
-                {"metric": {"instance": "gpu1"}, "value": [1, "5"]},
-                {"metric": {"instance": "gpu2"}, "value": [1, "3"]},
+                {"metric": {"instance": "gpu1", "job": "gpu-h100"},
+                 "value": [1, "2"]},
+                {"metric": {"instance": "gpu2", "job": "gpu-h200"},
+                 "value": [1, "3"]},
             ]
         if "max by (instance) (slurm_job_utilization_gpu)" in query:
             return [
@@ -557,31 +560,31 @@ def test_jobs_running_only_ignores_limit(client, fake_prom):
     assert r.status_code == 200
     assert {j["jobid"] for j in r.json()["jobs"]} == {"1", "2"}
 
-def test_partitions_gpu_type_groups(client):
+def test_partitions_groups_by_partition(client):
     r = client.get("/api/partitions", params={"since_hours": 24})
     assert r.status_code == 200
     data = r.json()
     by_name = {p["name"]: p for p in data["partitions"]}
-    assert set(by_name) == {"h100", "h200"}
-    # h100: samples 40, 60 (job1) and 10 (job2) -> time-weighted mean 36.67
-    assert by_name["h100"]["job_count"] == 2
-    assert by_name["h100"]["mean_util"] == pytest.approx(36.67, abs=0.01)
-    assert by_name["h200"]["mean_util"] == pytest.approx(92.5)
+    assert set(by_name) == {"gpu-h100", "gpu-h200"}
+    # gpu-h100: samples 40, 60 (job1) and 10 (job2) -> time-weighted mean 36.67
+    assert by_name["gpu-h100"]["job_count"] == 2
+    assert by_name["gpu-h100"]["mean_util"] == pytest.approx(36.67, abs=0.01)
+    assert by_name["gpu-h200"]["mean_util"] == pytest.approx(92.5)
     for p in data["partitions"]:
         assert 0 <= p["mean_util"] <= 100
-    assert "h100" in data["trend"] and "h200" in data["trend"]
+    assert "gpu-h100" in data["trend"] and "gpu-h200" in data["trend"]
 
 
 def test_partitions_gpu_capacity(client):
     by_name = {p["name"]: p for p in
                client.get("/api/partitions",
                           params={"since_hours": 24}).json()["partitions"]}
-    # h100 resolves to one scontrol type: both h100 nodes count (idle gpu3
-    # included); allocation comes from live Prometheus counts.
-    assert by_name["h100"]["gpus_total"] == 16
-    assert by_name["h100"]["gpus_alloc"] == 5
-    assert by_name["h200"]["gpus_total"] == 8
-    assert by_name["h200"]["gpus_alloc"] == 3
+    # gpu-h100 members are all scontrol nodes with that partition (idle gpu3
+    # included); allocation is the exact per-partition live GPU count.
+    assert by_name["gpu-h100"]["gpus_total"] == 16
+    assert by_name["gpu-h100"]["gpus_alloc"] == 2
+    assert by_name["gpu-h200"]["gpus_total"] == 8
+    assert by_name["gpu-h200"]["gpus_alloc"] == 3
 
 
 def test_partitions_running_only_injects_matcher(client, fake_prom):
@@ -592,17 +595,17 @@ def test_partitions_running_only_injects_matcher(client, fake_prom):
     assert r.status_code == 200
     ranges = [q for t, q in fake_prom.calls if t == "range"]
     matcher = 'slurmjobid=~"^(?:1|2)$"'
-    assert any(matcher in q and "max by (slurmjobid, instance, gpu_type)" in q
+    assert any(matcher in q and "max by (slurmjobid, instance, job)" in q
                for q in ranges), ranges
-    assert any(matcher in q and "avg by (gpu_type)" in q
+    assert any(matcher in q and "avg by (job)" in q
                for q in ranges), ranges
-    # non-running job 3 (h200 only) is gone; running jobs are h100-only
+    # non-running job 3 (gpu-h200 only) is gone; running jobs are gpu-h100-only
     data = r.json()
     by_name = {p["name"]: p for p in data["partitions"]}
-    assert set(by_name) == {"h100"}
+    assert set(by_name) == {"gpu-h100"}
     # the trend has no slurmjobid label: the matched selector must have
-    # excluded h200 upstream
-    assert set(data["trend"]) == {"h100"}
+    # excluded gpu-h200 upstream
+    assert set(data["trend"]) == {"gpu-h100"}
 
 
 def test_partitions_running_only_empty_when_no_live_ids(client, fake_prom):
@@ -622,6 +625,9 @@ def test_partitions_vram_records(client):
     assert by_id["1"]["vram_gb"] == 15.0
     assert by_id["2"]["vram_gb"] == 30.0
     assert by_id["3"]["vram_gb"] == 8.0
+    # the Slurm partition from the utilization window
+    assert by_id["1"]["partition"] == "gpu-h100"
+    assert by_id["3"]["partition"] == "gpu-h200"
     # mean_util from the utilization window (time-weighted mean)
     assert by_id["1"]["mean_util"] == pytest.approx(50.0)
     assert by_id["2"]["mean_util"] == pytest.approx(10.0)
@@ -670,18 +676,18 @@ def test_partitions_vram_empty_when_no_live_ids(client, fake_prom):
     assert not [q for t, q in fake_prom.calls if t == "range"]
 
 
-def test_partitions_vram_gpu_type_filter(client):
+def test_partitions_vram_partition_filter(client):
     data = client.get("/api/partitions/vram",
-                      params={"since_hours": 24, "gpu_type": "h100"}).json()
+                      params={"since_hours": 24, "partition": "gpu-h100"}).json()
     assert data["total"] == 2
     assert {j["jobid"] for j in data["jobs"]} == {"1", "2"}
     data = client.get("/api/partitions/vram",
-                      params={"since_hours": 24, "gpu_type": "h200"}).json()
+                      params={"since_hours": 24, "partition": "gpu-h200"}).json()
     assert data["total"] == 1
     assert [j["jobid"] for j in data["jobs"]] == ["3"]
-    # unknown type: no candidates, empty payload
+    # unknown partition: no candidates, empty payload
     data = client.get("/api/partitions/vram",
-                      params={"since_hours": 24, "gpu_type": "b300"}).json()
+                      params={"since_hours": 24, "partition": "b300"}).json()
     assert data["total"] == 0 and data["jobs"] == []
 
 
@@ -723,7 +729,7 @@ def test_nodes_endpoint(client):
 
 def test_nodes_gpus_alloc(client):
     by_name = {n["name"]: n for n in client.get("/api/nodes").json()["nodes"]}
-    assert by_name["gpu1"]["gpus_alloc"] == 5  # from count by (instance)
+    assert by_name["gpu1"]["gpus_alloc"] == 2  # from count by (instance, job)
     assert by_name["gpu1"]["cpus_alloc"] == 16  # from scontrol CPUAlloc
 
 
@@ -782,7 +788,7 @@ def test_nodes_refresh_bypasses_cache(client, fake_prom):
 
 def test_deep_link_routes_serve_spa(client):
     for path in ["/jobs", "/partitions", "/nodes", "/job/19807768",
-                 "/node/dgx1"]:
+                 "/node/dgx1", "/partition/gpu-h100"]:
         r = client.get(path)
         assert r.status_code == 200
         assert r.headers["content-type"].startswith("text/html")
@@ -791,13 +797,13 @@ def test_deep_link_routes_serve_spa(client):
 
 def test_aggregate_partition_stats_fixture():
     stats = [
-        {"metric": {"slurmjobid": "1", "instance": "gpu1", "gpu_type": "h100"},
+        {"metric": {"slurmjobid": "1", "instance": "gpu1", "job": "gpu-h100"},
          "values": [[1, "40"], [2, "60"]]},
-        {"metric": {"slurmjobid": "2", "instance": "gpu1", "gpu_type": "h100"},
+        {"metric": {"slurmjobid": "2", "instance": "gpu1", "job": "gpu-h100"},
          "values": [[1, "10"]]},
     ]
     out = appmod.aggregate_partition_stats(stats)
-    assert out[0]["name"] == "h100"
+    assert out[0]["name"] == "gpu-h100"
     assert out[0]["mean_util"] == pytest.approx(36.67, abs=0.01)
     assert out[0]["max_util"] == 60.0
     assert out[0]["job_count"] == 2
@@ -830,21 +836,22 @@ def test_jobs_extremes_bounded_by_search(client):
 def test_partitions_mean_occupancy(client):
     data = client.get("/api/partitions", params={"since_hours": 24}).json()
     by_name = {p["name"]: p for p in data["partitions"]}
-    # h100: 2 concurrent series / 16 GPUs = 12.5%; h200: 1 / 8 = 12.5%
-    assert by_name["h100"]["mean_occupancy"] == 12.5
-    assert by_name["h200"]["mean_occupancy"] == 12.5
+    # occupancy = concurrent series / capacity: gpu-h100 2 / 16 = 12.5%;
+    # gpu-h200 1 / 8 = 12.5% (allocation 3 is a separate instant count)
+    assert by_name["gpu-h100"]["mean_occupancy"] == 12.5
+    assert by_name["gpu-h200"]["mean_occupancy"] == 12.5
 
 
 def test_partitions_mean_occupancy_running_only(client, fake_prom):
     data = client.get("/api/partitions",
                       params={"since_hours": 24, "running_only": "true"}).json()
     by_name = {p["name"]: p for p in data["partitions"]}
-    # h200 (non-running job 3 only) is gone; h100 occupancy counts the
-    # matched running series only
-    assert set(by_name) == {"h100"}
-    assert by_name["h100"]["mean_occupancy"] == 12.5
+    # gpu-h200 (non-running job 3 only) is gone; gpu-h100 occupancy counts
+    # the matched running series only
+    assert set(by_name) == {"gpu-h100"}
+    assert by_name["gpu-h100"]["mean_occupancy"] == 12.5
     ranges = [q for t, q in fake_prom.calls if t == "range"]
-    assert any('slurmjobid=~"^(?:1|2)$"' in q and "count by (gpu_type)" in q
+    assert any('slurmjobid=~"^(?:1|2)$"' in q and "count by (job)" in q
                for q in ranges), ranges
 
 
