@@ -64,6 +64,9 @@ class FakeProm:
         self.nodes_calls = 0
         self.live_ids = {"1", "2"}   # count by (slurmjobid)
         self.job_start_ids = {"1", "2"}  # count by (slurmjobid){instance="gpu1"}
+        # Extra window series appended to the jobs list by tests that
+        # need more candidates than the canned three.
+        self.extra_jobs = []
 
     # -- canned range data -------------------------------------------------
     _JOB_DETAIL_UTIL = [
@@ -112,6 +115,19 @@ class FakeProm:
                     "user": "carol", "gpu_type": "h200"},
          "values": [[1000, "90"], [1120, "95"]]},
     ]
+    # Per-GPU VRAM (GB) over the window, matching the /partitions/vram
+    # query shape. Job 1 peaks 12/18 on its two GPUs, job 2 peaks 30,
+    # job 3 peaks 8 (the 0 sample is a never-reported GPU, not a low).
+    _VRAM_GB = [
+        {"metric": {"slurmjobid": "1", "instance": "gpu1", "gpu": "0"},
+         "values": [[1000, "10"], [1120, "12"]]},
+        {"metric": {"slurmjobid": "1", "instance": "gpu1", "gpu": "1"},
+         "values": [[1000, "16"], [1120, "18"]]},
+        {"metric": {"slurmjobid": "2", "instance": "gpu1", "gpu": "0"},
+         "values": [[1000, "30"]]},
+        {"metric": {"slurmjobid": "3", "instance": "gpu2", "gpu": "0"},
+         "values": [[1000, "8"], [1120, "0"]]},
+    ]
 
     def query_range(self, query, start, end, step):
         self.calls.append(("range", query))
@@ -120,6 +136,19 @@ class FakeProm:
                 return self._JOB_DETAIL_UTIL
             if 'instance="' in query:  # node detail
                 return self._NODE_DETAIL_UTIL
+            if "count by (gpu_type)" in query:  # partition occupancy
+                # concurrent allocated series per GPU type
+                ids = self._matchers(query)
+                n = {}
+                for s in self._PART_SUMMARY:
+                    if ids is None or s["metric"]["slurmjobid"] in ids:
+                        g = s["metric"]["gpu_type"]
+                        n[g] = n.get(g, 0) + 1
+                return [
+                    {"metric": {"gpu_type": g},
+                     "values": [[1000, str(c)], [1120, str(c)]]}
+                    for g, c in sorted(n.items())
+                ]
             if "avg by (gpu_type)" in query:  # partition trend
                 # a matched selector only yields types with matching jobs
                 ids = self._matchers(query)
@@ -132,8 +161,11 @@ class FakeProm:
                         if t["metric"]["gpu_type"] in allowed]
             if "max by (slurmjobid, instance, gpu_type)" in query:
                 return self._filter(self._PART_SUMMARY, self._matchers(query))
-            return self._filter(self._JOBS_UTIL, self._matchers(query))
+            jobs_util = self._JOBS_UTIL + self.extra_jobs
+            return self._filter(jobs_util, self._matchers(query))
         if "memory" in query:  # vram
+            if "max by (slurmjobid, instance, gpu)" in query:  # job records
+                return self._filter(self._VRAM_GB, self._matchers(query))
             if 'slurmjobid="' in query:  # job detail
                 return [
                     {"metric": {"instance": "gpu1", "gpu": "0"},
@@ -193,8 +225,10 @@ def fake_prom(monkeypatch):
     monkeypatch.setattr(appmod, "get_prom", lambda: fake)
     monkeypatch.setattr(appmod, "_cache", {})
     monkeypatch.setattr(appmod, "sacct_jobs",
-                        lambda ids, start_iso, **kw: {j: SACCT[j] for j in ids
-                                                      if j in SACCT})
+                        lambda ids, start_iso=None, **kw: {j: SACCT[j] for j in ids
+                                                           if j in SACCT})
+    # No active controller jobs by default; tests opt in to a snapshot.
+    monkeypatch.setattr(appmod, "show_jobs", lambda: {})
 
     def _show_nodes():
         fake.nodes_calls += 1
@@ -273,6 +307,77 @@ def test_jobs_running_only_empty_when_no_live_ids(client, fake_prom):
     assert not [q for t, q in fake_prom.calls if t == "range"]
 
 
+def test_users_aggregates_per_user(client):
+    # step=120 s; per-job util-gpu-hours = sum(values) * step / 3600 / 100:
+    # job 1 (alice): (40+60)*120/3600/100 = 0.0333, mean util 50
+    # job 2 (bob):   10*120/3600/100 = 0.0033, mean util 10
+    # job 3 (carol): (90+95)*120/3600/100 = 0.0617, mean util 92.5
+    # Live set is {1, 2}. The list is Prometheus-only (no sacct keys).
+    r = client.get("/api/users", params={"since_hours": 24})
+    assert r.status_code == 200
+    data = r.json()
+    assert data["count"] == 3
+    by_user = {u["user"]: u for u in data["users"]}
+    alice = by_user["alice"]
+    assert alice["jobs"] == 1 and alice["running_jobs"] == 1
+    assert alice["util_gpu_hours"] == pytest.approx(0.0333, abs=0.005)
+    assert alice["mean_util"] == pytest.approx(50.0)
+    assert alice["vram_avg"] == pytest.approx(11.0)  # mean of 10 and 12
+    assert alice["gpu_types"] == ["h100"]
+    assert "name" not in alice and "gpu_hours_alloc" not in alice
+    carol = by_user["carol"]
+    assert carol["running_jobs"] == 0
+    assert carol["util_gpu_hours"] == pytest.approx(0.0617, abs=0.005)
+    assert carol["mean_util"] == pytest.approx(92.5)
+    assert carol["vram_avg"] is None
+    # util-gpu-hours descending: carol > alice > bob.
+    assert [u["user"] for u in data["users"]] == ["carol", "alice", "bob"]
+
+
+def test_users_mean_util_weights_samples_not_effective_gpu_hours(client, monkeypatch):
+    # Equal-duration 10% and 90% jobs must aggregate to 50%, not 82% from
+    # weighting a utilization value by gpu_hours_eff (which already includes it).
+    jobs = [
+        {"jobid": "low", "user": "alice", "mean_util": 10.0,
+         "gpu_hours_eff": 0.1, "_util_sum": 10.0, "_util_samples": 1,
+         "gpu_type": "h100", "vram_avg": None},
+        {"jobid": "high", "user": "alice", "mean_util": 90.0,
+         "gpu_hours_eff": 0.9, "_util_sum": 90.0, "_util_samples": 1,
+         "gpu_type": "h100", "vram_avg": None},
+    ]
+    monkeypatch.setattr(appmod, "_fetch_job_window",
+                        lambda since_hours: (jobs, 1, 2, 120))
+    monkeypatch.setattr(appmod, "_running_gpu_job_ids", lambda: set())
+    data = client.get("/api/users", params={"since_hours": 24}).json()
+    assert data["users"][0]["mean_util"] == 50.0
+
+
+def test_users_window_validation(client):
+    assert client.get("/api/users", params={"since_hours": 0}).status_code == 422
+
+
+def test_jobs_user_filter_is_query_scoped(client, fake_prom):
+    # The user must reach the Prometheus selector, not just a post-fetch
+    # filter (a single-user request must not pull every user's window).
+    r = client.get("/api/jobs", params={"since_hours": 24, "user": "alice"})
+    assert r.status_code == 200
+    data = r.json()
+    assert data["count"] == 1
+    assert data["jobs"][0]["jobid"] == "1"
+    users = [q for t, q in fake_prom.calls if t == "range"]
+    assert any('user="alice"' in q for q in users)
+
+
+def test_jobs_user_filter_preserves_prometheus_label_case(client, fake_prom):
+    # PromQL exact label matchers are case-sensitive. The endpoint must send
+    # the selected label unchanged, then use casefold only after the query.
+    r = client.get("/api/jobs", params={"since_hours": 24, "user": "Alice"})
+    assert r.status_code == 200
+    assert r.json()["count"] == 1
+    users = [q for t, q in fake_prom.calls if t == "range"]
+    assert any('user="Alice"' in q for q in users)
+
+
 def test_job_detail_200_with_epochs(client):
     r = client.get("/api/jobs/1", params={"since_hours": 24})
     assert r.status_code == 200
@@ -290,6 +395,167 @@ def test_job_detail_end_epoch(client):
     meta = client.get("/api/jobs/2", params={"since_hours": 24}).json()["metadata"]
     assert meta["end_epoch"] == pytest.approx(_epoch(JOB2_END))
 
+
+def _scontrol_row(jobid, parent, task, node, state="RUNNING",
+                  start=JOB1_START, gpus=1, elapsed=3600, ncpus=4):
+    return {"jobid": jobid, "array_jobid": parent, "array_task_id": task,
+            "name": "arr.sh", "user": "alice", "account": "acc",
+            "partition": "gpu-h100", "state": state, "start": start,
+            "end": "", "elapsed_s": elapsed, "gpus": gpus, "gpu_type": "h100",
+            "node_list": node, "ncpus": ncpus}
+
+
+def test_enrich_merges_active_array_tasks(client, fake_prom, monkeypatch):
+    # Bare array parent "42": Prometheus sees it on two nodes; scontrol
+    # holds the physical tasks (suffix-tolerant IDs). Both must merge into
+    # one row instead of being left blank or misattributed.
+    monkeypatch.setattr(appmod, "sacct_jobs", lambda ids, start_iso=None, **kw: {})
+    monkeypatch.setattr(appmod, "show_jobs", lambda: {
+        "42_1": _scontrol_row("42_1", "42", "1", "gpu2",
+                              start=JOB2_START, elapsed=7200),
+        "42_0": _scontrol_row("42_0", "42", "0", "gpu1",
+                              start=JOB1_START, elapsed=3600),
+    })
+    jobs = [{"jobid": "42", "nodes": ["gpu1", "gpu2"], "mean_util": 50.0,
+             "gpu_hours_eff": 0.5}]
+    appmod._enrich(jobs, 24)
+    job = jobs[0]
+    assert job["name"] == "arr.sh"
+    assert job["state"] == "RUNNING"
+    assert job["start"] == JOB1_START  # earliest task start
+    assert job["node_list"] == "gpu1,gpu2"
+    assert job["gpus"] == 2 and job["ncpus"] == 8
+    # allocation = 1 GPU x 1 h + 1 GPU x 2 h
+    assert job["gpu_hours_alloc"] == 3.0
+    assert job["gpu_hours_eff"] == 1.5
+
+
+def test_enrich_array_no_node_match_falls_back_without_misattribution(
+        client, fake_prom, monkeypatch):
+    # 44's only active task ran on a node that did not observe the job.
+    monkeypatch.setattr(appmod, "sacct_jobs",
+                        lambda ids, start_iso=None, **kw: {})
+    monkeypatch.setattr(appmod, "show_jobs", lambda: {
+        "44_0": _scontrol_row("44_0", "44", "0", "gpu2"),
+    })
+    jobs = [{"jobid": "44", "nodes": ["gpu1"], "mean_util": 10.0,
+             "gpu_hours_eff": 0.1}]
+    appmod._enrich(jobs, 24)
+    for key in ("name", "state", "start", "gpus", "node_list"):
+        assert key not in jobs[0]
+
+
+def test_enrich_scontrol_failure_falls_back_to_sacct(client, fake_prom,
+                                                      monkeypatch):
+    from slurm import SlurmError
+
+    monkeypatch.setattr(appmod, "show_jobs",
+                        lambda: (_ for _ in ()).throw(SlurmError("boom")))
+    jobs = [{"jobid": "1", "nodes": ["gpu1"], "mean_util": 40.0,
+             "gpu_hours_eff": 0.4}]
+    appmod._enrich(jobs, 24)
+    job = jobs[0]
+    assert job["name"] == "train.sh"
+    assert job["state"] == "RUNNING"
+    assert job["gpus"] == 2
+    assert job["gpu_hours_alloc"] == pytest.approx(2.0)  # 2 GPUs x 1 h
+
+
+def test_enrich_merges_historical_array_tasks_in_sacct(
+        client, fake_prom, monkeypatch):
+    # Historical parent "45": already finished, so scontrol no longer
+    # knows it. Three of its sacct tasks ran on the observed node and must
+    # merge into one metadata row (the reported array-table gap).
+    monkeypatch.setattr(appmod, "show_jobs", lambda: {})
+    monkeypatch.setattr(appmod, "sacct_jobs", lambda ids, start_iso=None, **kw: {
+        "45_0": {"jobid": "45_0", "name": "hist.sh", "user": "alice",
+                 "account": "acc", "partition": "gpu-h100",
+                 "state": "COMPLETED", "start": JOB3_START,
+                 "end": JOB3_END, "elapsed_s": 3600, "gpus": 1,
+                 "gpu_type": "h100", "node_list": "gpu1", "ncpus": 4},
+        "45_1": {"jobid": "45_1", "name": "hist.sh", "user": "alice",
+                 "account": "acc", "partition": "gpu-h100",
+                 "state": "COMPLETED", "start": JOB2_START,
+                 "end": JOB2_END, "elapsed_s": 1800, "gpus": 1,
+                 "gpu_type": "h100", "node_list": "gpu1", "ncpus": 4},
+        "45_9": {"jobid": "45_9", "name": "hist.sh", "user": "alice",
+                 "account": "acc", "partition": "gpu-h100",
+                 "state": "COMPLETED", "start": JOB1_START,
+                 "end": JOB1_END, "elapsed_s": 7200, "gpus": 2,
+                 "gpu_type": "h100", "node_list": "gpu1,gpu2", "ncpus": 8},
+    })
+    jobs = [{"jobid": "45", "nodes": ["gpu1"], "mean_util": 50.0,
+             "gpu_hours_eff": 0.5}]
+    appmod._enrich(jobs, 24)
+    job = jobs[0]
+    assert job["name"] == "hist.sh"
+    assert job["state"] == "COMPLETED"
+    assert job["start"] == JOB3_START  # earliest of the matching tasks
+    assert job["node_list"] == "gpu1,gpu2"
+    assert job["gpus"] == 4 and job["ncpus"] == 16
+    # allocation = 1x1h + 1x0.5h + 2x2h
+    assert job["gpu_hours_alloc"] == pytest.approx(5.5)
+
+
+def test_enrich_array_task_without_node_match_is_not_merged(
+        client, fake_prom, monkeypatch):
+    # Parent "46" has sacct tasks, but none ran on the observed node;
+    # the metadata must stay blank rather than be misattributed.
+    monkeypatch.setattr(appmod, "show_jobs", lambda: {})
+    monkeypatch.setattr(appmod, "sacct_jobs", lambda ids, start_iso=None, **kw: {
+        "46_0": {"jobid": "46_0", "name": "other.sh", "user": "bob",
+                 "account": "acc", "partition": "gpu-h200",
+                 "state": "COMPLETED", "start": JOB3_START,
+                 "end": JOB3_END, "elapsed_s": 1800, "gpus": 1,
+                 "gpu_type": "h200", "node_list": "gpu2", "ncpus": 4},
+        "46_1": {"jobid": "46_1", "name": "other.sh", "user": "bob",
+                 "account": "acc", "partition": "gpu-h200",
+                 "state": "COMPLETED", "start": JOB2_START,
+                 "end": JOB2_END, "elapsed_s": 3600, "gpus": 1,
+                 "gpu_type": "h200", "node_list": "gpu2", "ncpus": 4},
+    })
+    jobs = [{"jobid": "46", "nodes": ["gpu1"], "mean_util": 10.0,
+             "gpu_hours_eff": 0.1}]
+    appmod._enrich(jobs, 24)
+    for key in ("name", "state", "start", "gpus", "node_list"):
+        assert key not in jobs[0]
+
+def _extra_job(i):
+    return {"metric": {"slurmjobid": str(100 + i), "instance": "gpu1",
+                       "job": "gpu-h100", "user": "alice",
+                       "gpu_type": "h100"},
+            "values": [[1000, "10"]]}
+
+
+def test_jobs_default_limit_100(client, fake_prom):
+    # 3 canned + 98 synthetic = 101 candidates.
+    fake_prom.extra_jobs = [_extra_job(i) for i in range(98)]
+    data = client.get("/api/jobs", params={"since_hours": 24}).json()
+    assert data["count"] == 100
+
+
+def test_jobs_limit_bounds(client, fake_prom):
+    fake_prom.extra_jobs = [_extra_job(i) for i in range(98)]
+    assert client.get("/api/jobs",
+                      params={"since_hours": 24, "limit": 1}).json()["count"] == 1
+    assert client.get("/api/jobs",
+                      params={"since_hours": 24,
+                              "limit": 1000}).json()["count"] == 101
+
+
+def test_jobs_limit_rejects_out_of_range(client, fake_prom):
+    for bad in ("0", "1001", "1.5"):
+        r = client.get("/api/jobs", params={"since_hours": 24, "limit": bad})
+        assert r.status_code == 422, bad
+
+
+def test_jobs_running_only_ignores_limit(client, fake_prom):
+    # Two live GPU jobs; limit=1 must not trim the running set.
+    r = client.get("/api/jobs",
+                   params={"since_hours": 24, "running_only": "true",
+                           "limit": 1})
+    assert r.status_code == 200
+    assert {j["jobid"] for j in r.json()["jobs"]} == {"1", "2"}
 
 def test_partitions_gpu_type_groups(client):
     r = client.get("/api/partitions", params={"since_hours": 24})
@@ -345,6 +611,102 @@ def test_partitions_running_only_empty_when_no_live_ids(client, fake_prom):
                    params={"since_hours": 24, "running_only": "true"})
     data = r.json()
     assert data["partitions"] == [] and data["trend"] == {}
+
+
+def test_partitions_vram_records(client):
+    r = client.get("/api/partitions/vram", params={"since_hours": 24})
+    assert r.status_code == 200
+    data = r.json()
+    by_id = {j["jobid"]: j for j in data["jobs"]}
+    # per-GPU peaks averaged: job1 (12+18)/2, job2 30, job3 8
+    assert by_id["1"]["vram_gb"] == 15.0
+    assert by_id["2"]["vram_gb"] == 30.0
+    assert by_id["3"]["vram_gb"] == 8.0
+    # mean_util from the utilization window (time-weighted mean)
+    assert by_id["1"]["mean_util"] == pytest.approx(50.0)
+    assert by_id["2"]["mean_util"] == pytest.approx(10.0)
+    assert by_id["3"]["mean_util"] == pytest.approx(92.5)
+    # gpu_hours from sacct (gpus x elapsed)
+    assert by_id["1"]["gpu_hours"] == pytest.approx(2 * 3600 / 3600)
+    assert by_id["2"]["gpu_hours"] == pytest.approx(1 * 7200 / 3600)
+    assert by_id["3"]["gpu_hours"] == pytest.approx(4 * 86400 / 3600)
+    # sorted by gpu_hours desc
+    hours = [j["gpu_hours"] for j in data["jobs"]]
+    assert hours == sorted(hours, reverse=True)
+    # total counts all candidates (here 3, under the cap)
+    assert data["total"] == 3
+
+
+def test_partitions_vram_discloses_truncation(client, fake_prom, monkeypatch):
+    monkeypatch.setattr(appmod, "_VRAM_RECORD_CAP", 2)
+    r = client.get("/api/partitions/vram", params={"since_hours": 24})
+    assert r.status_code == 200
+    data = r.json()
+    # 3 candidates but the cap of 2 is enforced on the payload…
+    assert len(data["jobs"]) == 2
+    # …while total still reports the full candidate count
+    assert data["total"] == 3
+
+
+def test_partitions_vram_running_only_filters_live(client, fake_prom):
+    r = client.get("/api/partitions/vram",
+                   params={"since_hours": 24, "running_only": "true"})
+    assert r.status_code == 200
+    ids = {j["jobid"] for j in r.json()["jobs"]}
+    assert ids == {"1", "2"}  # job 3 has no live GPU series
+    # the VRAM query carries the live-ID matcher
+    matcher = 'slurmjobid=~"^(?:1|2)$"'
+    assert any(matcher in q and "max by (slurmjobid, instance, gpu)" in q
+               for t, q in fake_prom.calls if t == "range")
+
+
+def test_partitions_vram_empty_when_no_live_ids(client, fake_prom):
+    fake_prom.live_ids = set()
+    r = client.get("/api/partitions/vram",
+                   params={"since_hours": 24, "running_only": "true"})
+    assert r.status_code == 200
+    assert r.json()["jobs"] == []
+    # no range query may be issued when nothing is running
+    assert not [q for t, q in fake_prom.calls if t == "range"]
+
+
+def test_partitions_vram_gpu_type_filter(client):
+    data = client.get("/api/partitions/vram",
+                      params={"since_hours": 24, "gpu_type": "h100"}).json()
+    assert data["total"] == 2
+    assert {j["jobid"] for j in data["jobs"]} == {"1", "2"}
+    data = client.get("/api/partitions/vram",
+                      params={"since_hours": 24, "gpu_type": "h200"}).json()
+    assert data["total"] == 1
+    assert [j["jobid"] for j in data["jobs"]] == ["3"]
+    # unknown type: no candidates, empty payload
+    data = client.get("/api/partitions/vram",
+                      params={"since_hours": 24, "gpu_type": "b300"}).json()
+    assert data["total"] == 0 and data["jobs"] == []
+
+
+def test_slurm_error_maps_to_502(client, fake_prom, monkeypatch):
+    def boom(ids, start_iso=None, **kw):
+        raise appmod.SlurmError("sacct timed out")
+
+    monkeypatch.setattr(appmod, "sacct_jobs", boom)
+    r = client.get("/api/partitions/vram", params={"since_hours": 24})
+    # the handler must produce the 502 itself; a reversed
+    # JSONResponse(status, body) call turns this into a 500.
+    assert r.status_code == 502
+    assert r.json()["error"] == "slurm_unreachable"
+
+
+def test_prometheus_error_maps_to_502(client, fake_prom, monkeypatch):
+    def boom():
+        raise appmod.PrometheusError("prometheus down")
+
+    monkeypatch.setattr(appmod, "get_prom", boom)
+    # /api/nodes degrades gracefully on Prometheus outages (by design);
+    # the vram endpoint propagates, exercising the handler.
+    r = client.get("/api/partitions/vram", params={"since_hours": 24})
+    assert r.status_code == 502
+    assert r.json()["error"] == "prometheus_unreachable"
 
 
 def test_nodes_endpoint(client):
@@ -440,6 +802,50 @@ def test_aggregate_partition_stats_fixture():
     assert out[0]["max_util"] == 60.0
     assert out[0]["job_count"] == 2
     assert set(out[0]) == {"name", "mean_util", "max_util", "job_count"}
+
+
+def test_jobs_efficiency_field(client):
+    data = client.get("/api/jobs", params={"since_hours": 24}).json()
+    by_id = {j["jobid"]: j for j in data["jobs"]}
+    assert by_id["1"]["efficiency"] == 50.0  # mean of 40, 60
+    assert by_id["2"]["efficiency"] == 10.0
+    assert by_id["3"]["efficiency"] == 92.5
+
+
+def test_jobs_efficiency_extremes(client):
+    data = client.get("/api/jobs", params={"since_hours": 24}).json()
+    assert [j["jobid"] for j in data["efficiency_high"]] == ["3", "1", "2"]
+    assert [j["jobid"] for j in data["efficiency_low"]] == ["2", "1", "3"]
+
+
+def test_jobs_extremes_bounded_by_search(client):
+    data = client.get("/api/jobs",
+                      params={"since_hours": 24, "search": "train.sh"}).json()
+    # search matches only job 1's sacct name; charts must show the searched rows
+    assert [j["jobid"] for j in data["jobs"]] == ["1"]
+    assert [j["jobid"] for j in data["efficiency_high"]] == ["1"]
+    assert [j["jobid"] for j in data["efficiency_low"]] == ["1"]
+
+
+def test_partitions_mean_occupancy(client):
+    data = client.get("/api/partitions", params={"since_hours": 24}).json()
+    by_name = {p["name"]: p for p in data["partitions"]}
+    # h100: 2 concurrent series / 16 GPUs = 12.5%; h200: 1 / 8 = 12.5%
+    assert by_name["h100"]["mean_occupancy"] == 12.5
+    assert by_name["h200"]["mean_occupancy"] == 12.5
+
+
+def test_partitions_mean_occupancy_running_only(client, fake_prom):
+    data = client.get("/api/partitions",
+                      params={"since_hours": 24, "running_only": "true"}).json()
+    by_name = {p["name"]: p for p in data["partitions"]}
+    # h200 (non-running job 3 only) is gone; h100 occupancy counts the
+    # matched running series only
+    assert set(by_name) == {"h100"}
+    assert by_name["h100"]["mean_occupancy"] == 12.5
+    ranges = [q for t, q in fake_prom.calls if t == "range"]
+    assert any('slurmjobid=~"^(?:1|2)$"' in q and "count by (gpu_type)" in q
+               for q in ranges), ranges
 
 
 def test_jobid_matcher_escapes():

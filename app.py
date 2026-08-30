@@ -16,7 +16,8 @@ from fastapi.staticfiles import StaticFiles
 
 from config import ConfigError, load_config
 from prom import PromClient, PrometheusError
-from slurm import SlurmError, sacct_jobs, show_nodes
+from slurm import (SlurmError, expand_node_list, sacct_jobs, show_jobs,
+                   show_nodes)
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 STATIC = os.path.join(HERE, "static")
@@ -120,18 +121,25 @@ def _sacct_epoch(value):
         return None
 
 
-def _fetch_job_window(since_hours, include_vram=True):
+def _fetch_job_window(since_hours, include_vram=True, user=None):
     """Fetch job-level utilization (and optionally vram) series for a window.
 
     Returns (jobs, start, end) where jobs is a list of dicts aggregated from
-    Prometheus over the window (no sacct enrichment yet).
+    Prometheus over the window (no sacct enrichment yet). When ``user`` is
+    given, the utilization query is scoped to that Slurm user so the whole
+    window is never pulled for a single-user request.
     """
     start, now = _job_window(since_hours)
     step = _step_for_range(now - start)
+    sel = ""
+    if user:
+        escaped = user.replace("\\", "\\\\").replace('"', '\\"')
+        sel = '{user="%s"}' % escaped
 
     def fetch():
         util = get_prom().query_range(
-            "max by (slurmjobid, instance, job, user, gpu_type) (slurm_job_utilization_gpu)",
+            "max by (slurmjobid, instance, job, user, gpu_type) "
+            "(slurm_job_utilization_gpu%s)" % sel,
             start, now, step,
         )
         vram = []
@@ -143,7 +151,7 @@ def _fetch_job_window(since_hours, include_vram=True):
             )
         return util, vram, start, now, step
 
-    key = ("jobs", since_hours, include_vram)
+    key = ("jobs", since_hours, include_vram, user)
     util, vram, start, now, step = _cached(key, 60, fetch)
 
     vram_by_job = defaultdict(list)
@@ -180,58 +188,176 @@ def _fetch_job_window(since_hours, include_vram=True):
     out = []
     for jid, job in jobs.items():
         vv = vram_by_job.get(jid)
+        mean_util = (round(job["eff_sum"] / job["eff_samples"], 2)
+                     if job["eff_samples"] else 0.0)
         out.append({
             "jobid": jid,
             "user": job["user"],
             "partition": job["partition"],
             "gpu_type": job["gpu_type"],
             "nodes": sorted(n for n in job["nodes"] if n),
-            "mean_util": round(job["eff_sum"] / job["eff_samples"], 2)
-            if job["eff_samples"] else 0.0,
+            "mean_util": mean_util,
+            # Average efficiency over the window; independent of job
+            # duration and of sacct availability.
+            "efficiency": round(mean_util, 1),
             "max_util": round(job["max_util"], 2),
             "gpu_hours_eff": round(job["eff_hours"], 2),
             "vram_avg": round(sum(vv) / len(vv), 1) if vv else None,
+            # Internal aggregands used only by api_users to calculate the
+            # true sample-weighted utilization across a user's jobs.
+            "_util_sum": job["eff_sum"],
+            "_util_samples": job["eff_samples"],
         })
     out.sort(key=lambda j: j["gpu_hours_eff"], reverse=True)
     return out, start, now, step
 
 
+def _public_job(job):
+    """Remove in-process aggregation fields from API job payloads."""
+    return {key: value for key, value in job.items() if not key.startswith("_")}
+
+
+def _jobid_sort_key(jobid):
+    """Deterministic numeric key tolerating ``parent_task``-suffixed IDs."""
+    base, sep, task = jobid.partition("_")
+
+    def _num(value):
+        try:
+            return int(value)
+        except ValueError:
+            return 0
+
+    return (_num(base), 1 if sep else 0, _num(task) if sep else 0)
+
+
+def _merge_job_rows(matches):
+    """Merge physical task rows of one job into a single metadata dict.
+
+    Rows are sorted by the suffix-tolerant numeric job-ID key; name/user/
+    account/partition come from the first row, RUNNING wins the state,
+    the earliest start wins, ``node_list`` becomes the expanded sorted
+    union, and GPU/CPU counts and allocation seconds are summed. Used by
+    both the active (scontrol) and historical (sacct) resolvers.
+    """
+    matches.sort(key=lambda r: _jobid_sort_key(r["jobid"]))
+    base = dict(matches[0])
+    if any(r.get("state") == "RUNNING" for r in matches):
+        base["state"] = "RUNNING"
+    starts = sorted(r.get("start") or "" for r in matches if r.get("start"))
+    if starts:
+        base["start"] = starts[0]
+    base["node_list"] = ",".join(sorted(
+        {n for r in matches for n in expand_node_list(r.get("node_list"))}))
+    base["gpus"] = sum(r.get("gpus") or 0 for r in matches)
+    base["ncpus"] = sum(r.get("ncpus") or 0 for r in matches)
+    base["allocation_seconds"] = sum(
+        (r.get("gpus") or 0) * (r.get("elapsed_s") or 0) for r in matches)
+    return base
+
+
+def _resolve_scontrol_metadata(jobid, observed_nodes, metadata):
+    """Resolve an active job from a ``scontrol show job`` snapshot.
+
+    ``jobid`` may be a bare Slurm array parent: every physical record whose
+    ``JobId`` or ``ArrayJobId`` equals it and whose node list intersects the
+    observed instances is merged, so a parent spread over several nodes
+    keeps name, state, start, and summed GPU allocation instead of being
+    left blank. Matching requires the node intersection even for exact
+    ``JobId`` hits, so an unrelated parent batch row is never absorbed.
+    Returns None when no record matches.
+    """
+    metadata = metadata or {}
+    observed = {n for n in observed_nodes if n}
+    if not observed:
+        return None
+    matches = [
+        r for r in metadata.values()
+        if (r["jobid"] == jobid or r.get("array_jobid") == jobid)
+        and observed & expand_node_list(r.get("node_list"))
+    ]
+    return _merge_job_rows(matches) if matches else None
+
+
+def _resolve_sacct_metadata(jobid, observed_nodes, metadata):
+    """Resolve the sacct rows for a Prometheus job ID.
+
+    Exact IDs match directly. A bare Slurm array parent (e.g. ``19975109``)
+    has no exact row: ``sacct -j`` returns only its task rows
+    (``19975109_0`` …), so every task whose node list intersects the
+    observed instances is merged into one row with the same aggregation
+    as the active scontrol path — including historical arrays whose
+    multiple matching tasks no longer exist in the controller.
+    """
+    metadata = metadata or {}
+    row = metadata.get(jobid)
+    if row:
+        return row
+    observed = {n for n in observed_nodes if n}
+    if not observed:
+        return None
+    prefix = jobid + "_"
+    matches = [task for key, task in metadata.items()
+               if key.startswith(prefix)
+               and observed & expand_node_list(task.get("node_list"))]
+    return _merge_job_rows(matches) if matches else None
+
+
+def _apply_metadata(job, row):
+    """Copy one resolved metadata row onto a job dict (no key deletion)."""
+    for key in ("name", "state", "start", "end", "node_list", "account"):
+        if row.get(key):
+            job[key] = row[key]
+    if row.get("gpus"):
+        job["gpus"] = row["gpus"]
+        if row.get("gpu_type"):
+            job["gpu_type"] = row["gpu_type"]
+    if row.get("ncpus"):
+        job["ncpus"] = row["ncpus"]
+    # Merged scontrol rows carry allocation_seconds; sacct rows (and the
+    # single-record case) derive the same value from elapsed x GPUs.
+    seconds = row.get("allocation_seconds") or \
+        (row.get("elapsed_s") or 0) * (row.get("gpus") or 0)
+    if seconds and row.get("gpus"):
+        alloc = seconds / 3600.0
+        util = job.get("mean_util") or 0.0
+        job["gpu_hours_alloc"] = round(alloc, 2)
+        job["gpu_hours_eff"] = round(alloc * util / 100.0, 2)
+
+
 def _enrich(jobs, since_hours):
     ids = [j["jobid"] for j in jobs]
-    start_iso = datetime.fromtimestamp(
-        time.time() - since_hours * 3600, tz=timezone.utc
-    ).strftime("%Y-%m-%d")
     if not ids:
         return
-    meta = _cached(("sacct", tuple(ids), start_iso), 300,
-                   lambda: sacct_jobs(ids, start_iso))
+    # Explicit job IDs bound the sacct request, so no visible-window -S
+    # date is passed: jobs that started before the chart window still get
+    # their name, state, start, and GPU allocation.
+    meta = _cached(("sacct", tuple(ids)), 300,
+                   lambda: sacct_jobs(ids))
+    # Active-job snapshot for array parents: scontrol only knows jobs the
+    # controller still holds, so a miss (or a failed call) falls back to
+    # the sacct rows above.
+    try:
+        active = _cached("scontrol_jobs", 30, show_jobs)
+    except SlurmError:
+        active = {}
     for job in jobs:
-        row = meta.get(job["jobid"])
+        row = (_resolve_scontrol_metadata(job["jobid"], job["nodes"], active)
+               or _resolve_sacct_metadata(job["jobid"], job["nodes"], meta))
         if not row:
             continue
-        for key in ("name", "state", "start", "end", "node_list", "account"):
-            if row.get(key):
-                job[key] = row[key]
-        if row.get("gpus"):
-            job["gpus"] = row["gpus"]
-            if row.get("gpu_type"):
-                job["gpu_type"] = row["gpu_type"]
-        if row.get("elapsed_s") and row.get("gpus"):
-            alloc = row["gpus"] * row["elapsed_s"] / 3600.0
-            util = job.get("mean_util") or 0.0
-            job["gpu_hours_alloc"] = round(alloc, 2)
-            job["gpu_hours_eff"] = round(alloc * util / 100.0, 2)
-            job["efficiency"] = round(util, 1)
+        _apply_metadata(job, row)
 
 
 @app.exception_handler(PrometheusError)
 def prom_error_handler(request, exc):
-    return JSONResponse(502, {"error": "prometheus_unreachable", "detail": str(exc)})
+    return JSONResponse(content={"error": "prometheus_unreachable",
+                                  "detail": str(exc)}, status_code=502)
 
 
 @app.exception_handler(SlurmError)
 def slurm_error_handler(request, exc):
-    return JSONResponse(502, {"error": "slurm_unreachable", "detail": str(exc)})
+    return JSONResponse(content={"error": "slurm_unreachable",
+                                 "detail": str(exc)}, status_code=502)
 
 
 @app.get("/")
@@ -250,7 +376,7 @@ def health():
 
 # Deep-link routes: the SPA is a single page, so every view path serves the
 # same shell and the frontend (app.js) restores state from the URL path.
-_VIEW_PATHS = ["/jobs", "/partitions", "/nodes"]
+_VIEW_PATHS = ["/jobs", "/partitions", "/users", "/nodes"]
 
 
 for _p in _VIEW_PATHS:
@@ -271,13 +397,31 @@ def node_page(nodename: str):
     return FileResponse(os.path.join(STATIC, "index.html"))
 
 
+@app.get("/user/{username}")
+def user_page(username: str):
+    return FileResponse(os.path.join(STATIC, "index.html"))
+
+
+def _efficiency_extremes(jobs, count=30):
+    """Top/bottom average-efficiency jobs with deterministic ties.
+
+    ``efficiency_high`` is the highest-efficiency jobs, descending;
+    ``efficiency_low`` is the lowest-efficiency jobs, ascending. Ties break by
+    job ID so both lists are stable across calls.
+    """
+    ordered = sorted(jobs, key=lambda j: (j["efficiency"], j["jobid"]))
+    low = ordered[:count]
+    high = sorted(ordered[-count:], key=lambda j: (-j["efficiency"], j["jobid"]))
+    return high, low
+
+
 @app.get("/api/jobs")
 def api_jobs(
     since_hours: float = Query(24, gt=0, le=168),
     partition: str = "",
     user: str = "",
     search: str = "",
-    limit: int = Query(500, ge=1, le=2000),
+    limit: int = Query(100, ge=1, le=1000),
     running_only: bool = Query(False),
 ):
     if running_only:
@@ -287,17 +431,31 @@ def api_jobs(
         if not live:
             start, now = _job_window(since_hours)
             return {"window": {"start": start, "end": now}, "count": 0,
-                    "partitions": [], "jobs": []}
-    jobs, start, now, _ = _fetch_job_window(since_hours)
+                    "partitions": [], "jobs": [],
+                    "efficiency_high": [], "efficiency_low": []}
+    # The user filter is pushed into the Prometheus query (server-side),
+    # not applied after the fact: a single-user request must not pull and
+    # scan the whole window for everyone else's jobs.
+    user = user.strip()
+    jobs, start, now, _ = _fetch_job_window(since_hours, user=user or None)
     if running_only:
         jobs = [j for j in jobs if j["jobid"] in live]
     if partition:
         jobs = [j for j in jobs if j["partition"] == partition]
     if user:
-        jobs = [j for j in jobs if j["user"] == user.lower()]
+        # PromQL's exact user matcher is case-sensitive; retain the typed
+        # label case for the query, then accept capitalization drift here.
+        jobs = [j for j in jobs if j["user"].casefold() == user.casefold()]
+    # Efficiency extremes over the full filtered candidate set (before the
+    # table limit and sacct enrichment): the high/low charts must not be
+    # biased by job duration or the bounded table rows.
+    high, low = _efficiency_extremes(jobs)
     # Bound the sacct enrichment cost before it; name search therefore only
-    # covers the top-``limit`` jobs by effective GPU hours.
-    jobs = jobs[:limit]
+    # covers the top-``limit`` jobs by effective GPU hours. Running-only
+    # ignores the limit: every live GPU job is returned (the UI disables
+    # the limit box while that mode is active).
+    if not running_only:
+        jobs = jobs[:limit]
     _enrich(jobs, since_hours)
     if search:
         needle = search.lower()
@@ -305,12 +463,78 @@ def api_jobs(
             j for j in jobs
             if needle in j["jobid"] or needle in (j.get("name") or "").lower()
         ]
+        # Name search matches sacct names, so the charts must show the same
+        # bounded searched rows.
+        high, low = _efficiency_extremes(jobs)
     partitions = sorted({j["partition"] for j in jobs if j["partition"]})
     return {
         "window": {"start": start, "end": now},
         "count": len(jobs),
         "partitions": partitions,
-        "jobs": jobs,
+        "jobs": [_public_job(j) for j in jobs],
+        "efficiency_high": [_public_job(j) for j in high],
+        "efficiency_low": [_public_job(j) for j in low],
+    }
+
+
+@app.get("/api/users")
+def api_users(since_hours: float = Query(24, gt=0, le=168)):
+    """Per-user GPU-activity aggregation over the window.
+
+    Built from the same job window the Jobs tab uses (utilization and VRAM
+    range queries, user label preserved, TTL-cached with that tab) plus the
+    running-only instant liveness check — no sacct, so the list stays cheap.
+    ``util_gpu_hours`` is the utilization-weighted GPU-hours
+    (mean util x series hours), i.e. the same definition the Jobs tab's
+    effective GPU-hours use before the allocation factor. Users are
+    ordered by it (descending), ties broken by name.
+    """
+    jobs, start, now, _ = _fetch_job_window(since_hours)
+    live = _running_gpu_job_ids()
+    agg = {}
+    for j in jobs:
+        u = j["user"]
+        if not u:
+            continue
+        a = agg.setdefault(u, {
+            "jobs": 0, "running_jobs": 0, "util_sum": 0.0,
+            "util_samples": 0, "util_gpu_hours": 0.0,
+            "vram_sum": 0.0, "vram_n": 0, "gpu_types": set(),
+        })
+        a["jobs"] += 1
+        if j["jobid"] in live:
+            a["running_jobs"] += 1
+        a["util_sum"] += j.get("_util_sum", 0.0)
+        a["util_samples"] += j.get("_util_samples", 0)
+        a["util_gpu_hours"] += j.get("gpu_hours_eff") or 0.0
+        if j.get("gpu_type"):
+            a["gpu_types"].add(j["gpu_type"])
+        v = j.get("vram_avg")
+        if v is not None:
+            a["vram_sum"] += v
+            a["vram_n"] += 1
+    users = [
+        {
+            "user": u,
+            "jobs": a["jobs"],
+            "running_jobs": a["running_jobs"],
+            # Sample-weighted mean utilization across the user's GPU series;
+            # effective GPU-hours already include utilization and cannot be
+            # used as this weight without squaring it.
+            "mean_util": round(a["util_sum"] / a["util_samples"], 2)
+            if a["util_samples"] else 0.0,
+            "util_gpu_hours": round(a["util_gpu_hours"], 2),
+            "vram_avg": round(a["vram_sum"] / a["vram_n"], 1)
+            if a["vram_n"] else None,
+            "gpu_types": sorted(a["gpu_types"]),
+        }
+        for u, a in agg.items()
+    ]
+    users.sort(key=lambda r: (-r["util_gpu_hours"], r["user"]))
+    return {
+        "window": {"start": start, "end": now},
+        "count": len(users),
+        "users": users,
     }
 
 
@@ -342,15 +566,20 @@ def api_job_detail(jobid: str, since_hours: float = Query(24, gt=0, le=168)):
             {"metric": s["metric"], "values": _series_values(s)} for s in vram
         ],
     }
-    start_iso = datetime.fromtimestamp(start, tz=timezone.utc).strftime("%Y-%m-%d")
-    meta = _cached(
-        ("sacct", (jobid,), start_iso),
-        300,
-        lambda: sacct_jobs([jobid], start_iso).get(jobid),
-    )
+    observed = sorted({s["metric"].get("instance", "") for s in util
+                       if s["metric"].get("instance")})
+    sacct_meta = _cached(("sacct", (jobid,)), 300, lambda: sacct_jobs([jobid]))
+    try:
+        active = _cached("scontrol_jobs", 30, show_jobs)
+    except SlurmError:
+        active = {}
+    meta = (_resolve_scontrol_metadata(jobid, observed, active)
+            or _resolve_sacct_metadata(jobid, observed, sacct_meta))
     if meta:
-        # Parsed epochs let the frontend draw lifecycle markers; the
-        # human-readable start/end strings are preserved as-is.
+        # Copy so the cached sacct row is not mutated; parsed epochs let
+        # the frontend draw lifecycle markers, the human-readable
+        # start/end strings are preserved as-is.
+        meta = dict(meta)
         meta["start_epoch"] = _sacct_epoch(meta.get("start"))
         meta["end_epoch"] = _sacct_epoch(meta.get("end"))
     return {"jobid": jobid, "window": {"start": start, "end": now}, "step": step,
@@ -371,7 +600,7 @@ def _partition_window(since_hours, running_only=False, now=None):
     if running_only:
         live = _running_gpu_job_ids()
         if not live:
-            return [], {}, {}, start, now, step
+            return [], {}, {}, {}, start, now, step
         sel = "{" + _jobid_matcher(live) + "}"
 
     def fetch():
@@ -384,14 +613,27 @@ def _partition_window(since_hours, running_only=False, now=None):
             "avg by (gpu_type) (slurm_job_utilization_gpu%s)" % sel,
             start, now, step,
         )
-        return stats, trend, start, now, step
+        # Concurrent allocated GPUs per GPU type, for the window-average
+        # occupancy chart (same selector so running-only matches here too).
+        occ = get_prom().query_range(
+            "count by (gpu_type) (slurm_job_utilization_gpu%s)" % sel,
+            start, now, step,
+        )
+        return stats, trend, occ, start, now, step
 
     key = ("parts", since_hours, running_only)
-    stats, trend, start, now, step = _cached(key, 60, fetch)
+    stats, trend, occ, start, now, step = _cached(key, 60, fetch)
     out = aggregate_partition_stats(stats)
     trend_out = {
         s["metric"].get("gpu_type", "unknown"): _series_values(s) for s in trend
     }
+    # Window-average allocated GPU count per GPU type, for mean occupancy.
+    occupancy = {}
+    for s in occ:
+        values = _series_values(s)
+        if values:
+            name = s["metric"].get("gpu_type", "unknown")
+            occupancy[name] = sum(v for _, v in values) / len(values)
     # Observed instances per group, for the capacity join in api_partitions.
     instances = {}
     for s in stats:
@@ -399,7 +641,7 @@ def _partition_window(since_hours, running_only=False, now=None):
         inst = m.get("instance", "")
         if inst:
             instances.setdefault(m.get("gpu_type", "unknown"), set()).add(inst)
-    return out, trend_out, instances, start, now, step
+    return out, trend_out, instances, occupancy, start, now, step
 
 
 def aggregate_partition_stats(stats):
@@ -470,15 +712,114 @@ def _gpu_capacity(groups, instances, nodes, allocs):
 @app.get("/api/partitions")
 def api_partitions(since_hours: float = Query(24, gt=0, le=168),
                    running_only: bool = Query(False)):
-    groups, trend, instances, start, now, step = _partition_window(since_hours, running_only)
+    groups, trend, instances, occupancy, start, now, step = _partition_window(since_hours, running_only)
     nodes = _cached("scontrol_nodes", 30, show_nodes)
     _, _, allocs = _node_current()
     _gpu_capacity(groups, instances, nodes, allocs)
+    for g in groups:
+        avg_alloc = occupancy.get(g["name"])
+        total = g.get("gpus_total") or 0
+        if avg_alloc is not None and total > 0:
+            g["mean_occupancy"] = round(min(100.0, avg_alloc / total * 100.0), 1)
+        else:
+            g["mean_occupancy"] = None
     return {
         "window": {"start": start, "end": now},
         "step": step,
         "partitions": groups,
         "trend": trend,
+    }
+
+
+# sacct -j over tens of thousands of IDs exceeds the command timeout, so
+# the VRAM chart enriches at most this many jobs (top by effective
+# GPU-hours); the response reports the total candidate count so the UI
+# can disclose the truncation.
+_VRAM_RECORD_CAP = 2000
+
+
+def _vram_job_records(since_hours, running_only=False, gpu_type=""):
+    """Per-job VRAM records for the utilization-filtered distribution chart.
+
+    Each record carries the job's time-weighted mean utilization, its
+    average per-GPU peak VRAM (GB), and its allocated GPU-hours from sacct.
+    Binning and the utilization range filter happen client-side so the
+    slider can rebin without refetching. A non-empty ``gpu_type`` keeps
+    only jobs of that GPU type, so the candidate ``total`` and the
+    enrichment cap apply to the selected type. Returns (records, total,
+    start, now, step) where ``total`` counts candidates before the
+    enrichment cap.
+    """
+    start, now = _job_window(since_hours)
+    step = _step_for_range(now - start)
+    live = None
+    if running_only:
+        live = _running_gpu_job_ids()
+        if not live:
+            return [], 0, start, now, step
+    jobs, start, now, step = _fetch_job_window(since_hours, include_vram=False)
+    if live is not None:
+        jobs = [j for j in jobs if j["jobid"] in live]
+    if gpu_type:
+        jobs = [j for j in jobs if j["gpu_type"] == gpu_type]
+    sel = "" if live is None else "{" + _jobid_matcher(live) + "}"
+
+    def fetch():
+        return get_prom().query_range(
+            "max by (slurmjobid, instance, gpu) (slurm_job_memory_usage_gpu%s / "
+            "1073741824)" % sel,
+            start, now, step,
+        )
+
+    vram = _cached(("vram_gb", since_hours, running_only), 60, fetch)
+    # Per-GPU peak VRAM (GB) over the window; a 0 sample means the GPU was
+    # never reported with memory and cannot be a peak.
+    peaks = defaultdict(list)
+    for s in vram:
+        jid = s["metric"].get("slurmjobid", "")
+        vals = [v for _, v in _series_values(s) if v > 0]
+        if jid and vals:
+            peaks[jid].append(max(vals))
+    records = []
+    for j in jobs:
+        pk = peaks.get(j["jobid"])
+        if not pk:
+            continue
+        records.append({
+            "jobid": j["jobid"],
+            "user": j["user"],
+            "gpu_type": j["gpu_type"],
+            "mean_util": j["mean_util"],
+            "vram_gb": round(sum(pk) / len(pk), 1),
+            "gpu_hours": None,
+            "gpu_hours_eff": j.get("gpu_hours_eff") or 0.0,
+        })
+    records.sort(key=lambda r: r["gpu_hours_eff"], reverse=True)
+    total = len(records)
+    records = records[:_VRAM_RECORD_CAP]
+    ids = sorted({r["jobid"] for r in records})
+    if ids:
+        meta = _cached(("sacct", tuple(ids)), 300, lambda: sacct_jobs(ids))
+        for r in records:
+            row = meta.get(r["jobid"]) or {}
+            if row.get("gpus") and row.get("elapsed_s"):
+                r["gpu_hours"] = round(row["gpus"] * row["elapsed_s"] / 3600.0, 2)
+    for r in records:
+        r.pop("gpu_hours_eff", None)
+    records.sort(key=lambda r: (r["gpu_hours"] or 0.0), reverse=True)
+    return records, total, start, now, step
+
+
+@app.get("/api/partitions/vram")
+def api_part_vram(since_hours: float = Query(24, gt=0, le=168),
+                  running_only: bool = Query(False),
+                  gpu_type: str = ""):
+    records, total, start, now, step = _vram_job_records(since_hours, running_only, gpu_type)
+    return {
+        "window": {"start": start, "end": now},
+        "step": step,
+        "total": total,
+        "jobs": records,
     }
 
 
@@ -572,11 +913,8 @@ def _node_job_start(name, now):
         return fallback_start
     if not live:
         return fallback_start
-    start_iso = datetime.fromtimestamp(
-        now - 7 * 86400, tz=timezone.utc
-    ).strftime("%Y-%m-%d")
     try:
-        meta = sacct_jobs(sorted(live), start_iso)
+        meta = sacct_jobs(sorted(live))
     except SlurmError:
         return fallback_start
     starts = [e for e in (_sacct_epoch((meta.get(j) or {}).get("start"))

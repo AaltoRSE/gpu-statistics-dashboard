@@ -13,27 +13,78 @@ collection) from:
 The frontend is a plain-JS single page (Plotly.js via CDN) with three
 interactive tabs.
 
+A **light/dark theme** toggle sits in the header (top right). Dark is the
+default; the light preference is remembered in `localStorage` and the
+OS-level preference applies when no choice has been saved.
+
 ## Features
 
 ### Jobs tab
-- Job table (top 500 by effective GPU-hours in the window) with **search** by
-  job id or job name, **user filter**, **partition filter**, window
-  selection (24 h / 3 d / 7 d), and a **Running only** toggle (jobs with a
-  live Prometheus GPU series).
+- Job table (top N by effective GPU-hours in the window, **N configurable**
+  in the "Jobs to fetch" box, validated to 1–1000, default 100; the box is
+  disabled while **Running only** is checked), window selection
+  (24 h / 3 d / 7 d), and a **Running only** toggle (jobs with a live
+  Prometheus GPU series). **Search** (job id / name) and the **partition**
+  filter re-render the table client-side over the fetched rows — no
+  fetch, no blur, and the efficiency charts are left untouched (they
+  always show the fetched set's extremes). Results blur with a "Data is
+  loading" popup only while a network fetch (window / running-only /
+  fetch-limit changes, tab first visit) is in flight.
+  Slurm array parents (Prometheus labels the work with the bare job ID)
+  resolve their name/state/start/GPU allocation by merging **all** of the
+  parent's physical task records (via `scontrol show job` while active,
+  falling back to `sacct -j` task rows once finished) whose node lists
+  intersect the observed nodes; tasks that ran elsewhere are excluded,
+  and a parent with no node-matching task is left blank rather than
+  misattributed.
 - Clickable column sorting; click a row (or a bar in the chart) for a
   per-GPU utilization + VRAM time-series detail view with sacct metadata
   and job start/end markers.
-- Effective GPU-hours = allocated GPU-hours × mean utilization;
-  efficiency = mean utilization of the job's GPUs.
+- Efficiency charts: the 30 highest- and 30 lowest-average-efficiency jobs
+  (average efficiency = mean utilization over the window, which — unlike
+  effective GPU-hours — is not biased by job duration). The charts always
+  show the extremes of the fetched set — search and partition filters
+  change the table only, never the graphs.
+- Job metadata is independent of the selected window: jobs that started
+  before the chart window still show their name, state, true start, and
+  GPU allocation (explicit sacct job-ID lookup, no visible-window date).
+  Effective GPU-hours = allocated GPU-hours × mean utilization.
+
+### Users tab
+- User list aggregated per Slurm user over the window: job count, running
+  job count, mean utilization, utilization-weighted GPU-hours, mean VRAM,
+  and GPU types. The list is built from the same (TTL-cached) job-window
+  queries as the Jobs tab — no sacct — so it loads cheaply.
+- The **User** box filters the loaded list locally as you type — no fetch
+  per keystroke. Pressing **Enter** (or clicking a table row) finalizes
+  the selection; only then is that user's job list fetched, server-side
+  scoped by a `{user="…"}` Prometheus selector, and shown in the jobs
+  card below (same enrichment and detail links as the Jobs tab). Raw text
+  that matches no list entry is still sent, so admins can look up users
+  with no GPU activity in the window.
+- **Running only** hides users with no live job and re-fetches the
+  selected user's running jobs.
 
 ### Partitions tab
 - GPU-type view: mean utilization per GPU type (time-weighted over the
-  window), a utilization trend chart, and GPU capacity per type.
-- **Running only** toggle restricts both charts and the table to jobs with
-  a live Prometheus GPU series.
+  window), a utilization trend chart, a mean-occupancy chart (window
+  average of allocated GPUs / resolved capacity per type), and GPU capacity
+  per type.
+- **Running only** toggle restricts the bar, trend, and occupancy charts
+  and the table to jobs with a live Prometheus GPU series.
 - `GPUs` shows allocated/total: when a group's nodes all resolve to one
   scontrol GPU type the total spans every node of that type (idle capacity
   included), otherwise only the observed instances count.
+- **VRAM distribution by job**: a histogram of jobs binned by their
+  average per-GPU peak VRAM (16 GB bins) over the window, weighted by
+  allocated GPU-hours (sacct). A **GPU type** selector filters the
+  records server-side (same labels as the other three graphs); the
+  **Normalize** checkbox switches the bars to % of shown GPU-hours, and
+  the dual **GPU utilization range** slider filters jobs by mean
+  utilization client-side (no refetch). The card shares the tab's
+  window and **Running only** controls. While its fetch is in flight the
+  card shows a "Data is loading" popup on its own — the other graphs and
+  the table stay live and interactive.
 
 ### Nodes tab
 - All GPU nodes with live utilization/VRAM (instant Prometheus query),
@@ -44,6 +95,17 @@ interactive tabs.
 - Click a row for the node's per-GPU utilization + VRAM time series,
   defaulting to **since job start** (earliest sacct start of the jobs
   actively reporting on that node; 1 h / 6 h / 24 h windows available).
+
+### Deep links and cross-tab links
+- Shareable URLs: `/job/<id>` (Jobs tab + job detail), `/node/<name>`
+  (Nodes tab + node detail), `/user/<name>` (Users tab with that user's
+  jobs fetched), plus `/jobs`, `/partitions`, `/users`, `/nodes` for the
+  plain tabs.
+- In the **Jobs** table the **User** column links to `/user/<name>`; in
+  the **Nodes** tab each active job's owner does the same (job IDs link
+  to the job detail); in the **Users** tab's job list each job ID links
+  to the job detail. Selecting a user anywhere keeps the URL in sync, so
+  a view can be shared after a single click.
 
 ## Running
 
@@ -74,9 +136,10 @@ Cluster access is **strictly read-only**: the app only issues `sacct -j`,
 | Endpoint | Purpose |
 |---|---|
 | `GET /api/health` | backend + Prometheus connectivity |
-| `GET /api/jobs?since_hours=&user=&partition=&search=&limit=&running_only=` | job table (Prometheus discovery + sacct enrichment; `running_only=true` keeps only jobs with a live GPU series) |
+| `GET /api/jobs?since_hours=&user=&partition=&search=&limit=&running_only=` | job table (Prometheus discovery + sacct enrichment; `running_only=true` keeps only jobs with a live GPU series) plus `efficiency_high` / `efficiency_low` (30 most/least average-efficient jobs) |
 | `GET /api/jobs/{jobid}?since_hours=` | per-GPU utilization/VRAM series + metadata (incl. parsed `start_epoch`/`end_epoch`) |
-| `GET /api/partitions?since_hours=&running_only=` | utilization per GPU type + trend + allocated/total GPU capacity |
+| `GET /api/partitions?since_hours=&running_only=` | utilization per GPU type + trend + `mean_occupancy` (window-average allocated share) + allocated/total GPU capacity |
+| `GET /api/partitions/vram?since_hours=&running_only=&gpu_type=` | per-job VRAM records for the distribution chart (average per-GPU peak VRAM in GB, mean utilization, allocated GPU-hours); `gpu_type` keeps only one GPU-type group. Binning and the utilization-range filter happen client-side. `total` counts all candidates in the window; `jobs` holds only the top 2000 by effective GPU-hours, since a `sacct -j` over the whole window would time out |
 | `GET /api/nodes?gpu_only=&refresh=` | node states + live utilization/VRAM + active jobs (`refresh=true` bypasses the 30 s cache) |
 | `GET /api/nodes/{name}?view=job_start\|1\|6\|24` | per-GPU utilization/VRAM series for one node (`job_start` = since the earliest active job started) |
 

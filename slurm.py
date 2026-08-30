@@ -30,7 +30,6 @@ _PART_BLOCK = re.compile(r"^PartitionName=(\S+)")
 _KV = re.compile(r"^(\w+)=([^\s]*)")
 _GPU_RES = re.compile(r"gpu:([\w.-]+):(\d+)|(?:^|,)gpu:(\d+)(?:,|$)")
 _TRES_GPU = re.compile(r"gres/gpu(?::([\w.-]+))?=(\d+)")
-_RANGE_RE = re.compile(r"^([A-Za-z0-9]+)\[(\d+)(?:-(\d+))?(?:,([0-9,-]+))?\]$")
 
 
 class SlurmError(Exception):
@@ -89,6 +88,62 @@ def parse_gres(text):
         m = re.match(r"gpu:([\w.-]+):(\d+)", part.strip())
         if m:
             out.append((m.group(1), int(m.group(2))))
+    return out
+
+
+def _split_hostlist(value):
+    """Split a Slurm host list on commas outside brackets.
+
+    ``gpu[01-03,07],dgx4`` -> ``["gpu[01-03,07]", "dgx4"]``; the comma of a
+    node-range list belongs to the segment, not to the separator set.
+    """
+    segments, current, depth = [], [], 0
+    for ch in value:
+        if ch == "[":
+            depth += 1
+        elif ch == "]":
+            depth = max(0, depth - 1)
+        if ch == "," and depth == 0:
+            segments.append("".join(current))
+            current = []
+        else:
+            current.append(ch)
+    segments.append("".join(current))
+    return [s for s in segments if s]
+
+
+def expand_node_list(value):
+    """Slurm node list to a set of node names.
+
+    ``gpu[01-03,07-09]`` expands every comma-separated singleton or range,
+    preserving the zero padding of each member. Plain hosts remain
+    singletons; unsupported syntax (wildcards, strides) is retained as-is.
+    """
+    out = set()
+    for segment in _split_hostlist((value or "").strip()):
+        m = re.match(r"^([A-Za-z0-9]+)\[([0-9,-]+)\]$", segment)
+        if not m:
+            out.add(segment)
+            continue
+        prefix, members = m.groups()
+        expanded = []
+        try:
+            for member in members.split(","):
+                bounds = member.split("-")
+                if len(bounds) == 1 and bounds[0].isdigit():
+                    expanded.append(prefix + bounds[0])
+                elif (len(bounds) == 2 and bounds[0].isdigit()
+                      and bounds[1].isdigit()):
+                    start, end = map(int, bounds)
+                    width = len(bounds[0])
+                    expanded.extend("%s%0*d" % (prefix, width, n)
+                                    for n in range(start, end + 1))
+                else:
+                    raise ValueError(member)
+        except ValueError:
+            out.add(segment)
+            continue
+        out.update(expanded)
     return out
 
 
@@ -168,6 +223,62 @@ def show_nodes():
 def show_partitions():
     return parse_scontrol_partitions(_run(["scontrol", "show", "partitions"]))
 
+def parse_scontrol_jobs(output):
+    """Parse ``scontrol show job -o`` output into a job metadata dict.
+
+    Returns ``{physical_jobid: metadata}`` where metadata uses the same
+    lowercase shape as ``sacct_jobs`` rows, plus ``array_jobid`` and
+    ``array_task_id``. Array parents have one record per physical task
+    (``JobId=parent`` only for the parent's own row; tasks carry their own
+    ``JobId`` and the shared ``ArrayJobId``).
+    """
+    jobs = {}
+    for line in output.splitlines():
+        line = line.strip()
+        if not line.startswith("JobId="):
+            continue
+        f = _parse_kv_block([line])
+        jobid = f.get("JobId", "")
+        if not jobid:
+            continue
+        state = f.get("JobState", "")
+        end = f.get("EndTime", "")
+        # Slurm projects EndTime for live jobs; only report it once the
+        # job has actually ended.
+        if state in ("RUNNING", "PENDING") or end == "Unknown":
+            end = ""
+        user = f.get("UserId", "")
+        user = re.sub(r"\(\d+\)$", "", user)
+        gpus, gpu_type = parse_alloc_tres(f.get("AllocTRES"))
+        jobs[jobid] = {
+            "jobid": jobid,
+            "array_jobid": f.get("ArrayJobId", "") or "",
+            "array_task_id": f.get("ArrayTaskId", "") or "",
+            "name": f.get("JobName", "") or "",
+            "user": user,
+            "account": f.get("Account", "") or "",
+            "partition": f.get("Partition", "") or "",
+            "state": state,
+            "start": f.get("StartTime", "") if f.get("StartTime", "") != "Unknown" else "",
+            "end": end,
+            "elapsed_s": parse_elapsed(f.get("RunTime", "")),
+            "gpus": gpus,
+            "gpu_type": gpu_type,
+            "node_list": f.get("NodeList", "") or "",
+            "ncpus": _int(f.get("NumCPUs")),
+        }
+    return jobs
+
+
+def show_jobs():
+    """All jobs currently known to the controller (read-only).
+
+    ``scontrol show job -o`` cannot take a comma-separated ID list, so one
+    call returns every job; callers filter the result instead of spawning
+    a process per requested job.
+    """
+    return parse_scontrol_jobs(_run(["scontrol", "show", "job", "-o"]))
+
 
 def _parse_sacct_row(parts):
     if len(parts) < len(SACCT_FIELDS):
@@ -175,13 +286,15 @@ def _parse_sacct_row(parts):
     return dict(zip(SACCT_FIELDS, parts[: len(SACCT_FIELDS)]))
 
 
-def _sacct_batch(job_ids, start_iso):
+def _sacct_batch(job_ids, start_iso=None):
     cmd = [
         "sacct",
         "-j",
         ",".join(job_ids),
-        "-S",
-        start_iso,
+    ]
+    if start_iso:
+        cmd += ["-S", start_iso]
+    cmd += [
         "-o",
         ",".join(SACCT_FIELDS),
         "--parsable2",
@@ -202,12 +315,16 @@ def _sacct_batch(job_ids, start_iso):
     return jobs
 
 
-def sacct_jobs(job_ids, start_iso, workers=8):
-    """Fetch metadata for many jobs. Returns {jobid: enriched dict}."""
+def sacct_jobs(job_ids, start_iso=None, workers=8):
+    """Fetch metadata for many jobs. Returns {jobid: enriched dict}.
+
+    ``start_iso`` is an optional ``-S`` date filter. Explicit job IDs already
+    bound the request, so callers may omit it to retrieve jobs that started
+    before the visible window.
+    """
     job_ids = sorted(set(job_ids))
     if not job_ids:
         return {}
-    start_iso = start_iso or "2020-01-01"
     batches = [job_ids[i : i + 100] for i in range(0, len(job_ids), 100)]
     results = {}
     warnings = []

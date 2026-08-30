@@ -9,13 +9,31 @@ from slurm import (  # noqa: E402
     SACCT_FIELDS,
     _parse_kv_block,
     _parse_sacct_row,
+    _run,
+    expand_node_list,
     parse_alloc_tres,
     parse_elapsed,
     parse_gres,
+    parse_scontrol_jobs,
     parse_scontrol_nodes,
     parse_scontrol_partitions,
 )
 from config import _read_jobgraph_conf  # noqa: E402
+
+
+def test_expand_node_list_range_and_list():
+    assert expand_node_list("gpu[01-03,07],dgx4") == {
+        "gpu01", "gpu02", "gpu03", "gpu07", "dgx4"}
+
+
+
+def test_expand_node_list_multiple_ranges():
+    assert expand_node_list("gpu[01-03,07-09]") == {
+        "gpu01", "gpu02", "gpu03", "gpu07", "gpu08", "gpu09"}
+
+def test_expand_node_list_single_host():
+    assert expand_node_list("gpu50") == {"gpu50"}
+    assert expand_node_list("a[1],b") == {"a1", "b"}
 
 
 def test_parse_elapsed_full():
@@ -142,3 +160,87 @@ def test_read_jobgraph_conf_sectioned(tmp_path):
 
 def test_read_jobgraph_conf_missing(tmp_path):
     assert _read_jobgraph_conf(str(tmp_path / "nope.conf")) == {}
+
+
+def test_sacct_batch_no_start_iso_omits_flag(monkeypatch):
+    import slurm
+
+    cmds = {}
+
+    def fake_run(cmd, timeout=30):
+        cmds["cmd"] = cmd
+        return ""
+
+    monkeypatch.setattr(slurm, "_run", fake_run)
+    slurm._sacct_batch(["7"])
+    assert "-S" not in cmds["cmd"]
+    slurm._sacct_batch(["7"], start_iso="2020-01-01")
+    assert "-S" in cmds["cmd"]
+    assert cmds["cmd"][cmds["cmd"].index("-S") + 1] == "2020-01-01"
+
+
+def test_sacct_jobs_default_no_date(monkeypatch):
+    import slurm
+
+    seen = {}
+
+    def fake_batch(job_ids, start_iso=None):
+        seen["start_iso"] = start_iso
+        return {}
+
+    monkeypatch.setattr(slurm, "_sacct_batch", fake_batch)
+    slurm.sacct_jobs(["7"])
+    assert seen["start_iso"] is None
+
+
+SCTRL_JOB_SAMPLE = """\
+JobId=100 JobName=train UserId=alice(1001) GroupId=alice(1001) Account=acc QOS=normal JobState=RUNNING NodeList=gpu1-2 NumNodes=2 NumCPUs=16 RunTime=01:02:03 StartTime=2026-08-30T10:00:00 EndTime=2026-08-31T10:00:00 Partition=gpu-h100 AllocTRES=cpu=16,gres/gpu:h100=4
+JobId=201 JobName=arr UserId=bob(1002) GroupId=bob(1002) Account=acc QOS=normal JobState=PENDING NodeList= NumNodes=1 NumCPUs=4 RunTime=00:00:00 StartTime=Unknown EndTime=Unknown Partition=batch AllocTRES=cpu=4
+JobId=202 ArrayJobId=201 ArrayTaskId=0-224 JobName=arr UserId=bob(1002) GroupId=bob(1002) Account=acc QOS=normal JobState=PENDING NodeList= NumNodes=1 NumCPUs=4 RunTime=00:00:00 StartTime=Unknown EndTime=Unknown Partition=batch AllocTRES=cpu=4
+"""
+
+
+def test_parse_scontrol_jobs_normal_job():
+    jobs = parse_scontrol_jobs(SCTRL_JOB_SAMPLE)
+    assert set(jobs) == {"100", "201", "202"}
+    j = jobs["100"]
+    assert j["jobid"] == "100"
+    assert j["array_jobid"] == "" and j["array_task_id"] == ""
+    assert j["name"] == "train"
+    assert j["user"] == "alice"  # uid suffix stripped
+    assert j["account"] == "acc"
+    assert j["partition"] == "gpu-h100"
+    assert j["state"] == "RUNNING"
+    assert j["start"] == "2026-08-30T10:00:00"
+    assert j["end"] == ""  # projected end hidden for RUNNING
+    assert j["elapsed_s"] == 3723
+    assert j["gpus"] == 4 and j["gpu_type"] == "h100"
+    assert j["node_list"] == "gpu1-2"
+    assert j["ncpus"] == 16
+
+
+def test_parse_scontrol_jobs_array_tasks_share_parent():
+    jobs = parse_scontrol_jobs(SCTRL_JOB_SAMPLE)
+    p = jobs["201"]
+    t = jobs["202"]
+    assert p["array_jobid"] == "" or p["array_jobid"] == "201"
+    assert t["array_jobid"] == "201"
+    assert t["array_task_id"] == "0-224"
+    # PENDING: no start/end, no runtime
+    assert t["start"] == "" and t["end"] == "" and t["elapsed_s"] == 0
+    assert t["node_list"] == ""
+
+
+def test_show_jobs_command(monkeypatch):
+    import slurm
+
+    cmds = {}
+
+    def fake_run(cmd, timeout=30):
+        cmds["cmd"] = cmd
+        return SCTRL_JOB_SAMPLE
+
+    monkeypatch.setattr(slurm, "_run", fake_run)
+    jobs = slurm.show_jobs()
+    assert cmds["cmd"] == ["scontrol", "show", "job", "-o"]
+    assert set(jobs) == {"100", "201", "202"}
