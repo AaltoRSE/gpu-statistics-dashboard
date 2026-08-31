@@ -177,7 +177,7 @@ def _node_gpu_group(node):
 
     MIG-gres nodes (``gpu_type=h200_3g.71gb``) always belong to their
     profile group, even when their ``partitions`` field also lists the
-    whole-GPU partition; everything else uses the primary (first-listed)
+    whole-GPU partition; everything else uses the first non-empty
     partition, which is the group the Partitions tab keys on. Nodes
     without a GPU type (CPU-only) resolve to ``""``.
     """
@@ -185,8 +185,11 @@ def _node_gpu_group(node):
         return ""
     if _is_mig_gres(node["gpu_type"]):
         return node["gpu_type"]
-    parts = (node.get("partitions") or "").split(",")
-    return parts[0] if parts else ""
+    for p in (node.get("partitions") or "").split(","):
+        p = p.strip()
+        if p:
+            return p
+    return ""
 
 
 def _fetch_job_window(since_hours, include_vram=True, user=None):
