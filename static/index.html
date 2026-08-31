@@ -12,10 +12,15 @@
 [data-theme="light"] { --bg:#f4f6fb; --panel:#ffffff; --panel2:#e9edf5; --line:#c9d3e3;
        --text:#1c2436; --dim:#5a6a8a; --acc:#0288d1; --ok:#2e7d32; --warn:#ef6c00; --bad:#d32f2f; }
 [data-theme="light"] .badge.RUNNING { background:#d9f0df; }
+[data-theme="light"] .badge.PENDING, [data-theme="light"] .badge.IDLE,
+[data-theme="light"] .badge.MIXED, [data-theme="light"] .badge.ALLOCATED,
+[data-theme="light"] .badge.PLANNED { background:#e4e9f3; }
 [data-theme="light"] .badge.COMPLETED { background:#d9ecf9; }
-[data-theme="light"] .badge.PENDING, [data-theme="light"] .badge.IDLE { background:#e4e9f3; }
-[data-theme="light"] .badge.FAILED, [data-theme="light"] .badge.CANCELLED, [data-theme="light"] .badge.TIMEOUT { background:#f8dcde; }
-[data-theme="light"] .badge.DRAIN, [data-theme="light"] .badge.DOWN, [data-theme="light"] .badge.DRAINING { background:#f7e6cb; }
+[data-theme="light"] .badge.FAILED, [data-theme="light"] .badge.CANCELLED,
+[data-theme="light"] .badge.TIMEOUT, [data-theme="light"] .badge.NOT_RESPONDING { background:#f8dcde; }
+[data-theme="light"] .badge.DRAIN, [data-theme="light"] .badge.DRAINED,
+[data-theme="light"] .badge.DRAINING, [data-theme="light"] .badge.DOWN,
+[data-theme="light"] .badge.RESERVED { background:#f7e6cb; }
 [data-theme="light"] tr.row.sel td { background:#d9ecf9; }
 [data-theme="light"] .err { background:#fdecec; }
 * { box-sizing: border-box; }
@@ -69,9 +74,9 @@ tr.row.sel td { background: #233052; }
 .badge { display:inline-block; padding:1px 8px; border-radius:10px; font-size:11px; font-weight:600; }
 .badge.RUNNING { background:#1b3a2a; color:var(--ok); }
 .badge.COMPLETED { background:#1e2740; color:var(--acc); }
-.badge.PENDING, .badge.IDLE { background:#26304a; color:var(--dim); }
-.badge.FAILED, .badge.CANCELLED, .badge.TIMEOUT { background:#3a1e22; color:var(--bad); }
-.badge.DRAIN, .badge.DOWN, .badge.DRAINING { background:#3a2c14; color:var(--warn); }
+.badge.PENDING, .badge.IDLE, .badge.MIXED, .badge.ALLOCATED, .badge.PLANNED { background:#26304a; color:var(--dim); }
+.badge.FAILED, .badge.CANCELLED, .badge.TIMEOUT, .badge.NOT_RESPONDING { background:#3a1e22; color:var(--bad); }
+.badge.DRAIN, .badge.DRAINED, .badge.DRAINING, .badge.DOWN, .badge.RESERVED { background:#3a2c14; color:var(--warn); }
 .bar-track { display:inline-block; width:64px; height:8px; border-radius:4px; background:var(--panel2);
   vertical-align:middle; margin-right:6px; overflow:hidden; }
 .bar { display:block; height:100%; border-radius:4px; background: var(--acc); }
@@ -181,6 +186,7 @@ header .theme-btn:hover { color:var(--text); }
         <span class="meta-count" id="jMetaCount"></span>
         <span class="small" id="jMeta"></span>
       </span>
+      <button id="jRefresh" title="force a fresh Prometheus read"><span aria-hidden="true">&#8635;</span> refresh</button>
     </div>
     <div id="jobEfficiencyResults" class="results-panel">
       <div class="results-content">
@@ -404,6 +410,7 @@ header .theme-btn:hover { color:var(--text); }
           <table id="nodeTable">
             <thead><tr>
               <th data-k="name">Node</th><th data-k="gpu_type">GPU type</th>
+              <th data-k="state_full">State</th>
               <th class="num" data-k="gpus_alloc">GPUs</th><th data-k="current_util">Util now %</th>
               <th class="num" data-k="current_vram">VRAM %</th><th class="num" data-k="cpus_alloc">CPUs</th>
               <th>Active jobs</th>
@@ -411,7 +418,7 @@ header .theme-btn:hover { color:var(--text); }
             <tbody></tbody>
           </table>
         </div>
-        <div class="hint">Instant values from Prometheus (<code>slurm_job_*</code> exporter). GPUs/CPUs show allocated/total. Click a row for the node&rsquo;s GPU time series.</div>
+        <div class="hint">Instant values from Prometheus (<code>slurm_job_*</code> exporter). GPUs/CPUs show allocated/total. State comes from <code>scontrol</code> — every qualifier of the node state is badged; hover a cell for the drain reason. Click a row for the node&rsquo;s GPU time series, or a GPU type to open its partition view.</div>
       </div>
       </div>
       <div class="results-loading">Data is loading&hellip;</div>

@@ -108,6 +108,59 @@ def test_parse_scontrol_nodes_free_mem_na():
     assert nodes[0]["real_mem"] == 0
 
 
+def test_parse_scontrol_nodes_reason_line():
+    # scontrol show nodes reports the drain reason in its own field,
+    # verbatim (colons inside the text must survive).
+    sample = (
+        "NodeName=gpu51 Arch=x86_64 CoresPerSocket=8\n"
+        "   CPUAlloc=0 CPUTot=64\n"
+        "   Gres=gpu:h200:8\n"
+        "   State=IDLE+DRAIN ThreadsPerCore=1\n"
+        "   Reason=maintenance: firmware update scheduled\n"
+    )
+    nodes = parse_scontrol_nodes(sample)
+    assert nodes[0]["state"] == "IDLE"
+    assert nodes[0]["state_full"] == "IDLE+DRAIN"
+    assert nodes[0]["reason"] == "maintenance: firmware update scheduled"
+
+
+def test_parse_scontrol_nodes_embedded_reason():
+    # scontrol show node -o appends the reason to the state instead.
+    sample = (
+        "NodeName=gpu7\n"
+        "   Gres=gpu:h100:8\n"
+        "   State=DOWN+DRAINED:firmware fault ThreadsPerCore=1\n"
+    )
+    nodes = parse_scontrol_nodes(sample)
+    assert nodes[0]["state"] == "DOWN"
+    assert nodes[0]["state_full"] == "DOWN+DRAINED:firmware fault"
+    assert nodes[0]["reason"] == "firmware fault"
+
+
+def test_parse_scontrol_nodes_bare_qualifier_is_not_reason():
+    # A qualifier without a colon is state, not an invented reason.
+    sample = (
+        "NodeName=fn9\n"
+        "   Gres=(null)\n"
+        "   State=IDLE+DRAIN ThreadsPerCore=1\n"
+    )
+    nodes = parse_scontrol_nodes(sample)
+    assert nodes[0]["state_full"] == "IDLE+DRAIN"
+    assert nodes[0]["reason"] == ""
+
+
+def test_parse_scontrol_nodes_reason_line_wins_over_embedded():
+    # Both present: the explicit Reason= field is the authoritative one.
+    sample = (
+        "NodeName=gpu8\n"
+        "   Gres=gpu:h200:8\n"
+        "   State=IDLE+DRAIN\n"
+        "   Reason=retiring: end of life\n"
+    )
+    nodes = parse_scontrol_nodes(sample)
+    assert nodes[0]["reason"] == "retiring: end of life"
+
+
 def test_parse_scontrol_partitions():
     sample = """PartitionName=gpu-h200-71g-ia
    AllocNodes=ALL MaxNodes=16 MaxTime=24:00:00

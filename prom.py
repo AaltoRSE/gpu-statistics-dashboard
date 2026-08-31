@@ -70,5 +70,10 @@ class PromClient:
         data = self.request("/label/%s/values" % name, {}, ttl=300)
         return data.get("result", [])
 
+    def clear_cache(self):
+        """Drop the response cache; forced-refresh paths call this."""
+        with self._lock:
+            self._cache.clear()
+
     def close(self):
         self._client.close()

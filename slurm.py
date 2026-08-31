@@ -163,6 +163,9 @@ def _int(value, default=0):
         return default
 
 
+_REASON_RE = re.compile(r"(?:^|\s)Reason=(.*)$")
+_STATE_RE = re.compile(r"(?:^|\s)State=(.*?)(?=\s+\w+=|$)")
+
 def parse_scontrol_nodes(output):
     """Parse ``scontrol show nodes`` into a list of node dicts."""
     nodes, current = [], None
@@ -176,15 +179,39 @@ def parse_scontrol_nodes(output):
                 current.update(_parse_kv_block([rest]))
         elif current is not None:
             current.update(_parse_kv_block([line]))
+        # The state and the drain reason may contain spaces, which the
+        # generic whitespace kv scan truncates, so capture the whole
+        # field (up to the next ``key=`` token). The reason text is
+        # kept verbatim (it may itself contain colons).
+        if current is not None:
+            sm = _STATE_RE.search(line)
+            if sm:
+                current["State"] = sm.group(1).strip()
+            rm = _REASON_RE.search(line)
+            if rm:
+                reason = rm.group(1).strip()
+                current["reason_full"] = "" if reason == "(null)" else reason
     parsed = []
     for node in nodes:
         gpus = parse_gres(node.get("Gres"))
         state = node.get("State", "UNKNOWN")
+        # ``scontrol show node -o`` appends the drain reason to the state
+        # (``DOWN+DRAINED:reason``); ``scontrol show nodes`` reports it in
+        # a separate ``Reason=`` field, taken verbatim. Only a colon
+        # inside the last qualifier is a reason: a bare extra qualifier
+        # (``IDLE+DRAIN``) is state, not reason, and must not be invented
+        # up.
+        reason = node.get("reason_full", "")
+        if not reason:
+            parts = state.split("+")
+            if len(parts) > 1 and ":" in parts[-1]:
+                reason = parts[-1].split(":", 1)[1].strip()
         parsed.append(
             {
                 "name": node["name"],
                 "state": state.split("+")[0],
                 "state_full": state,
+                "reason": reason,
                 "partitions": (node.get("Partitions") or "").strip(),
                 "cpus": _int(node.get("CPUTot")),
                 "gpus": gpus[0][1] if gpus else 0,

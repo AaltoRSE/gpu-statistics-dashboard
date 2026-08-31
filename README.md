@@ -142,15 +142,15 @@ Cluster access is **strictly read-only**: the app only issues `sacct -j`,
 | Endpoint | Purpose |
 |---|---|
 | `GET /api/health` | backend + Prometheus connectivity |
-| `GET /api/jobs?since_hours=&user=&partition=&search=&limit=&running_only=` | job table (Prometheus discovery + sacct enrichment; `running_only=true` keeps only jobs with a live GPU series) plus `efficiency_high` / `efficiency_low` (30 most/least average-efficient jobs) |
-| `GET /api/jobs/{jobid}?since_hours=` | per-GPU utilization/VRAM series + metadata (incl. parsed `start_epoch`/`end_epoch`) |
-| `GET /api/partitions?since_hours=&running_only=` | utilization per Slurm partition + trend + `mean_occupancy` (window-average allocated share) + allocated/total GPU capacity |
-| `GET /api/partitions/vram?since_hours=&running_only=&partition=` | per-job VRAM records for the distribution chart (average per-GPU peak VRAM in GB, mean utilization, allocated GPU-hours); `partition` keeps only one partition. Binning and the utilization-range filter happen client-side. `total` counts all candidates in the window; `jobs` holds only the top 2000 by effective GPU-hours, since a `sacct -j` over the whole window would time out |
-| `GET /api/nodes?gpu_only=&refresh=` | node states + live utilization/VRAM + active jobs (`refresh=true` bypasses the 30 s cache) |
+| `GET /api/jobs?since_hours=&user=&partition=&search=&limit=&running_only=&refresh=` | job table (Prometheus discovery + sacct enrichment; `running_only=true` keeps only jobs with a live GPU series; `refresh=true` bypasses the 60 s window cache) plus `efficiency_high` / `efficiency_low` (30 most/least average-efficient jobs) |
+| `GET /api/jobs/{jobid}?since_hours=` | per-GPU utilization/VRAM series + metadata (human-readable `start`/`end` preserved as-is) |
+| `GET /api/partitions?since_hours=&running_only=` | utilization per GPU group + trend + `mean_occupancy` (window-average allocated share) + allocated/total GPU capacity. A group is the Slurm partition, except MIG GPUs, which form their own group per node MIG GRES profile (`h200_3g.71gb`), so a MIG node never counts against its whole-GPU pool. Capacity is summed over all nodes of the group (idle included); a node shared by several partitions counts toward each |
+| `GET /api/partitions/vram?since_hours=&running_only=&partition=` | per-job VRAM records for the distribution chart (average per-GPU peak VRAM in GB, mean utilization, allocated GPU-hours); `partition` keeps only one GPU group (a Slurm partition or a MIG GRES profile). Binning and the utilization-range filter happen client-side. `total` counts all candidates in the window; `jobs` holds only the top 2000 by effective GPU-hours, since a `sacct -j` over the whole window would time out |
+| `GET /api/nodes?gpu_only=&refresh=` | node states (state/reason from `scontrol show node`) + live utilization/VRAM + active jobs (`refresh=true` bypasses the 30 s cache) |
 | `GET /api/nodes/{name}?view=job_start\|1\|6\|24` | per-GPU utilization/VRAM series for one node (`job_start` = since the earliest active job started) |
 
-Short in-memory TTL caches (30–300 s) avoid re-hitting the same query while
-the admin drags filters around; every interaction still fetches live data.
+Short in-memory TTL caches (20–300 s, at both the app and Prometheus-client
+layers) avoid re-hitting the same query while the admin drags filters around.
 
 ## Data semantics (important)
 

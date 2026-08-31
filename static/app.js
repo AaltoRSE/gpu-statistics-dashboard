@@ -1,6 +1,7 @@
 /* Triton GPU Efficiency Dashboard — frontend logic.
  * All data is fetched on demand from the FastAPI backend (which queries
- * sacct / scontrol / Prometheus live). No client-side caching of data.
+ * sacct / scontrol / Prometheus on demand, behind short TTL caches). No
+ * client-side caching of data.
  */
 "use strict";
 
@@ -109,12 +110,27 @@ function pctBar(v) {
     '<span class="pct-value">' + p.toFixed(0) + "%</span></span>";
 }
 
-function stateBadge(s) {
-  if (!s) return "";
+function stateBadge(state, label = state) {
+  if (!state) return "";
   const known = ["RUNNING", "COMPLETED", "PENDING", "IDLE", "FAILED", "CANCELLED",
-                 "TIMEOUT", "DRAIN", "DOWN", "DRAINING", "MIXED", "ALLOCATED"];
-  const cls = known.includes(s) ? s : "PENDING";
-  return '<span class="badge ' + cls + '">' + escapeHtml(s) + "</span>";
+                 "TIMEOUT", "DRAIN", "DRAINED", "DOWN", "DRAINING", "RESERVED",
+                 "MIXED", "ALLOCATED", "PLANNED", "NOT_RESPONDING"];
+  const cls = known.includes(state) ? state : "PENDING";
+  return '<span class="badge ' + cls + '">' + escapeHtml(label) + "</span>";
+}
+
+// scontrol node states carry qualifiers after ``+`` (``IDLE+DRAIN``) and a
+// trailing ``*`` marks a node that is presently not responding; the star is
+// stripped. Every qualifier is rendered as a badge (neutral allocation
+// states included, per the column contract); the parsed drain reason is
+// exposed as the cell title by the caller.
+function nodeStateBadges(n) {
+  const raw = (n.state_full || n.state || "").replace(/\*$/, "");
+  const parts = raw.split("+")
+    .map((p) => p.split(":")[0])
+    .filter(Boolean);
+  if (!parts.length) return "";
+  return parts.map((p) => stateBadge(p, p.replace(/_/g, " "))).join(" ");
 }
 
 function tsToDate(ts) {
@@ -217,13 +233,15 @@ function jobLimit() {
   return Number(v);
 }
 
-async function loadJobs() {
+async function loadJobs(force = false) {
   const token = ++jobsToken;
   // A name/ID search is server-backed because it determines the highest
   // efficiency chart. The partition selector filters the returned rows locally.
   const params = new URLSearchParams({ since_hours: $("jWindow").value });
+  if (force) params.set("refresh", "true");
   const search = $("jSearch").value.trim();
   if (search) params.set("search", search);
+  const btn = $("jRefresh");
   if ($("jRunning").checked) {
     // Running mode returns every live GPU job: the limit box is disabled
     // and must not be sent.
@@ -236,6 +254,7 @@ async function loadJobs() {
     }
     params.set("limit", String(limit));
   }
+  if (btn) btn.disabled = true;
   setResultsLoading("jobsResults", true);
   setResultsLoading("jobEfficiencyResults", true);
   status("loading jobs…");
@@ -250,7 +269,7 @@ async function loadJobs() {
     const selectedPartition = $("jPartition").value;
     $("jPartition").innerHTML =
       '<option value="">all</option>' +
-      [...new Set(jobRows.map((j) => j.partition).filter(Boolean))].sort()
+      [...new Set(jobRows.map((j) => j.gpu_group || j.partition).filter(Boolean))].sort()
         .map((p) => '<option value="' + escapeHtml(p) + '">' + escapeHtml(p) + "</option>").join("");
     $("jPartition").value = [...$("jPartition").options]
       .some((option) => option.value === selectedPartition) ? selectedPartition : "";
@@ -264,6 +283,7 @@ async function loadJobs() {
     loaded.jobs = true;
   } finally {
     if (token === jobsToken) {
+      if (btn) btn.disabled = false;
       setResultsLoading("jobsResults", false);
       setResultsLoading("jobEfficiencyResults", false);
     }
@@ -282,14 +302,16 @@ function sortJobRows() {
   return rows;
 }
 
-// Search and partition are client-side filters over the fetched base set:
-// they re-render the table only. The efficiency charts always show the
-// base set's extremes (see loadJobs) and are untouched by filtering.
+// Name/ID search is server-backed: it is sent to /api/jobs because it
+// determines the efficiency chart's rows, so a search change reloads and
+// refreshes the server-calculated extremes. The partition selector is a
+// client-side filter that re-renders the table only and leaves the charts
+// (the full base set's extremes) untouched.
 function renderJobsView() {
   const search = $("jSearch").value.trim().toLowerCase();
   const partition = $("jPartition").value;
   let rows = jobRows;
-  if (partition) rows = rows.filter((j) => j.partition === partition);
+  if (partition) rows = rows.filter((j) => (j.gpu_group || j.partition) === partition);
   if (search) rows = rows.filter((j) =>
     j.jobid.includes(search) || (j.name || "").toLowerCase().includes(search));
   jobVisibleRows = rows;
@@ -310,7 +332,7 @@ function renderJobTable(rows) {
     return `
     <tr class="row" data-job="${jobid}">
       <td>${jobid}</td><td title="${escapeHtml(rawName)}">${escapeHtml(rawName.slice(0, 40))}</td>
-      <td>${userLink(j.user)}</td><td>${partitionLink(j.partition)}</td>
+      <td>${userLink(j.user)}</td><td>${partitionLink(j.gpu_group || j.partition)}</td>
       <td>${nodeLinks(j.nodes)}</td>
       <td>${stateBadge(j.state)}</td><td>${start}</td>
       <td class="num">${gpus}</td>
@@ -421,31 +443,6 @@ function renderJobDetail(data) {
       yaxis: "y2",
     });
   });
-  // Timeline delimiters: an open circle where the utilization line starts
-  // and a triangle where it ends, at the actual endpoint (t, y) of the
-  // first series to reach that timestamp (strict comparisons keep the
-  // first-encountered point on ties). Hidden from the legend.
-  let startPt = null, endPt = null;
-  data.series.utilization.forEach((s) => {
-    s.values.forEach((v) => {
-      const t = v[0] * 1000;
-      if (!startPt || t < startPt[0]) startPt = [t, v[1]];
-      if (!endPt || t > endPt[0]) endPt = [t, v[1]];
-    });
-  });
-  if (startPt) {
-    traces.push({
-      type: "scatter", mode: "markers", name: "Job start", showlegend: false,
-      x: [startPt[0]], y: [startPt[1]],
-      marker: { symbol: "circle-open", size: 11, color: th.font.color,
-                line: { width: 2 } },
-    });
-    traces.push({
-      type: "scatter", mode: "markers", name: "Job end", showlegend: false,
-      x: [endPt[0]], y: [endPt[1]],
-      marker: { symbol: "triangle-up", size: 11, color: th.warn },
-    });
-  }
   const detailLayout = {
     margin: { l: 46, r: 46, t: 10, b: 34 },
     paper_bgcolor: "rgba(0,0,0,0)", plot_bgcolor: "rgba(0,0,0,0)",
@@ -468,6 +465,7 @@ $("jLimit").addEventListener("change", loadJobs);
 // Search refreshes the server-calculated highest-efficiency chart. Partition
 // filtering is local because it only changes the table.
 $("jSearch").addEventListener("input", loadJobs);
+$("jRefresh").addEventListener("click", () => { loadJobs(true); });
 $("jPartition").addEventListener("change", renderJobsView);
 $("jobTable").querySelectorAll("th[data-k]").forEach((th) =>
   th.addEventListener("click", () => {
@@ -609,7 +607,7 @@ function renderUserJobsTable() {
     <tr class="row" data-job="${jobid}">
       <td>${jobLink(j.jobid)}</td>
       <td title="${escapeHtml(rawName)}">${escapeHtml(rawName.slice(0, 40))}</td>
-      <td>${partitionLink(j.partition)}</td>
+      <td>${partitionLink(j.gpu_group || j.partition)}</td>
       <td>${nodeLinks(j.nodes)}</td>
       <td>${stateBadge(j.state)}</td>
       <td>${start}</td>
@@ -999,7 +997,10 @@ function renderNodeTable() {
     const jobs = (n.active_jobs || []).map((j) => jobLink(j.jobid)).join(", ") || "—";
     const rawName = n.name;
     const name = escapeHtml(rawName);
-    const gpuType = escapeHtml(n.gpu_type || "—");
+    const gpuType = n.gpu_type
+      ? (n.gpu_group ? partitionLink(n.gpu_group, n.gpu_type)
+                     : escapeHtml(n.gpu_type))
+      : "—";
     const gpusAlloc = escapeHtml(n.gpus_alloc !== undefined ? n.gpus_alloc : 0);
     const gpus = escapeHtml(n.gpus);
     const vram = escapeHtml(n.current_vram === null ? "—" : fmt(n.current_vram));
@@ -1009,6 +1010,7 @@ function renderNodeTable() {
     <tr class="row" data-node="${name}" style="${busy ? "" : "opacity:.55"}">
       <td>${nodeLink(rawName)}</td>
       <td>${gpuType}</td>
+      <td title="${escapeHtml(n.reason || "")}">${nodeStateBadges(n)}</td>
       <td class="num" title="allocated / total GPUs">${gpusAlloc}/${gpus}</td>
       <td class="num">${u === null ? "idle" : pctBar(u)}</td>
       <td class="num">${vram}</td>
@@ -1022,12 +1024,13 @@ function renderNodeTable() {
       if (link) { e.stopPropagation(); openJob(link.dataset.job); return; }
       const nlink = e.target.closest("a.nodelink");
       if (nlink) { e.stopPropagation(); openNode(nlink.dataset.node); return; }
+      const plink = e.target.closest("a.partitionlink");
+      if (plink) { e.stopPropagation(); openPartition(plink.dataset.partition); return; }
       loadNodeDetail(tr.dataset.node);
     }));
   markSort($("nodeTable"), nodeSort.key, nodeSort.dir);
   $("nCount").textContent = rows.length + " / " + nodeRows.length;
 }
-
 let nodeDetailToken = 0;
 let nodeDetailName = null;
 let nodeDetailData = null; // raw API payload; traces rebuild per theme
@@ -1180,11 +1183,12 @@ function nodeLinks(values) {
   return list.map(nodeLink).join(", ") || "—";
 }
 
-function partitionLink(partition) {
+function partitionLink(partition, label = partition) {
   if (!partition) return "—";
   const safe = escapeHtml(partition);
   return '<a class="partitionlink" data-partition="' + safe +
-    '" title="open ' + safe + ' in the Partitions tab">' + safe + "</a>";
+    '" title="open ' + safe + ' in the Partitions tab">' +
+    escapeHtml(label) + "</a>";
 }
 
 function openUser(user) {
