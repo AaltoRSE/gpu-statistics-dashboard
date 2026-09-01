@@ -1019,22 +1019,8 @@ function applyPartitionSelection(name) {
   sel.innerHTML = options.join("");
   sel.value = selectedPartition;
   if (!sel.value) selectedPartition = "";
-  updatePartitionScope();
   renderPartTrend(partTrendData);
   setUrl(sel.value ? "/partition/" + encodeURIComponent(sel.value) : "/partitions");
-}
-
-// The partition selector scopes the trend and the VRAM distribution; say so
-// in place so a scoped view is never mistaken for the whole cluster.
-function updatePartitionScope() {
-  const el = $("pScope");
-  if (!el) return;
-  el.innerHTML = selectedPartition
-    ? "Scoped to \u201C" + escapeHtml(selectedPartition) + "\u201D: the trend and VRAM distribution below show only this partition (the table still lists all). " +
-      '<button type="button" id="pScopeClear">clear scope</button>'
-    : "";
-  const b = el.querySelector("#pScopeClear");
-  if (b) b.addEventListener("click", clearPartitionSelection);
 }
 
 async function loadPartitions() {
@@ -1706,7 +1692,6 @@ function clearPartitionSelection() {
   if (!selectedPartition) return;
   selectedPartition = "";
   $("pPartition").value = "";
-  updatePartitionScope();
   renderPartTrend(partTrendData);
   if (loaded.partitions) loadVram().catch(() => {});
 }
