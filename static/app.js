@@ -58,6 +58,20 @@ function plotTheme() {
 function renderPlot(elId, traces, layout) {
   // Plotly.react diffs traces and layout, so the same call serves fresh
   // filter data and theme-only palette updates.
+  // Apply a theme-aware hover popup: Plotly's default hover is a light box
+  // with dark text, which is hard to read on the dark plot. Merge a
+  // chart-specific hoverlabel over these defaults so a specialized chart
+  // can opt out without duplicating the palette.
+  const light = currentTheme() === "light";
+  const hover = layout.hoverlabel || {};
+  layout = Object.assign({}, layout, {
+    hoverlabel: Object.assign({
+      bgcolor: light ? "#ffffff" : "#171e2e",
+      bordercolor: light ? "#0288d1" : "#4fc3f7",
+      font: { color: light ? "#1c2436" : "#dce3f2", size: 12 },
+      namelength: -1,
+    }, hover),
+  });
   return Plotly.react($(elId), traces, layout, PLOT_CFG);
 }
 
@@ -214,6 +228,7 @@ function debounce(fn, wait) {
 async function checkHealth() {
   try {
     const h = await api("/api/health");
+    errBox(false);
     $("health").innerHTML = '<b>&#9679;</b> prometheus: ' +
       escapeHtml(h.prometheus.replace(/^https?:\/\//, ""));
   } catch (_) {
@@ -448,7 +463,7 @@ function renderJobTable(rows) {
       if (nlink) { e.stopPropagation(); openNode(nlink.dataset.node); return; }
       const plink = e.target.closest("a.partitionlink");
       if (plink) { e.stopPropagation(); openPartition(plink.dataset.partition); return; }
-      loadJobDetail(tr.dataset.job, { table: true });
+      loadJobDetail(tr.dataset.job, { kind: "jobs" });
     }));
 }
 
@@ -513,7 +528,7 @@ function renderJobEffChart(elId, jobs, sortKey, barKey, dir) {
     g.removeAllListeners("plotly_click");
     g.on("plotly_click", (ev) => {
       const id = ev.points[0].customdata[0];
-      if (id) loadJobDetail(id, { table: true });
+      if (id) loadJobDetail(id, { kind: "jobs" });
     });
   });
 }
@@ -547,7 +562,7 @@ let jobDetailToken = 0;
 let jobDetailData = null; // raw API payload; traces rebuild per theme
 async function loadJobDetail(jobid, from) {
   jobDetailFrom = from || null;
-  jobDetailOpenedFromTable = !!(from && from.table);
+  jobDetailOpenedFromTable = !!(from && from.kind === "jobs");
   const token = ++jobDetailToken;
   const detail = $("jobDetailResults");
   const explorer = $("jobExplorer");
@@ -585,11 +600,32 @@ function setJobDetailHead(jobid) {
   $("jobDetailTitle").textContent = "Job " + jobid;
   $("jobDetailMeta").textContent = "";
   const back = $("jobDetailBack");
-  if (jobDetailFrom && jobDetailFrom.node) {
-    back.style.display = "";
-    back.textContent = "\u2190 from node " + jobDetailFrom.node;
+  // Clear any stale origin from a previous job; the label depends on how
+  // this job was opened.
+  back.dataset.kind = "";
+  back.dataset.node = "";
+  back.dataset.user = "";
+  back.dataset.partition = "";
+  if (jobDetailFrom && jobDetailFrom.kind === "node") {
+    back.dataset.kind = "node";
     back.dataset.node = jobDetailFrom.node;
+    back.textContent = "\u2190 from node " + jobDetailFrom.node;
+    back.title = "Return to node " + jobDetailFrom.node;
+    back.style.display = "";
+  } else if (jobDetailFrom && jobDetailFrom.kind === "user") {
+    back.dataset.kind = "user";
+    back.dataset.user = jobDetailFrom.user;
+    back.textContent = "\u2190 from user " + jobDetailFrom.user;
+    back.title = "Return to " + jobDetailFrom.user + "\u2019s jobs";
+    back.style.display = "";
+  } else if (jobDetailFrom && jobDetailFrom.kind === "jobs") {
+    back.dataset.kind = "jobs";
+    back.textContent = "\u2190 back to jobs";
+    back.title = "Return to job explorer";
+    back.style.display = "";
   } else {
+    // Unknown origin (deep link / direct). Left hidden until the metadata
+    // loads; renderJobDetail offers the job's partition as a next step.
     back.style.display = "none";
   }
 }
@@ -641,6 +677,16 @@ function renderJobDetail(data) {
   if (m.start) metaBits.push("start " + m.start);
   if (m.end) metaBits.push("end " + m.end);
   $("jobDetailMeta").textContent = metaBits.join(" · ");
+  // No known origin (deep link / direct open): offer the job's partition as
+  // a useful next investigation step, but only once metadata has loaded.
+  const back = $("jobDetailBack");
+  if (!back.dataset.kind && m.partition) {
+    back.dataset.kind = "partition";
+    back.dataset.partition = m.partition;
+    back.textContent = "View partition " + m.partition;
+    back.title = "Open the " + m.partition + " partition";
+    back.style.display = "";
+  }
   const th = plotTheme();
   const traces = [];
   // util and VRAM are both percentages, so they share one 0-100 axis. Each
@@ -701,9 +747,14 @@ $("jPartition").addEventListener("change", renderJobsView);
 $("jobDetailClose").addEventListener("click", closeJobDetail);
 $("jobDetailBack").addEventListener("click", (e) => {
   e.preventDefault();
-  const node = e.currentTarget.dataset.node;
+  const btn = e.currentTarget;
+  const kind = btn.dataset.kind;
   closeJobDetail();
-  if (node) openNode(node);
+  if (kind === "node") openNode(btn.dataset.node);
+  else if (kind === "user") openUser(btn.dataset.user);
+  else if (kind === "partition") openPartition(btn.dataset.partition);
+  // kind "jobs" (or empty): closing the detail returns to the explorer,
+  // which is the source context.
 });
 $("jobExplorerToggle").addEventListener("click", () => toggleJobExplorer());
 $("effImpact").addEventListener("change", (e) => {
@@ -904,12 +955,12 @@ function renderUserJobsTable() {
   tb.querySelectorAll("tr.row").forEach((tr) =>
     tr.addEventListener("click", (e) => {
       const link = e.target.closest("a.joblink");
-      if (link) { e.stopPropagation(); openJob(link.dataset.job); return; }
+      if (link) { e.stopPropagation(); openJob(link.dataset.job, { kind: "user", user: userSelected }); return; }
       const nlink = e.target.closest("a.nodelink");
       if (nlink) { e.stopPropagation(); openNode(nlink.dataset.node); return; }
       const plink = e.target.closest("a.partitionlink");
       if (plink) { e.stopPropagation(); openPartition(plink.dataset.partition); return; }
-      openJob(tr.dataset.job);
+      openJob(tr.dataset.job, { kind: "user", user: userSelected });
     }));
 }
 
@@ -1163,21 +1214,11 @@ let vramTotal = 0; // candidates in the window, before the backend cap
 let vramToken = 0;
 let vramGpuType = "";
 
-function vramWeight() {
-  return $("vWeight").value === "eff" ? "eff" : "alloc";
-}
-function vramHours(j) {
-  // Allocated GPU-hours come from sacct and are null for jobs without an
-  // allocation row; effective GPU-hours are utilization-weighted and always
-  // present. The toggle picks which axis the distribution is measured on.
-  return vramWeight() === "eff" ? (j.gpu_hours_eff || 0) : (j.gpu_hours || 0);
-}
-
 async function loadVram() {
   const token = ++vramToken;
   // The VRAM fetch blurs only the VRAM panel (vramResults), never the whole
-  // partitions tab: window / running-only / partition / weight changes here
-  // must not freeze the other graphs.
+  // partitions tab: window / running-only / partition changes here must not
+  // freeze the other graphs.
   const origin = partitionsToken;
   setResultsLoading("vramResults", true);
   status("loading VRAM distribution…");
@@ -1185,7 +1226,8 @@ async function loadVram() {
     const params = new URLSearchParams({ since_hours: $("pWindow").value });
     if ($("pRunning").checked) params.set("running_only", "true");
     if (selectedPartition) params.set("partition", selectedPartition);
-    params.set("weight", vramWeight());
+    // The chart shows allocated vs effective directly; the backend weight
+    // param (cap ordering) keeps its default.
     const data = await api("/api/partitions/vram?" + params);
     if (token !== vramToken) return; // a newer VRAM request supersedes this one
     panelOk("vramResults");
@@ -1217,26 +1259,86 @@ function fillVramGpuTypes() {
 function renderVram() {
   const lo = Math.min(+$("vUtilMin").value, +$("vUtilMax").value);
   const hi = Math.max(+$("vUtilMin").value, +$("vUtilMax").value);
-  const eff = vramWeight() === "eff";
   const matched = vramJobs.filter((j) =>
     j.mean_util >= lo && j.mean_util <= hi &&
     (!vramGpuType || j.gpu_type === vramGpuType));
-  const scopeHours = vramJobs.filter((j) => !vramGpuType || j.gpu_type === vramGpuType)
-    .reduce((s, j) => s + vramHours(j), 0);
   const binW = 16;
-  const maxG = matched.length
-    ? Math.max(...matched.map((j) => j.vram_gb)) : binW;
+  const maxG = matched.length ? Math.max(...matched.map((j) => j.vram_gb)) : binW;
   const nBins = Math.max(1, Math.ceil(maxG / binW) || 1);
-  const bins = new Array(nBins).fill(0);
+  // Each bar's total height is the bin's ALLOCATED GPU-hours, split into an
+  // effective (green) baseline and an allocated-but-ineffective (blue) cap.
+  // A record with no allocation row cannot contribute to an allocated-total
+  // bar, so it is excluded from the chart and reported in the meta line.
+  const allocOf = (j) => (j.gpu_hours == null ? null : j.gpu_hours);
+  const effBins = new Array(nBins).fill(0);
+  const remBins = new Array(nBins).fill(0);
   const perBin = new Array(nBins).fill(0);
-  const matchedHours = matched.reduce((s, j) => s + vramHours(j), 0);
+  let excludedJobs = 0, excludedEff = 0, clamped = 0;
   matched.forEach((j) => {
+    const a = allocOf(j);
+    if (a == null) { excludedJobs++; excludedEff += j.gpu_hours_eff || 0; return; }
+    const eff = Math.min(j.gpu_hours_eff || 0, a); // clamp: remainder stays >= 0
+    if ((j.gpu_hours_eff || 0) > a) clamped++;
     const i = Math.min(Math.floor(j.vram_gb / binW), nBins - 1);
-    bins[i] += vramHours(j);
+    effBins[i] += eff;
+    remBins[i] += a - eff;
     perBin[i] += 1;
   });
-  const normalize = $("vNormalize").checked && scopeHours > 0;
-  const missing = matched.filter((j) => vramWeight() === "alloc" && j.gpu_hours == null).length;
+  const totalAlloc = matched
+    .filter((j) => allocOf(j) != null)
+    .reduce((s, j) => s + j.gpu_hours, 0);
+  const normalize = $("vNormalize").checked && totalAlloc > 0;
+  const scale = (v) => (normalize ? (v / totalAlloc) * 100 : v);
+  const labels = Array.from({ length: nBins }, (_, i) =>
+    i * binW + "\u2013" + (i + 1) * binW + " GB");
+  const th = plotTheme();
+  // One hover payload per bin, shared by both segments so either reports the
+  // whole bin: label, allocated, effective, effective/allocated ratio, jobs.
+  const customdata = labels.map((lab, i) => {
+    const a = effBins[i] + remBins[i];
+    return [lab, a, effBins[i], a > 0 ? effBins[i] / a : 0, perBin[i]];
+  });
+  const hover = "<b>%{customdata[0]}</b><br>Allocated: %{customdata[1]:,.1f} GPU-hours" +
+    "<br>Effective: %{customdata[2]:,.1f} GPU-hours" +
+    "<br>Effective / allocated: %{customdata[3]:.1%}<br>Jobs: %{customdata[4]}<extra></extra>";
+  const traces = [
+    { type: "bar", name: "Effective GPU-hours", x: labels, y: effBins.map(scale),
+      marker: { color: th.colors[1] }, customdata, hovertemplate: hover },
+    { type: "bar", name: "Allocated but ineffective GPU-hours", x: labels,
+      y: remBins.map(scale), marker: { color: th.colors[0] }, customdata,
+      hovertemplate: hover },
+  ];
+  const layout = {
+    margin: { l: 60, r: 20, t: 30, b: 40 },
+    paper_bgcolor: "rgba(0,0,0,0)", plot_bgcolor: "rgba(0,0,0,0)",
+    font: th.font,
+    barmode: "stack",
+    showlegend: true,
+    legend: { orientation: "h", x: 0, y: 1.06, xanchor: "left", yanchor: "bottom" },
+    // Bar distribution is read-only: no rectangle drag, pan, or axis zoom
+    // (same treatment as the partition bar charts).
+    xaxis: { title: "VRAM usage (GB per GPU, peak over window)",
+             gridcolor: th.grid, fixedrange: true },
+    yaxis: { title: normalize ? "Share of matched allocated GPU-hours (%)"
+                              : "Allocated GPU-hours",
+             gridcolor: th.grid, fixedrange: true },
+    dragmode: false,
+  };
+  const noAlloc = matched.length > 0 && perBin.every((c) => c === 0);
+  if (!matched.length || noAlloc) {
+    layout.xaxis.showaxis = false;
+    layout.yaxis.showaxis = false;
+    layout.annotations = [{
+      text: noAlloc ? "No allocation data for the current filters"
+                    : "No jobs match the current filters",
+      showarrow: false, xref: "paper", yref: "paper", x: 0.5, y: 0.5,
+      font: { color: th.font.color, size: 12 },
+    }];
+  }
+  renderPlot("partVramPlot", traces, layout);
+  const totalEff = matched
+    .filter((j) => allocOf(j) != null)
+    .reduce((s, j) => s + Math.min(j.gpu_hours_eff || 0, j.gpu_hours), 0);
   const truncated = vramTotal > vramJobs.length;
   const scopeBits = [
     truncated
@@ -1245,49 +1347,19 @@ function renderVram() {
     selectedPartition,
     vramGpuType,
   ].filter(Boolean);
-  const y = normalize ? bins.map((h) => (h / scopeHours) * 100) : bins;
-  const labels = Array.from({ length: nBins }, (_, i) =>
-    i * binW + "–" + (i + 1) * binW + " GB");
-  const hourLabel = eff ? "effective GPU hours" : "GPU hours";
-  const th = plotTheme();
-  const trace = {
-    type: "bar", x: labels, y,
-    marker: { color: th.colors[0] },
-    customdata: perBin,
-    hovertemplate: "%{x}<br>%{y:.1f}" + (normalize ? "%" : " " + hourLabel) +
-      "<br>%{customdata} jobs<extra></extra>",
-  };
-  const layout = {
-    margin: { l: 60, r: 20, t: 10, b: 40 },
-    paper_bgcolor: "rgba(0,0,0,0)", plot_bgcolor: "rgba(0,0,0,0)",
-    font: th.font,
-    // Bar distribution is read-only: no rectangle drag, pan, or axis zoom
-    // (same treatment as the partition bar charts).
-    xaxis: { title: "VRAM usage (GB per GPU, peak over window)",
-             gridcolor: th.grid, fixedrange: true },
-    yaxis: { title: normalize ? "% of shown " + hourLabel : hourLabel,
-             gridcolor: th.grid, fixedrange: true },
-    dragmode: false,
-  };
-  if (!matched.length) {
-    layout.xaxis.showaxis = false;
-    layout.yaxis.showaxis = false;
-    layout.annotations = [{
-      text: "No jobs match the current filters", showarrow: false,
-      xref: "paper", yref: "paper", x: 0.5, y: 0.5,
-      font: { color: th.font.color, size: 12 },
-    }];
-  }
-  renderPlot("partVramPlot", [trace], layout);
-  $("vramMeta").textContent =
-    scopeBits.join(" · ") + " · " +
-    matchedHours.toFixed(0) + " " + hourLabel +
-    (normalize ? " · " + scopeHours.toFixed(0) +
-      (truncated ? " in shown set" : " in scope") : "") +
-    (missing
-      ? " · " + missing + " without allocation data"
-      : "") +
-    " · utilization " + lo + "–" + hi + "%";
+  const metaBits = [
+    scopeBits.join(" \u00b7 "),
+    totalAlloc.toFixed(0) + " allocated GPU-hours",
+    totalEff.toFixed(0) + " effective",
+  ];
+  if (normalize) metaBits.push(totalAlloc.toFixed(0) + " allocated in scope");
+  if (excludedJobs)
+    metaBits.push(excludedJobs + " jobs / " + excludedEff.toFixed(0) +
+      " effective GPU-hours excluded \u2014 allocation unavailable");
+  if (clamped)
+    metaBits.push(clamped + " jobs have effective hours above allocated hours; effective share capped at allocated hours");
+  metaBits.push("utilization " + lo + "\u2013" + hi + "%");
+  $("vramMeta").textContent = metaBits.join(" \u00b7 ");
 }
 
 function vramSliderInput() {
@@ -1307,7 +1379,6 @@ $("vGpuType").addEventListener("change", (e) => {
   vramGpuType = e.target.value;
   renderVram();
 });
-$("vWeight").addEventListener("change", () => { loadVram(); });
 $("vUtilMin").addEventListener("input", vramSliderInput);
 $("vUtilMax").addEventListener("input", vramSliderInput);
 
@@ -1406,7 +1477,7 @@ function renderNodeTable() {
   tb.querySelectorAll("tr.row").forEach((tr) =>
     tr.addEventListener("click", (e) => {
       const link = e.target.closest("a.joblink");
-      if (link) { e.stopPropagation(); openJob(link.dataset.job, { node: tr.dataset.node }); return; }
+      if (link) { e.stopPropagation(); openJob(link.dataset.job, { kind: "node", node: tr.dataset.node }); return; }
       const nlink = e.target.closest("a.nodelink");
       if (nlink) { e.stopPropagation(); openNode(nlink.dataset.node); return; }
       const plink = e.target.closest("a.partitionlink");

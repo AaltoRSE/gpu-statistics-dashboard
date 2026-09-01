@@ -183,8 +183,11 @@ header .theme-btn:hover { color:var(--text); }
 .detail-head { display:flex; align-items:baseline; gap:12px; flex-wrap:wrap; }
 .detail-head h2 { margin:0; }
 .detail-actions { margin-left:auto; display:flex; align-items:center; gap:10px; }
-.backlink { font-size:12px; text-decoration:none; }
-.backlink:hover { text-decoration:underline; }
+#jobDetailBack { background: var(--panel2); color: var(--acc); border: 1px solid var(--line);
+  border-radius: 6px; padding: 3px 8px; font: inherit; font-size: 12px; font-weight: 600;
+  line-height: 1.4; cursor: pointer; }
+#jobDetailBack:hover { background: var(--panel); color: var(--text); border-color: var(--acc); }
+#jobDetailBack:focus-visible { outline: 2px solid var(--acc); outline-offset: 2px; }
 #jobDetailClose { background:none; border:1px solid var(--line); color:var(--dim);
   border-radius:6px; cursor:pointer; font-size:11px; line-height:1; padding:3px 7px; }
 #jobDetailClose:hover { color:var(--text); border-color:var(--dim); }
@@ -264,7 +267,7 @@ header .theme-btn:hover { color:var(--text); }
           <div class="detail-head">
             <h2 id="jobDetailTitle">Job detail</h2>
             <span class="detail-actions">
-              <a href="#" id="jobDetailBack" class="backlink" style="display:none"></a>
+              <button type="button" id="jobDetailBack" style="display:none"></button>
               <button id="jobDetailClose" title="close the job detail">&#10005;</button>
             </span>
           </div>
@@ -399,12 +402,6 @@ header .theme-btn:hover { color:var(--text); }
           <label class="row"><input id="vNormalize" type="checkbox"> Normalize</label>
           <label>GPU type
             <select id="vGpuType"><option value="">all</option></select>
-          </label>
-          <label>Weight
-            <select id="vWeight">
-              <option value="alloc" selected>allocated GPU-hours</option>
-              <option value="eff">effective GPU-hours</option>
-            </select>
           </label>
           <label>GPU utilization range
             <span class="range-slider">
