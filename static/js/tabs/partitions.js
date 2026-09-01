@@ -11,7 +11,7 @@ import { $ } from "../core/dom.js";
 import { escapeHtml, fmtInt, pctBar, html, raw, compareStrings, tsToDate, partitionLink } from "../core/format.js";
 import { setResultsLoading, showPanelError, panelOk } from "../core/panel.js";
 import { renderPlot, plotTheme, partBarColor } from "../core/plot.js";
-import { api, status } from "../core/api.js";
+import { api } from "../core/api.js";
 import { loaded, setUrl, openPartition } from "../core/router.js";
 import { createTable } from "../core/table.js";
 
@@ -42,13 +42,17 @@ export function applyPartitionSelection(name) {
   sel.value = selectedPartition;
   if (!sel.value) selectedPartition = "";
   renderPartTrend(partTrendData);
+  // Re-outline the selected partition's bar in the two charts above the
+  // trend (T-27) — previously only the trend/VRAM charts showed which
+  // partition was scoped.
+  renderPartBar();
+  renderPartOccupancy();
   setUrl(sel.value ? "/partition/" + encodeURIComponent(sel.value) : "/partitions");
 }
 
 export async function loadPartitions() {
   const token = ++partitionsToken;
   setResultsLoading("partitionsResults", true);
-  status("loading partitions…");
   let data;
   try {
     const params = new URLSearchParams({ since_hours: $("pWindow").value });
@@ -89,7 +93,16 @@ function renderPartBar() {
     type: "bar",
     x: rows.map((p) => p.name),
     y: rows.map((p) => p.mean_util),
-    marker: { color: rows.map((p) => partBarColor(p.mean_util)) },
+    marker: {
+      color: rows.map((p) => partBarColor(p.mean_util)),
+      // Selecting a partition already scopes the trend and VRAM charts
+      // below; outlining its bar here too (T-27) is the only place these
+      // two charts show which partition that is.
+      line: {
+        width: rows.map((p) => p.name === selectedPartition ? 2 : 0),
+        color: th.font.color,
+      },
+    },
     hovertemplate: "<b>%{x}</b><br>mean %{y:.1f}%<extra></extra>",
   }], {
     margin: { l: 46, r: 20, t: 10, b: 60 },
@@ -112,7 +125,13 @@ function renderPartOccupancy() {
     type: "bar",
     x: rows.map((p) => p.name),
     y: rows.map((p) => (p.mean_occupancy === null ? 0 : p.mean_occupancy)),
-    marker: { color: th.acc },
+    marker: {
+      color: th.acc,
+      line: {
+        width: rows.map((p) => p.name === selectedPartition ? 2 : 0),
+        color: th.font.color,
+      },
+    },
     customdata: rows.map((p) => p.mean_util),
     hovertemplate: rows.map((p) => p.mean_occupancy === null
       ? "<b>%{x}</b><br>no occupancy data<br>mean util %{customdata:.1f}%<extra></extra>"
@@ -230,7 +249,6 @@ export async function loadVram() {
   // freeze the other graphs.
   const origin = partitionsToken;
   setResultsLoading("vramResults", true);
-  status("loading VRAM distribution…");
   try {
     const params = new URLSearchParams({ since_hours: $("pWindow").value });
     if ($("pRunning").checked) params.set("running_only", "true");
@@ -395,6 +413,8 @@ export function clearPartitionSelection() {
   selectedPartition = "";
   $("pPartition").value = "";
   renderPartTrend(partTrendData);
+  renderPartBar();
+  renderPartOccupancy();
   if (loaded.partitions) loadVram();
 }
 

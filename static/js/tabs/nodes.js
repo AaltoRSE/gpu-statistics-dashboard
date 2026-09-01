@@ -12,7 +12,7 @@ import {
 } from "../core/format.js";
 import { setResultsLoading, showPanelError, panelOk } from "../core/panel.js";
 import { renderPlot, plotTheme } from "../core/plot.js";
-import { api, status } from "../core/api.js";
+import { api } from "../core/api.js";
 import { loaded, setUrl, openJob, openNode, openPartition } from "../core/router.js";
 import { createTable } from "../core/table.js";
 
@@ -27,7 +27,6 @@ export async function loadNodes(force = false) {
   const btn = $("nRefresh");
   btn.disabled = true;
   setResultsLoading("nodesResults", true);
-  status("loading nodes…");
   try {
     const data = await api("/api/nodes?" + params);
     if (token !== nodesToken) return; // a newer request supersedes this one
@@ -87,13 +86,19 @@ function nodeRowHtml(n) {
   // itself; title attributes stay as a hover convenience, not the only way
   // to read them.
   const reasonLine = n.reason ? html`<div class="small reason-line">${n.reason}</div>` : "";
+  // T-27: a blanket opacity:.55 on the whole row (often half the table)
+  // de-emphasized everything about an idle node at once. Two targeted
+  // signals replace it: a chip beside the node's own scontrol state
+  // badges, and muting just the utilization cell — the one value that is
+  // actually saying "idle."
+  const idleChip = busy ? "" : html`<span class="badge idle-chip">idle now</span>`;
   return html`
-    <tr class="row" data-node="${rawName}" style="${busy ? "" : "opacity:.55"}">
+    <tr class="row" data-node="${rawName}">
       <td>${raw(nodeLink(rawName))}</td>
       <td>${gpuType}</td>
-      <td title="${n.reason || ""}">${raw(nodeStateBadges(n))}${raw(reasonLine)}</td>
+      <td title="${n.reason || ""}">${raw(nodeStateBadges(n))} ${raw(idleChip)}${raw(reasonLine)}</td>
       <td class="num" title="allocated / total GPUs">${raw(allocSplit(gpusAlloc, n.gpus))}</td>
-      <td class="num">${u === null ? "idle" : raw(pctBar(u))}</td>
+      <td class="num${busy ? "" : " muted-cell"}">${u === null ? "idle" : raw(pctBar(u))}</td>
       <td class="num">${vram}</td>
       <td class="num" title="allocated / total CPUs">${raw(allocSplit(cpusAlloc, n.cpus))}</td>
       <td class="small">${jobs}</td>

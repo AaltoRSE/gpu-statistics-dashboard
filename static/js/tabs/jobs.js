@@ -16,7 +16,7 @@ import {
 } from "../core/format.js";
 import { setResultsLoading, showPanelError, panelOk } from "../core/panel.js";
 import { renderPlot, plotTheme, partBarColor } from "../core/plot.js";
-import { api, status } from "../core/api.js";
+import { api } from "../core/api.js";
 import { loaded, setUrl, openUser, openNode, openPartition } from "../core/router.js";
 import { createTable } from "../core/table.js";
 
@@ -65,7 +65,6 @@ export async function loadJobs(force = false) {
   if (btn) btn.disabled = true;
   setResultsLoading("jobsResults", true);
   setResultsLoading("jobEfficiencyResults", true);
-  status("loading jobs…");
   try {
     const data = await api("/api/jobs?" + params);
     if (token !== jobsToken) return; // a newer request supersedes this one
@@ -246,6 +245,14 @@ function renderJobEffChart(elId, jobs, sortKey, barKey, dir) {
     xaxis: { title: isGpuHours ? "effective GPU-hours" : "average efficiency %",
       range: isGpuHours ? undefined : [0, 105], gridcolor: th.grid },
     yaxis: { autorange: "reversed", gridcolor: th.grid },
+    // Threshold markers (T-27): the 40/75% bands are otherwise only
+    // legible from bar color, which is exactly the red-vs-green
+    // distinction a colorblind operator can't rely on. Only meaningful on
+    // the efficiency-% axis, not the GPU-hours one.
+    shapes: isGpuHours ? [] : [40, 75].map((x) => ({
+      type: "line", x0: x, x1: x, xref: "x", yref: "paper", y0: 0, y1: 1,
+      line: { color: th.grid, width: 1, dash: "dot" },
+    })),
   };
   if (!rows.length) {
     layout.xaxis.showaxis = false;
@@ -304,6 +311,14 @@ export function renderJobEfficiency() {
     ? "show top 10" : "show all " + (jobBaseHigh.length || 30);
   $("effLowNote").textContent = effImpact
     ? "reordered by effective GPU-hours consumed (bars = average efficiency)" : "";
+  // Under 60 candidates, the backend halves each list instead of the usual
+  // top/bottom 30 so the two charts never share a job (T-27) — say so,
+  // rather than leaving a shorter-than-usual chart unexplained.
+  const capped = jobBaseHigh.length < 30;
+  $("effCapNote").textContent = !capped ? ""
+    : jobBaseHigh.length > 0
+      ? "fewer than 60 candidates — top/bottom " + jobBaseHigh.length + " shown to avoid overlap"
+      : "too few candidates for distinct highest/lowest sets";
 }
 
 let jobDetailFrom = null; // { node } when the job was opened from a node's Active jobs
@@ -513,8 +528,7 @@ $("effImpact").addEventListener("change", (e) => {
   effImpact = e.target.checked;
   renderJobEfficiency();
 });
-$("effShowAll").addEventListener("click", (e) => {
-  e.preventDefault();
+$("effShowAll").addEventListener("click", () => {
   effShowAll = !effShowAll;
   renderJobEfficiency();
 });
