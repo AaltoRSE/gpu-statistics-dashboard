@@ -68,7 +68,7 @@ export async function loadPartitions() {
   $("pCount").textContent = data.partitions.length + " partitions · " +
     ($("pRunning").checked
       ? "live jobs · instantaneous"
-      : tsToDate(w.start) + " → " + tsToDate(w.end) + " UTC");
+      : tsToDate(w.start) + " → " + tsToDate(w.end));
   renderPartBar();
   renderPartOccupancy();
   partTrendData = data.trend;

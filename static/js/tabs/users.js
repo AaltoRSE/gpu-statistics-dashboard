@@ -16,7 +16,7 @@
 
 import { $, isPlainClick } from "../core/dom.js";
 import {
-  fmt, fmtInt, pctBar, escapeList, html, raw, tsToDate,
+  fmt, fmtInt, pctBar, escapeList, html, raw, tsToDate, fmtSacctTime,
   jobLink, nodeLinks, partitionLink, stateBadge,
 } from "../core/format.js";
 import { setResultsLoading, showPanelError, panelOk } from "../core/panel.js";
@@ -42,7 +42,7 @@ export async function loadUsers() {
     const w = data.window;
     $("uMetaCount").textContent = data.count + " users";
     $("uMeta").textContent =
-      tsToDate(w.start) + " → " + tsToDate(w.end) + " UTC";
+      tsToDate(w.start) + " → " + tsToDate(w.end);
     renderUserTable();
     loaded.users = true;
   } catch (e) {
@@ -172,7 +172,7 @@ async function loadUserJobs(user) {
 function userJobRowHtml(j) {
   const jobid = j.jobid;
   const rawName = j.name || "";
-  const start = (j.start || "").slice(0, 16);
+  const start = fmtSacctTime(j.start);
   const gpus = j.gpus !== undefined ? j.gpus : "—";
   return html`
     <tr class="row" data-job="${jobid}">

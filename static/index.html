@@ -12,7 +12,7 @@
 <body>
 <header>
   <h1>Triton GPU Efficiency Dashboard</h1>
-  <span class="sub">live data: sacct &middot; scontrol &middot; Prometheus</span>
+  <span class="sub">live data: sacct &middot; scontrol &middot; Prometheus &middot; all times Europe/Helsinki</span>
   <span class="live" id="health">checking&hellip;</span>
   <label class="auto-refresh" title="Automatically re-fetch the visible tab. Off by default — this hits sacct and Prometheus on every tick.">Auto-refresh
     <select id="autoRefresh">
@@ -162,7 +162,7 @@
           </div>
         </div>
         <div class="card">
-          <h2>Mean occupancy by partition</h2>
+          <h2>Mean occupancy by partition <button type="button" class="glossary-btn" data-glossary="mean-occupancy" title="What is this?">?</button></h2>
           <div class="chart" id="partOccupancyPlot"></div>
           <div class="legend neutral">
             <span class="legend-key" style="background:var(--acc)"></span> share of capacity with an active job
@@ -183,7 +183,7 @@
               <th data-k="name">Partition</th>
               <th class="num" data-k="gpus_total" title="allocated / total GPUs">GPUs</th>
               <th class="num" data-k="job_count">Jobs</th>
-              <th class="num" data-k="mean_util">Mean util %</th>
+              <th class="num" data-k="mean_util">Mean util %<button type="button" class="glossary-btn" data-glossary="mean-util" title="What is this?">?</button></th>
             </tr></thead>
             <tbody></tbody>
           </table>
@@ -196,7 +196,7 @@
     <div id="vramResults" class="results-panel">
       <div class="results-content">
         <div class="card" style="margin-top:14px">
-        <h2>VRAM distribution by job</h2>
+        <h2>VRAM distribution by job <button type="button" class="glossary-btn" data-glossary="gpu-hours-alloc" title="What is this?">?</button></h2>
         <div class="controls bare">
           <label class="row"><input id="vNormalize" type="checkbox"> Normalize</label>
           <label>GPU type
@@ -264,7 +264,7 @@
                 <th class="num" data-k="jobs">Jobs</th>
                 <th class="num" data-k="running_jobs">Running</th>
                 <th class="num" data-k="mean_util">Mean util %</th>
-                <th class="num" data-k="util_gpu_hours">GPU-hours</th>
+                <th class="num" data-k="util_gpu_hours">GPU-hours<button type="button" class="glossary-btn" data-glossary="util-gpu-hours" title="What is this?">?</button></th>
                 <th class="num" data-k="vram_avg">VRAM %</th>
                 <th data-k="gpu_types">GPU types</th>
               </tr></thead>
@@ -288,7 +288,7 @@
                 <th data-k="state">State</th><th data-k="start">Start</th>
                 <th class="num" data-k="gpus">GPUs</th>
                 <th class="num" data-k="mean_util">GPU utilization</th>
-                <th class="num" data-k="gpu_hours_eff">Eff. GPU-hours</th>
+                <th class="num" data-k="gpu_hours_eff">Eff. GPU-hours<button type="button" class="glossary-btn" data-glossary="gpu-hours-eff" title="What is this?">?</button></th>
               </tr></thead>
               <tbody></tbody>
             </table>
@@ -366,6 +366,38 @@
   </section>
 </main>
 <div id="status"></div>
+<dialog id="glossaryDialog" class="glossary-dialog">
+  <h2>Metric glossary</h2>
+  <dl>
+    <dt id="glossary-mean-util">Mean utilization</dt>
+    <dd>Time-weighted mean GPU utilization over the window. GPU devices are
+      collapsed to a per-job/per-node max first, so this measures &ldquo;how
+      busy&rdquo; a job, node or partition was &mdash; not raw GPU-hours.</dd>
+    <dt id="glossary-mean-occupancy">Mean occupancy</dt>
+    <dd>A partition's window-average share of its total GPU capacity that had
+      an active job on it, regardless of how busy that job's GPUs actually
+      were. A partition can have high occupancy and low utilization (jobs
+      running but idle) or the reverse.</dd>
+    <dt id="glossary-util-gpu-hours">GPU-hours (Users table)</dt>
+    <dd>Utilization-weighted GPU-hours: mean utilization &times; GPU time.
+      Ranks users by how much they actually used, not how much they were
+      allocated. Not the same figure as a job's effective GPU-hours below.</dd>
+    <dt id="glossary-gpu-hours-eff">Eff. GPU-hours (a user's jobs)</dt>
+    <dd>Effective GPU-hours: allocated GPU-hours (gpus &times; elapsed time)
+      &times; mean utilization, once sacct/scontrol metadata resolves the
+      allocation. Before that resolves, a Prometheus-only estimate is shown
+      instead. This is allocation-based, unlike the Users table's GPU-hours
+      above.</dd>
+    <dt id="glossary-gpu-hours-alloc">Allocated vs. effective GPU-hours (VRAM chart)</dt>
+    <dd>Allocated GPU-hours is gpus &times; elapsed time from sacct &mdash;
+      what was reserved, regardless of use. Effective GPU-hours is that
+      figure &times; mean utilization &mdash; what was actually used. The
+      VRAM chart stacks them so the allocated-but-idle gap is visible
+      directly; a job with no sacct allocation record is excluded from the
+      chart and counted separately in its caption.</dd>
+  </dl>
+  <button type="button" id="glossaryClose">Close</button>
+</dialog>
 <script type="module" src="/static/js/main.js"></script>
 </body>
 </html>

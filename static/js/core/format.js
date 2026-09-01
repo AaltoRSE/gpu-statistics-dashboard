@@ -82,8 +82,36 @@ export function nodeStateBadges(n) {
   return parts.map((p) => stateBadge(p, p.replace(/_/g, " "))).join(" ");
 }
 
+// One display timezone everywhere (T-23): the cluster's own zone,
+// Europe/Helsinki — not the viewer's browser zone, and not UTC. Stated
+// once in the page header rather than repeated after every timestamp.
+const HELSINKI_FMT = new Intl.DateTimeFormat("en-CA", {
+  timeZone: "Europe/Helsinki", year: "numeric", month: "2-digit", day: "2-digit",
+  hour: "2-digit", minute: "2-digit", hour12: false,
+});
+
 export function tsToDate(ts) {
-  return new Date(ts * 1000).toISOString().slice(0, 16).replace("T", " ");
+  const parts = HELSINKI_FMT.formatToParts(new Date(ts * 1000));
+  const get = (type) => parts.find((p) => p.type === type).value;
+  return get("year") + "-" + get("month") + "-" + get("day") + " " +
+    get("hour") + ":" + get("minute");
+}
+
+// sacct's Start/End are already the cluster's own local wall-clock time
+// (Europe/Helsinki, same zone as tsToDate above) — Slurm formats them as
+// an unlabeled "YYYY-MM-DDTHH:MM:SS" string with no zone suffix. This is
+// a plain string reformat, never a Date construction: parsing an
+// unqualified date-time string as a Date lets the *viewer's own browser*
+// timezone bleed into an otherwise already-correct cluster-local value.
+// Slurm can also return "Unknown" (no end yet) or "INVALID" (a malformed
+// record); both, and anything else unrecognized, render as themselves
+// rather than "Invalid Date".
+const SACCT_TIME_RE = /^(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2}):\d{2}$/;
+
+export function fmtSacctTime(s) {
+  if (!s) return "—";
+  const m = SACCT_TIME_RE.exec(s);
+  return m ? m[1] + " " + m[2] : s;
 }
 
 // Natural (numeric-aware) string comparison: "gpu2" < "gpu3" < "gpu15" <
