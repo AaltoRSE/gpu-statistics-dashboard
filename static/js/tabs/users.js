@@ -16,7 +16,7 @@
 
 import { $, isPlainClick } from "../core/dom.js";
 import {
-  fmt, fmtInt, pctBar, escapeList, html, raw, tsToDate, fmtSacctTime,
+  fmt, fmtInt, pctBar, chipList, escapeHtml, html, raw, tsToDate, fmtSacctTime,
   jobLink, nodeLinks, partitionLink, stateBadge,
 } from "../core/format.js";
 import { setResultsLoading, showPanelError, panelOk } from "../core/panel.js";
@@ -72,7 +72,7 @@ function userRowHtml(u) {
       <td class="num">${raw(pctBar(u.mean_util))}</td>
       <td class="num">${fmtInt(u.util_gpu_hours)}</td>
       <td class="num">${fmt(u.vram_avg)}</td>
-      <td class="small">${raw(escapeList(u.gpu_types))}</td>
+      <td class="small chip-cell">${raw(chipList((u.gpu_types || []).map(escapeHtml)))}</td>
     </tr>`;
 }
 

@@ -74,6 +74,26 @@ export function escapeList(values) {
   return list.map(escapeHtml).join(", ") || "—";
 }
 
+// Chip-ify an unbounded column (PLAN-1 3.1): a bare comma-joined string of
+// vendor names or job IDs sets the table's own column width and overflows
+// at ordinary laptop widths once there are more than a handful. Show the
+// first ``max`` as short chips; the rest sit behind one "+N more" toggle
+// (core/dom.js's initChipToggle wires the actual click, once, by
+// delegation — a per-row listener would be lost on every table re-render).
+// ``items`` are already-safe HTML strings (escapeHtml'd text or a link
+// builder's output), consistent with every other raw()-wrapped builder in
+// this module.
+export function chipList(items, max = 3) {
+  if (!items.length) return "—";
+  const chip = (i) => `<span class="chip">${i}</span>`;
+  const shown = items.slice(0, max).map(chip).join("");
+  const rest = items.slice(max);
+  if (!rest.length) return shown;
+  return shown +
+    `<button type="button" class="chip-more">+${rest.length} more</button>` +
+    `<span class="chip-overflow" hidden>${rest.map(chip).join("")}</span>`;
+}
+
 export function stateBadge(state, label = state) {
   if (!state) return "";
   const known = ["RUNNING", "COMPLETED", "PENDING", "IDLE", "FAILED", "CANCELLED",

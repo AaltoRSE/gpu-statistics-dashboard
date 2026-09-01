@@ -41,3 +41,28 @@ export function emptyRow(cols, msg, resetLabel) {
   return '<tr class="empty-state-row"><td colspan="' + cols + '">' +
     '<div class="empty-state">' + escapeHtml(msg) + btn + '</div></td></tr>';
 }
+
+// Wires format.js's chipList "+N more" toggle once, by delegation on
+// document: any table that renders a chipList cell gets the click handler
+// for free, including a table whose tbody is fully replaced on every sort/
+// filter (a per-cell listener would be lost on that next render; a single
+// document-level one survives it). One-way expand — a chip list is a
+// dead-end detail view, not something worth re-collapsing.
+export function initChipToggle() {
+  // Capture phase, not bubble: a table row's own click-to-navigate
+  // handler lives on the <tr> itself, deeper in the tree than this
+  // document-level listener. In the bubble phase that handler would
+  // already have run (and navigated away) by the time a bubble-phase
+  // listener up here got a chance to stopPropagation(); capture fires
+  // top-down, before that, so it can actually intercept the click.
+  document.addEventListener("click", (e) => {
+    const btn = e.target.closest(".chip-more");
+    if (!btn) return;
+    e.stopPropagation();
+    const overflow = btn.nextElementSibling;
+    if (overflow && overflow.classList.contains("chip-overflow")) {
+      overflow.hidden = false;
+    }
+    btn.remove();
+  }, true);
+}
