@@ -6,22 +6,27 @@
  * user's job list fetched (server-side user-scoped query).
  *
  * See tabs/jobs.js for why this module and core/router.js import each
- * other. */
+ * other. The user's job table (userJobsTable) is wired to the shared
+ * table component here for the first time — its headers carry data-k
+ * attributes in the HTML, but the original app.js never attached a sort
+ * handler to them, so clicking a column header did nothing. Routing it
+ * through createTable (T-19) gives it working sort for free, consistent
+ * with the other four tables. */
 "use strict";
 
-import { $, isPlainClick, markSort, emptyRow } from "../core/dom.js";
+import { $, isPlainClick } from "../core/dom.js";
 import {
-  fmt, fmtInt, pctBar, escapeHtml, escapeList, compareStrings, tsToDate,
+  fmt, fmtInt, pctBar, escapeHtml, escapeList, tsToDate,
   jobLink, nodeLinks, partitionLink, stateBadge,
 } from "../core/format.js";
 import { setResultsLoading, showPanelError, panelOk } from "../core/panel.js";
 import { api, status } from "../core/api.js";
 import { loaded, setUrl, openJob, openNode, openPartition } from "../core/router.js";
+import { createTable } from "../core/table.js";
 
 let userRows = [];
 let userSelected = null;   // finalized user name or null
 let userJobs = [];
-let userSort = { key: "util_gpu_hours", dir: "desc" };
 let usersToken = 0;
 let userJobsToken = 0;
 
@@ -58,32 +63,9 @@ function filteredUsers() {
   });
 }
 
-function sortUserRows(rows) {
-  const k = userSort.key, s = userSort.dir === "asc" ? 1 : -1;
-  const key = (v) => Array.isArray(v) ? v.join(",") : (v === null ? "" : v);
-  return rows.slice().sort((a, b) => {
-    const va = key(a[k]), vb = key(b[k]);
-    if (typeof va === "number" && typeof vb === "number") return (va - vb) * s;
-    return compareStrings(va, vb) * s;
-  });
-}
-
-function renderUserTable() {
-  const tb = $("userTable").querySelector("tbody");
-  const rows = sortUserRows(filteredUsers());
-  if (!rows.length) {
-    const searched = $("uSearch").value.trim();
-    tb.innerHTML = emptyRow(7, searched
-      ? "No users match that search." : "No users with GPU activity in this window.",
-      searched ? "clear search" : null);
-    const reset = tb.querySelector("button[data-empty-reset]");
-    if (reset) reset.addEventListener("click", () => { $("uSearch").value = ""; renderUserTable(); });
-    $("uCount").textContent = "0 shown";
-    return;
-  }
-  tb.innerHTML = rows.map((u) => {
-    const user = escapeHtml(u.user);
-    return `
+function userRowHtml(u) {
+  const user = escapeHtml(u.user);
+  return `
     <tr class="row" data-user="${user}" style="${u.user === userSelected ? "background:var(--panel2)" : ""}">
       <td><b>${user}</b></td>
       <td class="num">${escapeHtml(fmtInt(u.jobs))}</td>
@@ -93,14 +75,40 @@ function renderUserTable() {
       <td class="num">${escapeHtml(fmt(u.vram_avg))}</td>
       <td class="small">${escapeList(u.gpu_types)}</td>
     </tr>`;
-  }).join("");
-  tb.querySelectorAll("tr.row").forEach((tr) =>
-    tr.addEventListener("click", () => {
-      $("uSearch").value = tr.dataset.user;
-      finalizeUser(tr.dataset.user);
-    }));
+}
+
+function userRowClick(e, tr) {
+  $("uSearch").value = tr.dataset.user;
+  finalizeUser(tr.dataset.user);
+}
+
+function userTableEmptyMessage() {
+  const searched = $("uSearch").value.trim();
+  return {
+    text: searched ? "No users match that search." : "No users with GPU activity in this window.",
+    resetLabel: searched ? "clear search" : null,
+    onReset: () => { $("uSearch").value = ""; renderUserTable(); },
+  };
+}
+
+const userTable = createTable({
+  el: $("userTable"),
+  columns: [
+    { key: "user", type: "text" }, { key: "jobs", type: "number" },
+    { key: "running_jobs", type: "number" }, { key: "mean_util", type: "number" },
+    { key: "util_gpu_hours", type: "number" }, { key: "vram_avg", type: "number" },
+    { key: "gpu_types", type: "text" },
+  ],
+  defaultSort: { key: "util_gpu_hours", dir: "desc" },
+  renderRow: userRowHtml,
+  onRowClick: userRowClick,
+  emptyMessage: userTableEmptyMessage,
+});
+
+function renderUserTable() {
+  const rows = filteredUsers();
+  userTable.setRows(rows);
   $("uCount").textContent = rows.length + " shown";
-  markSort($("userTable"), userSort.key, userSort.dir);
 }
 
 // Make the finalized selection unmissable: a banner names the selected user
@@ -152,7 +160,7 @@ async function loadUserJobs(user) {
     if (token !== userJobsToken) return;
     panelOk("userJobsResults");
     userJobs = data.jobs;
-    renderUserJobsTable();
+    userJobsTable.setRows(userJobs);
   } catch (e) {
     if (token === userJobsToken)
       showPanelError("userJobsResults", e, () => loadUserJobs(user), "the job list");
@@ -161,21 +169,12 @@ async function loadUserJobs(user) {
   }
 }
 
-function renderUserJobsTable() {
-  const tb = $("userJobsTable").querySelector("tbody");
-  if (!userJobs.length) {
-    tb.innerHTML = emptyRow(9,
-      $("uRunning").checked
-        ? "No running jobs for " + userSelected + " in this window."
-        : "No jobs for " + userSelected + " in this window.", null);
-    return;
-  }
-  tb.innerHTML = userJobs.map((j) => {
-    const jobid = escapeHtml(j.jobid);
-    const rawName = j.name || "";
-    const start = escapeHtml((j.start || "").slice(0, 16));
-    const gpus = escapeHtml(j.gpus !== undefined ? j.gpus : "—");
-    return `
+function userJobRowHtml(j) {
+  const jobid = escapeHtml(j.jobid);
+  const rawName = j.name || "";
+  const start = escapeHtml((j.start || "").slice(0, 16));
+  const gpus = escapeHtml(j.gpus !== undefined ? j.gpus : "—");
+  return `
     <tr class="row" data-job="${jobid}">
       <td>${jobLink(j.jobid)}</td>
       <td title="${escapeHtml(rawName)}">${escapeHtml(rawName.slice(0, 40))}</td>
@@ -186,36 +185,59 @@ function renderUserJobsTable() {
       <td class="num">${pctBar(j.mean_util)}</td>
       <td class="num">${escapeHtml(fmtInt(j.gpu_hours_eff))}</td>
     </tr>`;
-  }).join("");
-  tb.querySelectorAll("tr.row").forEach((tr) =>
-    tr.addEventListener("click", (e) => {
-      const link = e.target.closest("a.joblink");
-      if (link) {
-        e.stopPropagation();
-        if (!isPlainClick(e)) return;
-        e.preventDefault();
-        openJob(link.dataset.job, { kind: "user", user: userSelected });
-        return;
-      }
-      const nlink = e.target.closest("a.nodelink");
-      if (nlink) {
-        e.stopPropagation();
-        if (!isPlainClick(e)) return;
-        e.preventDefault();
-        openNode(nlink.dataset.node);
-        return;
-      }
-      const plink = e.target.closest("a.partitionlink");
-      if (plink) {
-        e.stopPropagation();
-        if (!isPlainClick(e)) return;
-        e.preventDefault();
-        openPartition(plink.dataset.partition);
-        return;
-      }
-      openJob(tr.dataset.job, { kind: "user", user: userSelected });
-    }));
 }
+
+function userJobRowClick(e, tr) {
+  const link = e.target.closest("a.joblink");
+  if (link) {
+    e.stopPropagation();
+    if (!isPlainClick(e)) return;
+    e.preventDefault();
+    openJob(link.dataset.job, { kind: "user", user: userSelected });
+    return;
+  }
+  const nlink = e.target.closest("a.nodelink");
+  if (nlink) {
+    e.stopPropagation();
+    if (!isPlainClick(e)) return;
+    e.preventDefault();
+    openNode(nlink.dataset.node);
+    return;
+  }
+  const plink = e.target.closest("a.partitionlink");
+  if (plink) {
+    e.stopPropagation();
+    if (!isPlainClick(e)) return;
+    e.preventDefault();
+    openPartition(plink.dataset.partition);
+    return;
+  }
+  openJob(tr.dataset.job, { kind: "user", user: userSelected });
+}
+
+function userJobsEmptyMessage() {
+  return {
+    text: $("uRunning").checked
+      ? "No running jobs for " + userSelected + " in this window."
+      : "No jobs for " + userSelected + " in this window.",
+    resetLabel: null,
+  };
+}
+
+const userJobsTable = createTable({
+  el: $("userJobsTable"),
+  columns: [
+    { key: "jobid", type: "text" }, { key: "name", type: "text" },
+    { key: "partition", type: "text" }, { key: "nodes", type: "text" },
+    { key: "state", type: "text" }, { key: "start", type: "text" },
+    { key: "gpus", type: "number" }, { key: "mean_util", type: "number" },
+    { key: "gpu_hours_eff", type: "number" },
+  ],
+  defaultSort: { key: "mean_util", dir: "desc" },
+  renderRow: userJobRowHtml,
+  onRowClick: userJobRowClick,
+  emptyMessage: userJobsEmptyMessage,
+});
 
 $("uWindow").addEventListener("change", () => {
   userSelected = null;
@@ -238,11 +260,3 @@ $("uSearch").addEventListener("keydown", (e) => {
     finalizeUser("");
   }
 });
-$("userTable").querySelectorAll("th[data-k]").forEach((th) =>
-  th.addEventListener("click", () => {
-    const k = th.dataset.k;
-    userSort = (k === userSort.key)
-      ? { key: k, dir: userSort.dir === "desc" ? "asc" : "desc" }
-      : { key: k, dir: "desc" };
-    renderUserTable();
-  }));
