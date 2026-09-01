@@ -137,16 +137,13 @@ async function api(path) {
   try {
     resp = await fetch(path);
   } catch (e) {
-    errBox(true, "Backend unreachable: " + e);
     throw e;
   }
   if (!resp.ok) {
     let detail = resp.status + " " + resp.statusText;
     try { detail += " — " + JSON.stringify((await resp.json()).detail || ""); } catch (_) {}
-    errBox(true, "API error: " + detail);
     throw new Error(detail);
   }
-  errBox(false);
   const data = await resp.json();
   status("loaded in " + Math.round(performance.now() - t0) + " ms");
   return data;
@@ -220,6 +217,7 @@ async function checkHealth() {
     $("health").innerHTML = '<b>&#9679;</b> prometheus: ' +
       escapeHtml(h.prometheus.replace(/^https?:\/\//, ""));
   } catch (_) {
+    errBox(true, "Backend unreachable — the health check failed");
     $("health").innerHTML = '<span style="color:var(--bad)">&#9679; backend down</span>';
   }
 }
