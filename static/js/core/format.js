@@ -15,6 +15,21 @@ export function fmtInt(v) {
   return Math.round(Number(v)).toLocaleString();
 }
 
+// Coarsest-unit-first duration, e.g. "3d 4h", "2h 5m", "42m" — never more
+// than two units, since a job's elapsed time only needs to be legible at a
+// glance in the job-detail summary row, not precise to the second.
+export function fmtDuration(seconds) {
+  if (seconds === null || seconds === undefined) return "—";
+  let s = Math.max(0, Math.round(Number(seconds)));
+  const d = Math.floor(s / 86400); s -= d * 86400;
+  const h = Math.floor(s / 3600); s -= h * 3600;
+  const m = Math.floor(s / 60);
+  if (d) return d + "d " + h + "h";
+  if (h) return h + "h " + m + "m";
+  if (m) return m + "m";
+  return s + "s";
+}
+
 export function pctBar(v) {
   if (v === null || v === undefined) return "";
   const p = Math.max(0, Math.min(100, v));

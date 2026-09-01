@@ -11,8 +11,8 @@
 
 import { $, debounce, isPlainClick } from "../core/dom.js";
 import {
-  fmt, fmtInt, pctBar, escapeHtml, html, raw, tsToDate, fmtSacctTime, stateBadge,
-  userLink, nodeLinks, partitionLink,
+  fmt, fmtInt, pctBar, escapeHtml, html, raw, tsToDate, fmtSacctTime, fmtDuration,
+  stateBadge, userLink, nodeLinks, partitionLink,
 } from "../core/format.js";
 import { setResultsLoading, showPanelError, panelOk } from "../core/panel.js";
 import { renderPlot, plotTheme, partBarColor } from "../core/plot.js";
@@ -314,6 +314,7 @@ export async function loadJobDetail(jobid, from) {
 function setJobDetailHead(jobid) {
   $("jobDetailTitle").textContent = "Job " + jobid;
   $("jobDetailMeta").textContent = "";
+  $("jobDetailStats").innerHTML = "";
   const back = $("jobDetailBack");
   // Clear any stale origin from a previous job; the label depends on how
   // this job was opened.
@@ -392,6 +393,23 @@ export function renderJobDetail(data) {
   if (m.start) metaBits.push("start " + fmtSacctTime(m.start));
   if (m.end) metaBits.push("end " + fmtSacctTime(m.end));
   $("jobDetailMeta").textContent = metaBits.join(" · ");
+  // Summary row (PLAN-2): mean_util/gpu_hours_eff come straight from the
+  // series for this job, always present; gpu_hours_alloc/elapsed_s are
+  // null when metadata never resolved, in which case they're skipped
+  // rather than shown as a misleading zero.
+  const stats = [
+    { label: "mean utilization", value: fmt(data.mean_util, 1) + "%" },
+    { label: "effective GPU-hours", value: fmt(data.gpu_hours_eff, 1) },
+  ];
+  if (data.gpu_hours_alloc !== null && data.gpu_hours_alloc !== undefined) {
+    stats.push({ label: "allocated GPU-hours", value: fmt(data.gpu_hours_alloc, 1) });
+  }
+  if (data.elapsed_s !== null && data.elapsed_s !== undefined) {
+    stats.push({ label: "elapsed", value: fmtDuration(data.elapsed_s) });
+  }
+  $("jobDetailStats").innerHTML = stats.map((s) =>
+    html`<div class="stat"><div class="stat-label">${s.label}</div><div class="stat-value">${s.value}</div></div>`
+  ).join("");
   // No known origin (deep link / direct open): offer the job's partition as
   // a useful next investigation step, but only once metadata has loaded.
   const back = $("jobDetailBack");

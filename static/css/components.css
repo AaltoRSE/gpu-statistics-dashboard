@@ -192,6 +192,17 @@ header .auto-refresh select { background:var(--panel2); color:var(--text); borde
 #jobDetailBack:focus-visible { outline: 2px solid var(--acc); outline-offset: 2px; }
 #jobDetailClose { background:none; border:1px solid var(--line); color:var(--dim);
   border-radius:6px; cursor:pointer; font-size:11px; line-height:1; padding:3px 7px; }
+
+/* job detail summary row (PLAN-2): mean utilization / GPU-hours / elapsed,
+   above the trend chart — a glance answer, not just the raw series. */
+.stat-row { display:flex; flex-wrap:wrap; gap:10px; margin:10px 0 14px; }
+.stat-row:empty { display:none; }
+.stat { background:var(--panel2); border:1px solid var(--line); border-radius:6px;
+  padding:6px 12px; min-width:110px; }
+.stat .stat-label { font-size:10px; text-transform:uppercase; letter-spacing:.04em;
+  color:var(--dim); margin-bottom:2px; }
+.stat .stat-value { font-size:15px; font-weight:600; color:var(--text);
+  font-variant-numeric:tabular-nums; }
 #jobDetailClose:hover { color:var(--text); border-color:var(--dim); }
 .explorer-head { display:flex; align-items:center; gap:12px; margin:14px 0 0; }
 #jobExplorerToggle { background:none; border:none; color:var(--acc); cursor:pointer;
