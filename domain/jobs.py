@@ -87,9 +87,6 @@ def fetch_job_window(since_hours, include_vram=True, user=None):
             "gpu_type": job["gpu_type"],
             "nodes": sorted(n for n in job["nodes"] if n),
             "mean_util": mean_util,
-            # Average efficiency over the window; independent of job
-            # duration and of sacct availability.
-            "efficiency": round(mean_util, 1),
             "max_util": round(job["max_util"], 2),
             "gpu_hours_eff": round(job["eff_hours"], 2),
             "vram_avg": round(sum(vv) / len(vv), 1) if vv else None,
@@ -103,13 +100,15 @@ def fetch_job_window(since_hours, include_vram=True, user=None):
 
 
 def efficiency_extremes(jobs, count=30):
-    """Top/bottom average-efficiency jobs with deterministic ties.
+    """Top/bottom average-efficiency (mean_util) jobs with deterministic ties.
 
     ``efficiency_high`` is the highest-efficiency jobs, descending;
     ``efficiency_low`` is the lowest-efficiency jobs, ascending. Ties break by
-    job ID so both lists are stable across calls.
+    job ID so both lists are stable across calls. "Efficiency" here names a
+    concept (average GPU utilization), not a separate field — it is
+    mean_util itself; there is no dedicated efficiency field on a job.
     """
-    ordered = sorted(jobs, key=lambda j: (j["efficiency"], j["jobid"]))
+    ordered = sorted(jobs, key=lambda j: (j["mean_util"], j["jobid"]))
     low = ordered[:count]
-    high = sorted(ordered[-count:], key=lambda j: (-j["efficiency"], j["jobid"]))
+    high = sorted(ordered[-count:], key=lambda j: (-j["mean_util"], j["jobid"]))
     return high, low

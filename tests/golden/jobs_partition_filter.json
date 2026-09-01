@@ -3,7 +3,6 @@
   "efficiency_high": [
     {
       "account": "acc",
-      "efficiency": 50.0,
       "end": null,
       "gpu_group": "gpu-h100",
       "gpu_hours_alloc": 2.0,
@@ -27,7 +26,6 @@
     },
     {
       "account": "acc",
-      "efficiency": 10.0,
       "end": "2026-08-29T02:00:00",
       "gpu_group": "gpu-h100",
       "gpu_hours_alloc": 2.0,
@@ -53,7 +51,6 @@
   "efficiency_low": [
     {
       "account": "acc",
-      "efficiency": 10.0,
       "end": "2026-08-29T02:00:00",
       "gpu_group": "gpu-h100",
       "gpu_hours_alloc": 2.0,
@@ -77,7 +74,6 @@
     },
     {
       "account": "acc",
-      "efficiency": 50.0,
       "end": null,
       "gpu_group": "gpu-h100",
       "gpu_hours_alloc": 2.0,
@@ -103,7 +99,6 @@
   "jobs": [
     {
       "account": "acc",
-      "efficiency": 50.0,
       "end": null,
       "gpu_group": "gpu-h100",
       "gpu_hours_alloc": 2.0,
@@ -127,7 +122,6 @@
     },
     {
       "account": "acc",
-      "efficiency": 10.0,
       "end": "2026-08-29T02:00:00",
       "gpu_group": "gpu-h100",
       "gpu_hours_alloc": 2.0,

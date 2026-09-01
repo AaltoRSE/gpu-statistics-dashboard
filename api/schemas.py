@@ -54,9 +54,11 @@ class Job(BaseModel):
                     "against the whole-GPU pool.")
     nodes: List[str]
     mean_util: float = Field(
-        description="Time-weighted mean GPU utilization over the window (%).")
-    efficiency: float = Field(
-        description="mean_util rounded to 1 decimal place.")
+        description="Time-weighted mean GPU utilization over the window "
+                    "(%). Also referred to as a job's \"efficiency\" "
+                    "elsewhere in this API (efficiency_high/efficiency_low "
+                    "below) and in the UI — that is this same field, not a "
+                    "separate one.")
     max_util: float
     gpu_hours_eff: float = Field(
         description="Effective GPU-hours: allocated GPU-hours x mean "

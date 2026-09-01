@@ -922,13 +922,17 @@ def test_aggregate_partition_stats_fixture():
     assert set(out[0]) == {"name", "mean_util", "max_util", "job_count"}
 
 
-def test_jobs_efficiency_field(client):
+def test_jobs_mean_util_field_and_no_duplicate_efficiency_field(client):
     data = client.get("/api/jobs", params={"since_hours": 24}).json()
     by_id = {j["jobid"]: j for j in data["jobs"]}
-    assert by_id["1"]["efficiency"] == 50.0  # mean of 40, 60
-    assert by_id["2"]["efficiency"] == 10.0
-    assert by_id["3"]["efficiency"] == 92.5
-    assert by_id["4"]["efficiency"] == 85.0
+    assert by_id["1"]["mean_util"] == 50.0  # mean of 40, 60
+    assert by_id["2"]["mean_util"] == 10.0
+    assert by_id["3"]["mean_util"] == 92.5
+    assert by_id["4"]["mean_util"] == 85.0
+    # "efficiency" was a duplicate of mean_util (T-26 collapsed it); the
+    # charts and sort still speak of "efficiency" as a concept, but no job
+    # dict carries a field by that name any more.
+    assert "efficiency" not in by_id["1"]
 
 
 def test_jobs_efficiency_extremes(client):
