@@ -287,6 +287,7 @@
     "gpu-h200",
     "h200_3g.71gb"
   ],
+  "total_candidates": 4,
   "window": {
     "end": 1788100000,
     "start": 1788013600

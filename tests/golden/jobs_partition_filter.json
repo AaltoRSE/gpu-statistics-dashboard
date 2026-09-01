@@ -147,6 +147,7 @@
   "partitions": [
     "gpu-h100"
   ],
+  "total_candidates": 2,
   "window": {
     "end": 1788100000,
     "start": 1788013600

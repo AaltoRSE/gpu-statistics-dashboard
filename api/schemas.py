@@ -86,6 +86,13 @@ class Job(BaseModel):
 class JobsResponse(BaseModel):
     window: Window
     count: int
+    total_candidates: int = Field(
+        description="Jobs matching partition/user/running_only before the "
+                    "sacct-enrichment cap ('show top N by GPU-hours') is "
+                    "applied. Search runs after that cap, so total_candidates "
+                    "> count with an empty search result means the match "
+                    "exists but fell outside the top-N by GPU-hours, not "
+                    "that it doesn't exist in the window.")
     partitions: List[str]
     jobs: List[Job]
     efficiency_high: List[Job] = Field(
