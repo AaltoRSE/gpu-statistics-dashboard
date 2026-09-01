@@ -1417,8 +1417,10 @@ $("vUtilMax").addEventListener("input", vramSliderInput);
 
 let nodeRows = [];
 let nodeSort = { key: "name", dir: "asc" };
+let nodesToken = 0;
 
 async function loadNodes(force = false) {
+  const token = ++nodesToken;
   const params = new URLSearchParams({ gpu_only: String($("nGpuOnly").checked) });
   if (force) params.set("refresh", "true");
   const btn = $("nRefresh");
@@ -1427,6 +1429,7 @@ async function loadNodes(force = false) {
   status("loading nodes…");
   try {
     const data = await api("/api/nodes?" + params);
+    if (token !== nodesToken) return; // a newer request supersedes this one
     panelOk("nodesResults");
     nodeRows = data.nodes;
     const t = new Intl.DateTimeFormat("en-GB", {
@@ -1438,11 +1441,14 @@ async function loadNodes(force = false) {
     renderNodeTable();
     loaded.nodes = true;
   } catch (e) {
-    showPanelError("nodesResults", e, () => loadNodes(), "the node list");
+    if (token === nodesToken)
+      showPanelError("nodesResults", e, () => loadNodes(), "the node list");
     throw e;
   } finally {
-    btn.disabled = false;
-    setResultsLoading("nodesResults", false);
+    if (token === nodesToken) {
+      btn.disabled = false;
+      setResultsLoading("nodesResults", false);
+    }
   }
 }
 
