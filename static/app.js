@@ -451,7 +451,6 @@ function renderJobTable(rows) {
       <td>${stateBadge(j.state)}</td><td>${start}</td>
       <td class="num">${gpus}</td>
       <td class="num">${pctBar(j.mean_util)}</td>
-      <td class="num">${escapeHtml(j.efficiency !== undefined ? fmt(j.efficiency) : "—")}</td>
       <td class="num">${escapeHtml(fmt(j.vram_avg))}</td>
     </tr>`;
   }).join("");
@@ -928,7 +927,7 @@ async function loadUserJobs(user) {
 function renderUserJobsTable() {
   const tb = $("userJobsTable").querySelector("tbody");
   if (!userJobs.length) {
-    tb.innerHTML = emptyRow(10,
+    tb.innerHTML = emptyRow(9,
       $("uRunning").checked
         ? "No running jobs for " + userSelected + " in this window."
         : "No jobs for " + userSelected + " in this window.", null);
@@ -948,7 +947,6 @@ function renderUserJobsTable() {
       <td>${stateBadge(j.state)}</td><td>${start}</td>
       <td class="num">${gpus}</td>
       <td class="num">${pctBar(j.mean_util)}</td>
-      <td class="num">${escapeHtml(j.efficiency !== undefined ? fmt(j.efficiency) : "—")}</td>
       <td class="num">${escapeHtml(fmtInt(j.gpu_hours_eff))}</td>
     </tr>`;
   }).join("");

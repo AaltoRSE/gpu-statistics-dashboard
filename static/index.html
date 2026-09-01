@@ -319,14 +319,13 @@ header .theme-btn:hover { color:var(--text); }
                 <th data-k="partition">Partition</th><th data-k="nodes">Node</th>
                 <th data-k="state">State</th>
                 <th data-k="start">Start</th><th data-k="gpus">GPUs</th>
-                <th class="num" data-k="mean_util">Mean util %</th>
-                <th class="num" data-k="efficiency">Efficiency %</th>
+                <th class="num" data-k="mean_util">GPU utilization</th>
                 <th class="num" data-k="vram_avg">VRAM %</th>
               </tr></thead>
               <tbody></tbody>
             </table>
           </div>
-          <div class="hint">Mean util % = average efficiency of the job&rsquo;s GPUs over the window (not biased by duration). Click a column header to sort.</div>
+          <div class="hint">GPU utilization = average utilization of the job&rsquo;s GPUs over the window (not biased by duration). Click a column header to sort.</div>
         </div>
       </div>
       <div class="results-loading">Data is loading&hellip;</div>
@@ -486,8 +485,7 @@ header .theme-btn:hover { color:var(--text); }
                 <th data-k="partition">Partition</th><th data-k="nodes">Node</th>
                 <th data-k="state">State</th><th data-k="start">Start</th>
                 <th class="num" data-k="gpus">GPUs</th>
-                <th class="num" data-k="mean_util">Mean util %</th>
-                <th class="num" data-k="efficiency">Efficiency %</th>
+                <th class="num" data-k="mean_util">GPU utilization</th>
                 <th class="num" data-k="gpu_hours_eff">Eff. GPU-hours</th>
               </tr></thead>
               <tbody></tbody>
