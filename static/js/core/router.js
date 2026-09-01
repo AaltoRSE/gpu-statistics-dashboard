@@ -102,6 +102,34 @@ export function restoreFromUrl() {
   if (location.pathname === "/nodes") { showTab("nodes"); return; }
 }
 
+// Auto-refresh (T-22, main.js's onTick): re-fetch whichever tab is
+// currently visible. Skips the tick entirely while any of that tab's own
+// results panels is mid-load — a stricter reading of "never auto-refresh
+// while a detail panel is loading" that also avoids stacking a fresh fetch
+// on top of any in-flight one, detail or not — rather than queuing it; the
+// next tick (or the return-to-visibility catch-up) covers it. Only ever
+// touches the active tab's own list, never an open detail panel — the
+// freshness clock next to its own panel is what tells the operator a job/
+// node detail may be stale.
+//
+// The loading check is scoped to `active` (the tabpage element), not the
+// whole document: every tab's results panel starts with a static
+// class="results-panel loading" in the HTML, on the assumption that its
+// own loader clears it on first load — a tab that has never been visited
+// still carries that class, and a document-wide check would see it and
+// refuse to auto-refresh any OTHER tab, forever, until every tab had been
+// opened at least once.
+export function refreshActiveTab() {
+  const active = document.querySelector(".tabpage.active");
+  if (!active) return;
+  if (active.querySelector(".results-panel.loading")) return;
+  const name = active.id.replace(/^tab-/, "");
+  if (name === "jobs") jobsTab.loadJobs();
+  else if (name === "partitions") partitionsTab.loadPartitions();
+  else if (name === "users") usersTab.loadUsers();
+  else if (name === "nodes") nodesTab.loadNodes();
+}
+
 export function rerenderAllPlots() {
   if (loaded.jobs) {
     jobsTab.renderJobEfficiency();
