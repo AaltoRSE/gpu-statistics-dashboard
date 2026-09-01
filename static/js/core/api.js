@@ -7,12 +7,7 @@ export function status(msg) { $("status").textContent = msg || ""; }
 
 export async function api(path) {
   const t0 = performance.now();
-  let resp;
-  try {
-    resp = await fetch(path);
-  } catch (e) {
-    throw e;
-  }
+  const resp = await fetch(path);
   if (!resp.ok) {
     let detail = resp.status + " " + resp.statusText;
     try { detail += " — " + JSON.stringify((await resp.json()).detail || ""); } catch (_) {}

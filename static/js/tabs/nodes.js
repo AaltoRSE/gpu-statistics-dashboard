@@ -44,7 +44,6 @@ export async function loadNodes(force = false) {
   } catch (e) {
     if (token === nodesToken)
       showPanelError("nodesResults", e, () => loadNodes(), "the node list");
-    throw e;
   } finally {
     if (token === nodesToken) {
       btn.disabled = false;
@@ -181,7 +180,6 @@ export async function loadNodeDetail(name) {
   } catch (e) {
     if (token === nodeDetailToken)
       showPanelError("nodeDetailResults", e, () => loadNodeDetail(name), "the node detail");
-    throw e;
   } finally {
     if (token === nodeDetailToken) setResultsLoading("nodeDetailResults", false);
   }

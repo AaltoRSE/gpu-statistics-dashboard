@@ -1,0 +1,20 @@
+/* Color tokens for both themes, plus the small set of component overrides
+ * (badges, error box, selected-row tint) that only change *which* token a
+ * component uses under the light theme rather than its shape or layout. */
+:root { --bg:#0f1420; --panel:#171e2e; --panel2:#1e2740; --line:#2a3552;
+       --text:#dce3f2; --dim:#8b98b8; --acc:#4fc3f7; --ok:#66bb6a; --warn:#ffa726; --bad:#ef5350; }
+
+[data-theme="light"] { --bg:#f4f6fb; --panel:#ffffff; --panel2:#e9edf5; --line:#c9d3e3;
+       --text:#1c2436; --dim:#5a6a8a; --acc:#0288d1; --ok:#2e7d32; --warn:#ef6c00; --bad:#d32f2f; }
+[data-theme="light"] .badge.RUNNING { background:#d9f0df; }
+[data-theme="light"] .badge.PENDING, [data-theme="light"] .badge.IDLE,
+[data-theme="light"] .badge.MIXED, [data-theme="light"] .badge.ALLOCATED,
+[data-theme="light"] .badge.PLANNED { background:#e4e9f3; }
+[data-theme="light"] .badge.COMPLETED { background:#d9ecf9; }
+[data-theme="light"] .badge.FAILED, [data-theme="light"] .badge.CANCELLED,
+[data-theme="light"] .badge.TIMEOUT, [data-theme="light"] .badge.NOT_RESPONDING { background:#f8dcde; }
+[data-theme="light"] .badge.DRAIN, [data-theme="light"] .badge.DRAINED,
+[data-theme="light"] .badge.DRAINING, [data-theme="light"] .badge.DOWN,
+[data-theme="light"] .badge.RESERVED { background:#f7e6cb; }
+[data-theme="light"] tr.row.sel td { background:#d9ecf9; }
+[data-theme="light"] .err { background:#fdecec; }

@@ -48,7 +48,6 @@ export async function loadUsers() {
   } catch (e) {
     if (token === usersToken)
       showPanelError("usersResults", e, loadUsers, "the user list");
-    throw e;
   } finally {
     if (token === usersToken) setResultsLoading("usersResults", false);
   }
@@ -65,8 +64,9 @@ function filteredUsers() {
 
 function userRowHtml(u) {
   const user = u.user;
+  const selected = u.user === userSelected;
   return html`
-    <tr class="row" data-user="${user}" style="${u.user === userSelected ? "background:var(--panel2)" : ""}">
+    <tr class="row${selected ? " selected-user" : ""}" data-user="${user}">
       <td><b>${user}</b></td>
       <td class="num">${fmtInt(u.jobs)}</td>
       <td class="num">${fmtInt(u.running_jobs)}</td>

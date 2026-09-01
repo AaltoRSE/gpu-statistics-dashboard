@@ -45,7 +45,7 @@ document.querySelectorAll("nav.tabs button").forEach((b) =>
 
 checkHealth();
 if (location.pathname === "/" || location.pathname === "") {
-  loadJobs().catch(() => {});
+  loadJobs();
 } else {
   restoreFromUrl();
 }

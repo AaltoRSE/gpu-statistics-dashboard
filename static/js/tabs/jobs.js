@@ -93,7 +93,6 @@ export async function loadJobs(force = false) {
   } catch (e) {
     if (token === jobsToken)
       showPanelError("jobsResults", e, () => loadJobs(), "the job list");
-    throw e;
   } finally {
     if (token === jobsToken) {
       if (btn) btn.disabled = false;
