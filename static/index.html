@@ -14,6 +14,14 @@
   <h1>Triton GPU Efficiency Dashboard</h1>
   <span class="sub">live data: sacct &middot; scontrol &middot; Prometheus</span>
   <span class="live" id="health">checking&hellip;</span>
+  <label class="auto-refresh" title="Automatically re-fetch the visible tab. Off by default — this hits sacct and Prometheus on every tick.">Auto-refresh
+    <select id="autoRefresh">
+      <option value="0">off</option>
+      <option value="30">30 s</option>
+      <option value="60">1 min</option>
+      <option value="300">5 min</option>
+    </select>
+  </label>
   <button class="theme-btn" id="themeBtn" type="button" title="Toggle light/dark theme">&#9728;&#xFE0E; light</button>
 </header>
 <nav class="tabs">
@@ -49,6 +57,7 @@
       <span class="control-meta">
         <span class="meta-count" id="jMetaCount"></span>
         <span class="small" id="jMeta"></span>
+        <span class="small" data-fresh-for="jobsResults"></span>
       </span>
       <button id="jRefresh" title="force a fresh Prometheus read"><span aria-hidden="true">&#8635;</span> refresh</button>
     </div>
@@ -166,7 +175,8 @@
       </div>
 
       <div class="card" style="margin-top:14px">
-        <h2>Partition table <span class="small" id="pCount"></span></h2>
+        <h2>Partition table <span class="small" id="pCount"></span>
+          <span class="small" data-fresh-for="partitionsResults"></span></h2>
         <div class="table-scroll" style="overflow-x:auto">
           <table id="partTable">
             <thead><tr>
@@ -233,6 +243,7 @@
         <span class="control-meta">
           <span class="meta-count" id="uMetaCount"></span>
           <span class="small" id="uMeta"></span>
+          <span class="small" data-fresh-for="usersResults"></span>
         </span>
       </div>
     </div>
@@ -302,6 +313,7 @@
       <label class="row"><input id="nGpuOnly" type="checkbox" checked> GPU nodes only</label>
       <span class="controls-actions">
         <span class="small" id="nMeta"></span>
+        <span class="small" data-fresh-for="nodesResults"></span>
         <button id="nRefresh" title="force a fresh scontrol/Prometheus read"><span aria-hidden="true">&#8635;</span> refresh</button>
       </span>
     </div>

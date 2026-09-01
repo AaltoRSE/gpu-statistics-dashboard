@@ -7,10 +7,11 @@
 import { $ } from "./core/dom.js";
 import { escapeHtml } from "./core/format.js";
 import { api } from "./core/api.js";
-import { errBox } from "./core/panel.js";
+import { errBox, initAutoRefresh } from "./core/panel.js";
 import { initTheme } from "./core/theme.js";
 import {
   showTab, setUrl, restoreFromUrl, rerenderAllPlots, clearPartitionSelection,
+  refreshActiveTab,
 } from "./core/router.js";
 
 import { loadJobs } from "./tabs/jobs.js";
@@ -31,6 +32,7 @@ async function checkHealth() {
 }
 
 initTheme(rerenderAllPlots);
+initAutoRefresh(refreshActiveTab);
 
 window.addEventListener("popstate", restoreFromUrl);
 document.querySelectorAll("nav.tabs button").forEach((b) =>
