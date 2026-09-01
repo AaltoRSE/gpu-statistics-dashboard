@@ -372,6 +372,7 @@ def test_jobs_running_only_empty_when_no_live_ids(client, fake_prom):
                    params={"since_hours": 24, "running_only": "true"})
     data = r.json()
     assert data["count"] == 0 and data["jobs"] == []
+    assert data["total_candidates"] == 0
     # no broad window range query may be issued when nothing is running
     assert not [q for t, q in fake_prom.calls if t == "range"]
 
@@ -948,6 +949,29 @@ def test_jobs_extremes_bounded_by_search(client):
     assert [j["jobid"] for j in data["jobs"]] == ["1"]
     assert [j["jobid"] for j in data["efficiency_high"]] == ["1"]
     assert [j["jobid"] for j in data["efficiency_low"]] == ["1"]
+
+
+def test_jobs_total_candidates_reflects_pre_limit_count(client):
+    # No limit in play: every matching job is both a candidate and returned.
+    data = client.get("/api/jobs", params={"since_hours": 24}).json()
+    assert data["total_candidates"] == 4
+    assert data["count"] == 4
+
+    # A tight limit cuts "jobs" but total_candidates still reports every job
+    # that matched the window/partition/user filters before that cut — the
+    # signal the UI needs to tell "no such job" apart from "outside the top
+    # N by GPU-hours."
+    data = client.get("/api/jobs", params={"since_hours": 24, "limit": 2}).json()
+    assert data["total_candidates"] == 4
+    assert data["count"] == 2
+
+    # A search for a job excluded by the tight limit finds nothing, but
+    # total_candidates still shows it was among the window's candidates.
+    data = client.get("/api/jobs",
+                      params={"since_hours": 24, "limit": 2,
+                              "search": "train.sh"}).json()
+    assert data["jobs"] == []
+    assert data["total_candidates"] == 4
 
 
 def test_partitions_mean_occupancy(client):

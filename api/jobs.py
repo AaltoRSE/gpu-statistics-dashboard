@@ -46,7 +46,7 @@ def api_jobs(
         if not live:
             start, now = job_window(since_hours)
             return {"window": window(start, now), "count": 0,
-                    "partitions": [], "jobs": [],
+                    "total_candidates": 0, "partitions": [], "jobs": [],
                     "efficiency_high": [], "efficiency_low": []}
     # The user filter is pushed into the Prometheus query (server-side),
     # not applied after the fact: a single-user request must not pull and
@@ -68,6 +68,12 @@ def api_jobs(
     # table limit and sacct enrichment): the high/low charts must not be
     # biased by job duration or the bounded table rows.
     high, low = efficiency_extremes(jobs)
+    # The pre-limit candidate count: how many jobs matched partition/user/
+    # running_only before the sacct-enrichment cap below. A search that
+    # matches nothing can then tell the difference between "no such job in
+    # the window" and "outside the top `limit` by GPU-hours" instead of
+    # just looking empty either way.
+    total_candidates = len(jobs)
     # Bound the sacct enrichment cost before it; name search therefore only
     # covers the top-``limit`` jobs by effective GPU hours. Running-only
     # ignores the limit: every live GPU job is returned (the UI disables
@@ -90,6 +96,7 @@ def api_jobs(
     return {
         "window": window(start, now),
         "count": len(jobs),
+        "total_candidates": total_candidates,
         "partitions": partitions,
         "jobs": jobs,
         "efficiency_high": high,

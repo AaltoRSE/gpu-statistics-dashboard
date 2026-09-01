@@ -24,6 +24,7 @@ let jobRows = [];
 let jobBaseHigh = []; // server-calculated highest efficiency set, scoped by search
 let jobBaseLow = [];
 let jobVisibleRows = []; // searched rows after the client-side partition filter
+let jobTotalCandidates = 0; // candidates before the "show top N" limit cut
 let jobsToken = 0;
 
 function jobLimit() {
@@ -71,6 +72,7 @@ export async function loadJobs(force = false) {
     panelOk("jobsResults");
     panelOk("jobEfficiencyResults");
     jobRows = data.jobs;
+    jobTotalCandidates = data.total_candidates || 0;
     // The server computes highest/lowest efficiency from the searched rows.
     jobBaseHigh = data.efficiency_high || [];
     jobBaseLow = data.efficiency_low || [];
@@ -167,7 +169,27 @@ function jobRowClick(e, tr) {
 }
 
 function jobsEmptyMessage() {
-  const hasFilters = $("jSearch").value.trim() !== "" || $("jPartition").value !== "";
+  const search = $("jSearch").value.trim();
+  const hasFilters = search !== "" || $("jPartition").value !== "";
+  // Search is server-side and runs after the "Show top N by GPU-hours"
+  // enrichment cap, so a search can miss a real job that simply falls
+  // outside that cap — the UI must not let that look like "no such job in
+  // this window." total_candidates (jobs matching the window/partition/user
+  // filters before the cap) exceeding what was actually fetched is the
+  // signal that happened; running-only ignores the limit entirely, so it
+  // never gets this message even if search still finds nothing.
+  if (search && jobRows.length === 0 && jobTotalCandidates > jobRows.length &&
+      !$("jRunning").checked) {
+    return {
+      text: "No match in the top " + $("jLimit").value +
+        " by GPU-hours — increase the limit to search further back.",
+      resetLabel: "increase limit",
+      onReset: () => {
+        $("jLimit").value = String(Math.min(1000, jobTotalCandidates));
+        loadJobs();
+      },
+    };
+  }
   return {
     text: hasFilters
       ? "No jobs match the current search / partition filters."
