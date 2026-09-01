@@ -56,6 +56,16 @@
 .table-scroll::-webkit-scrollbar-thumb { background: var(--line); border-radius: 5px;
   border: 2px solid var(--panel); }
 .table-scroll::-webkit-scrollbar-thumb:hover { background: var(--dim); }
+/* Compact table variant (Users tab's job table, PLAN-1 3.6 follow-up):
+   nine columns of real data past a wide header set ("Effective GPU-hours"
+   was clipped at the right edge). Tighter th/td padding buys back space
+   first; own horizontal scroll is the fallback for whatever still doesn't
+   fit, rather than the table forcing the whole page wider (sticky
+   positioning is gone now, so this scroll container no longer risks the
+   sticky-vs-scroll-context conflict 1.2 removed it to avoid). */
+.table-scroll.compact { overflow-x: auto; }
+.table-scroll.compact th, .table-scroll.compact td { padding: 4px 6px; }
+.table-scroll.compact th { font-size: 10px; }
 .table-scroll::-webkit-scrollbar-corner { background: transparent; }
 /* Sticky first (entity) column so the row identity stays visible while the
    table scrolls horizontally at narrow widths; header keeps priority. */
