@@ -89,14 +89,6 @@ th[data-k] > button:not(.glossary-btn):focus-visible { outline: 2px solid var(--
 .glossary-btn:focus-visible { outline: 2px solid var(--acc); outline-offset: 1px; }
 h2 .glossary-btn { position:static; display:inline-flex; margin-left:4px; }
 th.num, td.num { text-align:right; font-family: "SFMono-Regular", Consolas, monospace; }
-/* T-25: the alloc/total split and a drain reason were tooltip-only before
-   — invisible on touch and to screen readers — so both now render in the
-   cell itself; the title attribute on their parent <td> stays only as a
-   hover convenience. */
-.alloc-split { display:inline-flex; flex-direction:column; align-items:flex-end; line-height:1.25; }
-.alloc-split-label { font-size:9px; font-weight:400; color:var(--dim); text-transform:none;
-  font-family:-apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif; letter-spacing:normal; }
-.reason-line { text-transform:none; white-space:normal; margin-top:2px; }
 td { padding:5px 8px; border-bottom:1px solid var(--line); white-space:nowrap; }
 /* T-25: a job name was hard-truncated in JS to 40 characters with no
    visible sign anything was cut, and the full name was only in the title
@@ -117,12 +109,9 @@ th.sorted-desc::after { content:" \25BC"; font-size:9px; color:var(--acc); }
 .badge.PENDING, .badge.IDLE, .badge.MIXED, .badge.ALLOCATED, .badge.PLANNED { background:#26304a; color:var(--dim); }
 .badge.FAILED, .badge.CANCELLED, .badge.TIMEOUT, .badge.NOT_RESPONDING { background:#3a1e22; color:var(--bad); }
 .badge.DRAIN, .badge.DRAINED, .badge.DRAINING, .badge.DOWN, .badge.RESERVED { background:#3a2c14; color:var(--warn); }
-/* T-27: replaces the old blanket opacity:.55 on an idle node's whole row —
-   a chip next to its scontrol state badges (not one of scontrol's own
-   states, so styled distinctly from .badge.IDLE) plus a muted utilization
-   cell (below), so de-emphasis lands on the specific things that are
-   actually idle rather than the whole row at once. */
-.badge.idle-chip { background:var(--panel2); color:var(--dim); font-weight:400; }
+/* T-27: mutes just the utilization cell of an idle node, rather than a
+   blanket opacity on the whole row (the state column this used to pair
+   with an "idle now" chip on was dropped by request). */
 .muted-cell { opacity:.6; }
 
 /* Chip-ified unbounded columns (PLAN-1 3.1): GPU types / active jobs used

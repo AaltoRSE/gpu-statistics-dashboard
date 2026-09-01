@@ -7,8 +7,8 @@
 
 import { $, isPlainClick } from "../core/dom.js";
 import {
-  fmt, pctBar, escapeHtml, html, raw, compareStrings, nodeStateBadges, jobLink,
-  nodeLink, partitionLink,
+  fmt, pctBar, chipList, escapeHtml, html, raw, compareStrings,
+  jobLink, nodeLink, partitionLink,
 } from "../core/format.js";
 import { setResultsLoading, showPanelError, panelOk } from "../core/panel.js";
 import { renderPlot, plotTheme } from "../core/plot.js";
@@ -73,7 +73,7 @@ function nodeRowHtml(n) {
   // jobLink/partitionLink/escapeHtml outputs below are already safe HTML
   // (or already-escaped text); raw() marks them so html`` doesn't escape
   // them a second time. Everything else interpolates as plain text.
-  const jobs = raw((n.active_jobs || []).map((j) => jobLink(j.jobid)).join(", ") || "—");
+  const jobs = raw(chipList((n.active_jobs || []).map((j) => jobLink(j.jobid))));
   const rawName = n.name;
   const gpuType = n.gpu_type
     ? raw(n.gpu_group ? partitionLink(n.gpu_group, n.gpu_type) : escapeHtml(n.gpu_type))
@@ -81,32 +81,20 @@ function nodeRowHtml(n) {
   const gpusAlloc = n.gpus_alloc !== undefined ? n.gpus_alloc : 0;
   const vram = n.current_vram === null ? "—" : fmt(n.current_vram);
   const cpusAlloc = n.cpus_alloc !== undefined ? n.cpus_alloc : 0;
-  // The drain reason and the alloc/total split were tooltip-only —
-  // invisible on touch and to screen readers. Both are now in the cell
-  // itself; title attributes stay as a hover convenience, not the only way
-  // to read them.
-  const reasonLine = n.reason ? html`<div class="small reason-line">${n.reason}</div>` : "";
-  // T-27: a blanket opacity:.55 on the whole row (often half the table)
-  // de-emphasized everything about an idle node at once. Two targeted
-  // signals replace it: a chip beside the node's own scontrol state
-  // badges, and muting just the utilization cell — the one value that is
-  // actually saying "idle."
-  const idleChip = busy ? "" : html`<span class="badge idle-chip">idle now</span>`;
   return html`
     <tr class="row" data-node="${rawName}">
       <td>${raw(nodeLink(rawName))}</td>
       <td>${gpuType}</td>
-      <td title="${n.reason || ""}">${raw(nodeStateBadges(n))} ${raw(idleChip)}${raw(reasonLine)}</td>
       <td class="num" title="allocated / total GPUs">${raw(allocSplit(gpusAlloc, n.gpus))}</td>
       <td class="num${busy ? "" : " muted-cell"}">${u === null ? "idle" : raw(pctBar(u))}</td>
       <td class="num">${vram}</td>
       <td class="num" title="allocated / total CPUs">${raw(allocSplit(cpusAlloc, n.cpus))}</td>
-      <td class="small">${jobs}</td>
+      <td class="small chip-cell">${jobs}</td>
     </tr>`;
 }
 
 function allocSplit(alloc, total) {
-  return html`<span class="alloc-split">${alloc}/${total}<span class="alloc-split-label">alloc/total</span></span>`;
+  return html`${alloc}/${total}`;
 }
 
 function nodeRowClick(e, tr) {
@@ -154,7 +142,7 @@ const nodeTable = createTable({
   el: $("nodeTable"),
   columns: [
     { key: "name", type: "text" }, { key: "gpu_type", type: "text" },
-    { key: "state_full", type: "text" }, { key: "gpus_alloc", type: "number" },
+    { key: "gpus_alloc", type: "number" },
     { key: "current_util", type: "number" }, { key: "current_vram", type: "number" },
     { key: "cpus_alloc", type: "number" },
   ],
@@ -232,38 +220,82 @@ function fillNodeJobSelect(data) {
   if (ids.includes(prev)) sel.value = prev;
 }
 
+// One trace per physical GPU, not per (GPU, job) pair (PLAN-1 3.7): a
+// node's own metric series has one entry per job that touched a GPU
+// during the window, so a busy GPU that changed jobs several times
+// produced that many separate "GPU 0 (job …)" legend entries — 21 on the
+// node this was found on, up to 45 on busier ones.
+//
+// The catch (api/nodes.py's own comment on the sibling VRAM query says it
+// plainly): the "gpu" label is job-local, not a physical device id — every
+// job's own cgroup sees its first GPU as "gpu 0" regardless of which
+// physical card it actually landed on. So two segments sharing a "gpu"
+// label that overlap in TIME are, in practice, two different physical
+// GPUs that both happened to enumerate themselves as 0 — confirmed live
+// against a real node (dgx1, 58 job-segments all labeled gpu="0", 43 of
+// 57 adjacent-by-start-time pairs overlapping). Only sequential
+// (non-overlapping) segments under the same label are safe to merge onto
+// one trace.
+//
+// Greedy interval partitioning handles this: process a gpu-label's
+// segments in start-time order, place each on the first existing "slot"
+// whose last segment already ended by this one's start, opening a new
+// slot (== a new trace, a second occupant of that job-local index)
+// otherwise. This is the standard minimum-rooms-needed algorithm; it
+// yields the fewest traces that still never draw two truly-concurrent
+// segments as one line, without ever needing a real physical identity.
+function buildDeviceTraces(seriesList, keep, colors, lineExtra) {
+  const byGpu = new Map();
+  seriesList.forEach((s) => {
+    if (!keep(s)) return;
+    const gpu = s.metric.gpu !== undefined ? s.metric.gpu : "?";
+    const job = s.metric.slurmjobid || "";
+    if (!byGpu.has(gpu)) byGpu.set(gpu, []);
+    byGpu.get(gpu).push({ job, values: s.values });
+  });
+  const traces = [];
+  let ci = 0;
+  [...byGpu.entries()].sort((a, b) => compareStrings(a[0], b[0])).forEach(([gpu, segments]) => {
+    segments.sort((a, b) => (a.values[0]?.[0] || 0) - (b.values[0]?.[0] || 0));
+    const slots = []; // each: { end, x, y, job }
+    segments.forEach((seg) => {
+      const start = seg.values[0]?.[0] || 0;
+      const end = seg.values.at(-1)?.[0] || start;
+      let slot = slots.find((sl) => sl.end <= start);
+      if (!slot) {
+        slot = { end: -Infinity, x: [], y: [], job: [] };
+        slots.push(slot);
+      } else {
+        // A null point between this slot's previous segment and this one
+        // stops Plotly from drawing a line across the (often idle) gap
+        // between two different jobs' segments.
+        const gapX = (slot.end + start) / 2 * 1000;
+        slot.x.push(gapX); slot.y.push(null); slot.job.push("");
+      }
+      seg.values.forEach((v) => { slot.x.push(v[0] * 1000); slot.y.push(v[1]); slot.job.push(seg.job); });
+      slot.end = end;
+    });
+    slots.forEach((slot, si) => {
+      const label = "GPU " + gpu + (slots.length > 1 ? " (" + (si + 1) + ")" : "");
+      traces.push({
+        type: "scatter", mode: "lines", name: label,
+        x: slot.x, y: slot.y, customdata: slot.job,
+        line: Object.assign({ width: 2, color: colors[ci % colors.length] }, lineExtra),
+        hovertemplate: "<b>" + label + "</b><br>%{y:.1f}<br>job %{customdata}<extra></extra>",
+      });
+      ci++;
+    });
+  });
+  return traces;
+}
+
 export function renderNodeDetail(data, name) {
   $("nodeDetailTitle").textContent =
     "Node " + name + (nodeDetailJob ? " · job " + nodeDetailJob : "");
   const th = plotTheme();
   const keep = (s) => !nodeDetailJob || s.metric.slurmjobid === nodeDetailJob;
-  const utilTraces = [];
-  let ci = 0;
-  data.series.utilization.forEach((s) => {
-    if (!keep(s)) return;
-    const dev = "GPU " + (s.metric.gpu !== undefined ? s.metric.gpu : "?");
-    const job = s.metric.slurmjobid || "";
-    utilTraces.push({
-      type: "scatter", mode: "lines", name: dev + (job ? " (job " + job + ")" : ""),
-      x: s.values.map((v) => v[0] * 1000), y: s.values.map((v) => v[1]),
-      line: { width: 2, color: th.colors[ci % th.colors.length] },
-    });
-    ci++;
-  });
-  const vramTraces = [];
-  let vi = 0;
-  data.series.vram.forEach((s) => {
-    if (!keep(s)) return;
-    const dev = "GPU " + (s.metric.gpu !== undefined ? s.metric.gpu : "?");
-    const job = s.metric.slurmjobid || "";
-    vramTraces.push({
-      type: "scatter", mode: "lines",
-      name: dev + (job ? " (job " + job + ")" : ""),
-      x: s.values.map((v) => v[0] * 1000), y: s.values.map((v) => v[1]),
-      line: { width: 2, dash: "dot", color: th.colors[vi % th.colors.length] },
-    });
-    vi++;
-  });
+  const utilTraces = buildDeviceTraces(data.series.utilization, keep, th.colors, {});
+  const vramTraces = buildDeviceTraces(data.series.vram, keep, th.colors, { dash: "dot" });
   const base = {
     margin: { l: 46, r: 20, t: 10, b: 34 },
     paper_bgcolor: "rgba(0,0,0,0)", plot_bgcolor: "rgba(0,0,0,0)",
