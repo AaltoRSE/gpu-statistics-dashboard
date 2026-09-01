@@ -1,0 +1,11 @@
+{
+  "name": "gpu-statistics-frontend",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test"
+  },
+  "devDependencies": {
+    "jsdom": "^30.0.1"
+  }
+}

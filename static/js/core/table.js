@@ -7,6 +7,14 @@
  * take priority over the row's own click, and what a click ultimately
  * does, are irreducibly different per table.
  *
+ * renderRow must build its markup with core/format.js's html`` tagged
+ * template (escapes every interpolation by default; wrap an
+ * already-trusted value — the output of jobLink, pctBar, stateBadge, ... —
+ * in raw() to opt out). This table never runs a caller's markup through
+ * its own escaping; renderRow's output is trusted as-is and assigned
+ * straight to tbody.innerHTML, so html``/raw() is the only thing standing
+ * between a Slurm-supplied job name and script injection. See T-20.
+ *
  * Column sort behavior, decided once here instead of per table (see the
  * T-19 commit message for the previous, inconsistent per-table behavior
  * this replaces):
