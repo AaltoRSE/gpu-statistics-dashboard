@@ -17,6 +17,7 @@ from fastapi.staticfiles import StaticFiles
 
 from config import ConfigError, load_config
 from prom import PromClient, PrometheusError
+from promql import label_eq, label_in, selector
 from slurm import SlurmError, expand_node_list, sacct_jobs, show_jobs, show_nodes
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -111,11 +112,6 @@ def _running_gpu_job_ids():
             if s["metric"].get("slurmjobid")}
 
 
-def _jobid_matcher(job_ids):
-    """PromQL selector fragment matching exactly one of a set of job IDs."""
-    return 'slurmjobid=~"^(?:' + "|".join(re.escape(j) for j in sorted(job_ids)) + ')$"'
-
-
 def _sacct_epoch(value):
     """sacct start/end string to epoch seconds; None when missing/invalid."""
     try:
@@ -205,10 +201,7 @@ def _fetch_job_window(since_hours, include_vram=True, user=None):
     """
     start, now = _job_window(since_hours)
     step = _step_for_range(now - start)
-    sel = ""
-    if user:
-        escaped = user.replace("\\", "\\\\").replace('"', '\\"')
-        sel = '{user="%s"}' % escaped
+    sel = selector(label_eq("user", user)) if user else ""
 
     def fetch():
         util = get_prom().query_range(
@@ -622,15 +615,17 @@ def api_job_detail(jobid: str, since_hours: float = Query(24, gt=0, le=168)):
     step = _step_for_range(now - start)
     prom = get_prom()
 
+    sel = selector(label_eq("slurmjobid", jobid))
+
     def fetch():
         util = prom.query_range(
-            'max by (slurmjobid, instance, gpu) '
-            '(slurm_job_utilization_gpu{slurmjobid="%s"})' % jobid,
+            "max by (slurmjobid, instance, gpu) "
+            "(slurm_job_utilization_gpu%s)" % sel,
             start, now, step,
         )
         vram = prom.query_range(
-            'avg by (instance, gpu) (slurm_job_memory_usage_gpu{slurmjobid="%s"} / '
-            'slurm_job_memory_total_gpu{slurmjobid="%s"} * 100)' % (jobid, jobid),
+            "avg by (instance, gpu) (slurm_job_memory_usage_gpu%s / "
+            "slurm_job_memory_total_gpu%s * 100)" % (sel, sel),
             start, now, step,
         )
         return util, vram
@@ -681,7 +676,7 @@ def _partition_window(since_hours, running_only=False, now=None,
         live = _running_gpu_job_ids()
         if not live:
             return [], {}, {}, {}, start, now, step
-        sel = "{" + _jobid_matcher(live) + "}"
+        sel = selector(label_in("slurmjobid", live))
 
     def fetch():
         stats = get_prom().query_range(
@@ -882,7 +877,7 @@ def _vram_job_records(since_hours, running_only=False, partition="",
         jobs = [j for j in jobs if j["jobid"] in live]
     if partition:
         jobs = [j for j in jobs if j["gpu_group"] == partition]
-    sel = "" if live is None else "{" + _jobid_matcher(live) + "}"
+    sel = "" if live is None else selector(label_in("slurmjobid", live))
 
     def fetch():
         return get_prom().query_range(
@@ -1042,12 +1037,12 @@ def _node_job_start(name, now):
     days are clamped to bound the window (and the payload).
     """
     fallback_start = now - 6 * 3600
+    sel = selector(label_eq("instance", name))
     try:
         live = {
             s["metric"]["slurmjobid"]
             for s in get_prom().query_instant(
-                'count by (slurmjobid) (slurm_job_utilization_gpu{instance="%s"})'
-                % name
+                "count by (slurmjobid) (slurm_job_utilization_gpu%s)" % sel
             )
             if s["metric"].get("slurmjobid")
         }
@@ -1076,18 +1071,19 @@ def api_node_detail(
         start = now - int(float(view) * 3600)
     step = _step_for_range(now - start)
     prom = get_prom()
+    sel = selector(label_eq("instance", name))
 
     def fetch():
         util = prom.query_range(
-            'max by (slurmjobid, gpu) '
-            '(slurm_job_utilization_gpu{instance="%s"})' % name,
+            "max by (slurmjobid, gpu) "
+            "(slurm_job_utilization_gpu%s)" % sel,
             start, now, step,
         )
         vram = prom.query_range(
             # ``gpu`` is job-local (every 1-GPU job reports gpu="0"), so the
             # grouping must keep ``slurmjobid`` or co-located jobs merge.
-            'avg by (slurmjobid, gpu) (slurm_job_memory_usage_gpu{instance="%s"} / '
-            'slurm_job_memory_total_gpu{instance="%s"} * 100)' % (name, name),
+            "avg by (slurmjobid, gpu) (slurm_job_memory_usage_gpu%s / "
+            "slurm_job_memory_total_gpu%s * 100)" % (sel, sel),
             start, now, step,
         )
         return util, vram

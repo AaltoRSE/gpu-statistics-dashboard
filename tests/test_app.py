@@ -969,8 +969,3 @@ def test_partitions_mean_occupancy_running_only(client, fake_prom):
     ranges = [q for t, q in fake_prom.calls if t == "range"]
     assert any('slurmjobid=~"^(?:1|2|4)$"' in q and "count by (job, gpu_type)" in q
                for q in ranges), ranges
-
-
-def test_jobid_matcher_escapes():
-    assert appmod._jobid_matcher({"9", "10"}) == 'slurmjobid=~"^(?:10|9)$"'
-    assert appmod._jobid_matcher({"a.b", "c"}) == 'slurmjobid=~"^(?:a\\.b|c)$"'
