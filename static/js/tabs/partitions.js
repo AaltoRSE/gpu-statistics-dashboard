@@ -8,7 +8,7 @@
 "use strict";
 
 import { $ } from "../core/dom.js";
-import { escapeHtml, fmtInt, pctBar, compareStrings, tsToDate, partitionLink } from "../core/format.js";
+import { escapeHtml, fmtInt, pctBar, html, raw, compareStrings, tsToDate, partitionLink } from "../core/format.js";
 import { setResultsLoading, showPanelError, panelOk } from "../core/panel.js";
 import { renderPlot, plotTheme, partBarColor } from "../core/plot.js";
 import { api, status } from "../core/api.js";
@@ -169,12 +169,12 @@ function renderPartTrend(trend) {
 }
 
 function partRowHtml(p) {
-  return `
-    <tr class="row" data-partition="${escapeHtml(p.name)}">
-      <td>${partitionLink(p.name)}</td>
-      <td class="num" title="allocated / total GPUs">${escapeHtml(p.gpus_alloc)}/${escapeHtml(p.gpus_total)}</td>
-      <td class="num">${escapeHtml(fmtInt(p.job_count))}</td>
-      <td class="num">${pctBar(p.mean_util)}</td>
+  return html`
+    <tr class="row" data-partition="${p.name}">
+      <td>${raw(partitionLink(p.name))}</td>
+      <td class="num" title="allocated / total GPUs">${p.gpus_alloc}/${p.gpus_total}</td>
+      <td class="num">${fmtInt(p.job_count)}</td>
+      <td class="num">${raw(pctBar(p.mean_util))}</td>
     </tr>`;
 }
 

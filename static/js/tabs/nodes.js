@@ -7,7 +7,7 @@
 
 import { $, isPlainClick } from "../core/dom.js";
 import {
-  fmt, pctBar, escapeHtml, compareStrings, nodeStateBadges, jobLink,
+  fmt, pctBar, escapeHtml, html, raw, compareStrings, nodeStateBadges, jobLink,
   nodeLink, partitionLink,
 } from "../core/format.js";
 import { setResultsLoading, showPanelError, panelOk } from "../core/panel.js";
@@ -72,27 +72,26 @@ function filteredNodes() {
 function nodeRowHtml(n) {
   const u = n.current_util;
   const busy = u !== null && u > 0;
-  const jobs = (n.active_jobs || []).map((j) => jobLink(j.jobid)).join(", ") || "—";
+  // jobLink/partitionLink/escapeHtml outputs below are already safe HTML
+  // (or already-escaped text); raw() marks them so html`` doesn't escape
+  // them a second time. Everything else interpolates as plain text.
+  const jobs = raw((n.active_jobs || []).map((j) => jobLink(j.jobid)).join(", ") || "—");
   const rawName = n.name;
-  const name = escapeHtml(rawName);
   const gpuType = n.gpu_type
-    ? (n.gpu_group ? partitionLink(n.gpu_group, n.gpu_type)
-                   : escapeHtml(n.gpu_type))
+    ? raw(n.gpu_group ? partitionLink(n.gpu_group, n.gpu_type) : escapeHtml(n.gpu_type))
     : "—";
-  const gpusAlloc = escapeHtml(n.gpus_alloc !== undefined ? n.gpus_alloc : 0);
-  const gpus = escapeHtml(n.gpus);
-  const vram = escapeHtml(n.current_vram === null ? "—" : fmt(n.current_vram));
-  const cpusAlloc = escapeHtml(n.cpus_alloc !== undefined ? n.cpus_alloc : 0);
-  const cpus = escapeHtml(n.cpus);
-  return `
-    <tr class="row" data-node="${name}" style="${busy ? "" : "opacity:.55"}">
-      <td>${nodeLink(rawName)}</td>
+  const gpusAlloc = n.gpus_alloc !== undefined ? n.gpus_alloc : 0;
+  const vram = n.current_vram === null ? "—" : fmt(n.current_vram);
+  const cpusAlloc = n.cpus_alloc !== undefined ? n.cpus_alloc : 0;
+  return html`
+    <tr class="row" data-node="${rawName}" style="${busy ? "" : "opacity:.55"}">
+      <td>${raw(nodeLink(rawName))}</td>
       <td>${gpuType}</td>
-      <td title="${escapeHtml(n.reason || "")}">${nodeStateBadges(n)}</td>
-      <td class="num" title="allocated / total GPUs">${gpusAlloc}/${gpus}</td>
-      <td class="num">${u === null ? "idle" : pctBar(u)}</td>
+      <td title="${n.reason || ""}">${raw(nodeStateBadges(n))}</td>
+      <td class="num" title="allocated / total GPUs">${gpusAlloc}/${n.gpus}</td>
+      <td class="num">${u === null ? "idle" : raw(pctBar(u))}</td>
       <td class="num">${vram}</td>
-      <td class="num" title="allocated / total CPUs">${cpusAlloc}/${cpus}</td>
+      <td class="num" title="allocated / total CPUs">${cpusAlloc}/${n.cpus}</td>
       <td class="small">${jobs}</td>
     </tr>`;
 }

@@ -19,15 +19,39 @@ export function pctBar(v) {
   if (v === null || v === undefined) return "";
   const p = Math.max(0, Math.min(100, v));
   const cls = p < 40 ? "lo" : p < 75 ? "mid" : "hi";
-  return '<span class="pct-cell"><span class="bar-track">' +
-    '<span class="bar ' + cls + '" style="width:' + p.toFixed(0) + '%"></span></span>' +
-    '<span class="pct-value">' + p.toFixed(0) + "%</span></span>";
+  const pct = p.toFixed(0);
+  return html`<span class="pct-cell"><span class="bar-track"><span class="bar ${cls}" style="width:${pct}%"></span></span><span class="pct-value">${pct}%</span></span>`;
 }
 
 export function escapeHtml(value) {
   return String(value ?? "").replace(/[&<>"']/g, (c) => ({
     "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
   })[c]);
+}
+
+// A value produced by one of this module's own markup builders (jobLink,
+// pctBar, stateBadge, ...) is already-safe HTML. Wrapping it in raw() is
+// the only way to opt out of html`` escaping a value — see html() below.
+class SafeString {
+  constructor(value) { this.value = value; }
+}
+export function raw(value) {
+  return new SafeString(value);
+}
+
+// Tagged template: every interpolated value is HTML-escaped by default,
+// unless it is wrapped in raw(). A table row built with this template
+// cannot render an unescaped Slurm-supplied string (job name, username,
+// node name, ...) by omission — the previous convention required calling
+// escapeHtml() at every interpolation site by hand, and it was only ever
+// as safe as the least careful edit to one of those call sites.
+export function html(strings, ...values) {
+  let out = strings[0];
+  for (let i = 0; i < values.length; i++) {
+    const v = values[i];
+    out += (v instanceof SafeString ? v.value : escapeHtml(v)) + strings[i + 1];
+  }
+  return out;
 }
 
 export function escapeList(values) {
@@ -41,7 +65,7 @@ export function stateBadge(state, label = state) {
                  "TIMEOUT", "DRAIN", "DRAINED", "DOWN", "DRAINING", "RESERVED",
                  "MIXED", "ALLOCATED", "PLANNED", "NOT_RESPONDING"];
   const cls = known.includes(state) ? state : "PENDING";
-  return '<span class="badge ' + cls + '">' + escapeHtml(label) + "</span>";
+  return html`<span class="badge ${cls}">${label}</span>`;
 }
 
 // scontrol node states carry qualifiers after ``+`` (``IDLE+DRAIN``) and a
@@ -50,8 +74,8 @@ export function stateBadge(state, label = state) {
 // states included, per the column contract); the parsed drain reason is
 // exposed as the cell title by the caller.
 export function nodeStateBadges(n) {
-  const raw = (n.state_full || n.state || "").replace(/\*$/, "");
-  const parts = raw.split("+")
+  const cleaned = (n.state_full || n.state || "").replace(/\*$/, "");
+  const parts = cleaned.split("+")
     .map((p) => p.split(":")[0])
     .filter(Boolean);
   if (!parts.length) return "";
@@ -89,26 +113,20 @@ export function compareStrings(a, b) {
 }
 
 export function jobLink(jobid) {
-  const safe = escapeHtml(jobid);
-  const href = escapeHtml("/job/" + encodeURIComponent(jobid));
-  return '<a class="joblink" href="' + href + '" data-job="' + safe +
-    '" title="open job ' + safe + ' in the Jobs tab">' + safe + "</a>";
+  const href = "/job/" + encodeURIComponent(jobid);
+  return html`<a class="joblink" href="${href}" data-job="${jobid}" title="open job ${jobid} in the Jobs tab">${jobid}</a>`;
 }
 
 export function userLink(user) {
   if (!user) return "—";
-  const safe = escapeHtml(user);
-  const href = escapeHtml("/user/" + encodeURIComponent(user));
-  return '<a class="userlink" href="' + href + '" data-user="' + safe +
-    '" title="open ' + safe + ' in the Users tab">' + safe + "</a>";
+  const href = "/user/" + encodeURIComponent(user);
+  return html`<a class="userlink" href="${href}" data-user="${user}" title="open ${user} in the Users tab">${user}</a>`;
 }
 
 export function nodeLink(node) {
   if (!node) return "—";
-  const safe = escapeHtml(node);
-  const href = escapeHtml("/node/" + encodeURIComponent(node));
-  return '<a class="nodelink" href="' + href + '" data-node="' + safe +
-    '" title="open ' + safe + ' in the Nodes tab">' + safe + "</a>";
+  const href = "/node/" + encodeURIComponent(node);
+  return html`<a class="nodelink" href="${href}" data-node="${node}" title="open ${node} in the Nodes tab">${node}</a>`;
 }
 
 export function nodeLinks(values) {
@@ -118,9 +136,6 @@ export function nodeLinks(values) {
 
 export function partitionLink(partition, label = partition) {
   if (!partition) return "—";
-  const safe = escapeHtml(partition);
-  const href = escapeHtml("/partition/" + encodeURIComponent(partition));
-  return '<a class="partitionlink" href="' + href + '" data-partition="' + safe +
-    '" title="open ' + safe + ' in the Partitions tab">' +
-    escapeHtml(label) + "</a>";
+  const href = "/partition/" + encodeURIComponent(partition);
+  return html`<a class="partitionlink" href="${href}" data-partition="${partition}" title="open ${partition} in the Partitions tab">${label}</a>`;
 }

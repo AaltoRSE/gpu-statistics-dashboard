@@ -11,7 +11,7 @@
 
 import { $, debounce, isPlainClick } from "../core/dom.js";
 import {
-  fmt, fmtInt, pctBar, escapeHtml, tsToDate, stateBadge, compareStrings,
+  fmt, fmtInt, pctBar, escapeHtml, html, raw, tsToDate, stateBadge, compareStrings,
   userLink, nodeLinks, partitionLink,
 } from "../core/format.js";
 import { setResultsLoading, showPanelError, panelOk } from "../core/panel.js";
@@ -123,19 +123,19 @@ export function renderJobsView() {
 }
 
 function jobRowHtml(j) {
-  const jobid = escapeHtml(j.jobid);
+  const jobid = j.jobid;
   const rawName = j.name || "";
-  const start = escapeHtml((j.start || "").slice(0, 16));
-  const gpus = escapeHtml(j.gpus !== undefined ? j.gpus : "—");
-  return `
+  const start = (j.start || "").slice(0, 16);
+  const gpus = j.gpus !== undefined ? j.gpus : "—";
+  return html`
     <tr class="row" data-job="${jobid}">
-      <td>${jobid}</td><td title="${escapeHtml(rawName)}">${escapeHtml(rawName.slice(0, 40))}</td>
-      <td>${userLink(j.user)}</td><td>${partitionLink(j.gpu_group || j.partition)}</td>
-      <td>${nodeLinks(j.nodes)}</td>
-      <td>${stateBadge(j.state)}</td><td>${start}</td>
+      <td>${jobid}</td><td title="${rawName}">${rawName.slice(0, 40)}</td>
+      <td>${raw(userLink(j.user))}</td><td>${raw(partitionLink(j.gpu_group || j.partition))}</td>
+      <td>${raw(nodeLinks(j.nodes))}</td>
+      <td>${raw(stateBadge(j.state))}</td><td>${start}</td>
       <td class="num">${gpus}</td>
-      <td class="num">${pctBar(j.mean_util)}</td>
-      <td class="num">${escapeHtml(fmt(j.vram_avg))}</td>
+      <td class="num">${raw(pctBar(j.mean_util))}</td>
+      <td class="num">${fmt(j.vram_avg)}</td>
     </tr>`;
 }
 

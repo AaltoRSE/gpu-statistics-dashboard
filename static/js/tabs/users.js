@@ -16,7 +16,7 @@
 
 import { $, isPlainClick } from "../core/dom.js";
 import {
-  fmt, fmtInt, pctBar, escapeHtml, escapeList, tsToDate,
+  fmt, fmtInt, pctBar, escapeList, html, raw, tsToDate,
   jobLink, nodeLinks, partitionLink, stateBadge,
 } from "../core/format.js";
 import { setResultsLoading, showPanelError, panelOk } from "../core/panel.js";
@@ -64,16 +64,16 @@ function filteredUsers() {
 }
 
 function userRowHtml(u) {
-  const user = escapeHtml(u.user);
-  return `
+  const user = u.user;
+  return html`
     <tr class="row" data-user="${user}" style="${u.user === userSelected ? "background:var(--panel2)" : ""}">
       <td><b>${user}</b></td>
-      <td class="num">${escapeHtml(fmtInt(u.jobs))}</td>
-      <td class="num">${escapeHtml(fmtInt(u.running_jobs))}</td>
-      <td class="num">${pctBar(u.mean_util)}</td>
-      <td class="num">${escapeHtml(fmtInt(u.util_gpu_hours))}</td>
-      <td class="num">${escapeHtml(fmt(u.vram_avg))}</td>
-      <td class="small">${escapeList(u.gpu_types)}</td>
+      <td class="num">${fmtInt(u.jobs)}</td>
+      <td class="num">${fmtInt(u.running_jobs)}</td>
+      <td class="num">${raw(pctBar(u.mean_util))}</td>
+      <td class="num">${fmtInt(u.util_gpu_hours)}</td>
+      <td class="num">${fmt(u.vram_avg)}</td>
+      <td class="small">${raw(escapeList(u.gpu_types))}</td>
     </tr>`;
 }
 
@@ -170,20 +170,20 @@ async function loadUserJobs(user) {
 }
 
 function userJobRowHtml(j) {
-  const jobid = escapeHtml(j.jobid);
+  const jobid = j.jobid;
   const rawName = j.name || "";
-  const start = escapeHtml((j.start || "").slice(0, 16));
-  const gpus = escapeHtml(j.gpus !== undefined ? j.gpus : "—");
-  return `
+  const start = (j.start || "").slice(0, 16);
+  const gpus = j.gpus !== undefined ? j.gpus : "—";
+  return html`
     <tr class="row" data-job="${jobid}">
-      <td>${jobLink(j.jobid)}</td>
-      <td title="${escapeHtml(rawName)}">${escapeHtml(rawName.slice(0, 40))}</td>
-      <td>${partitionLink(j.gpu_group || j.partition)}</td>
-      <td>${nodeLinks(j.nodes)}</td>
-      <td>${stateBadge(j.state)}</td><td>${start}</td>
+      <td>${raw(jobLink(j.jobid))}</td>
+      <td title="${rawName}">${rawName.slice(0, 40)}</td>
+      <td>${raw(partitionLink(j.gpu_group || j.partition))}</td>
+      <td>${raw(nodeLinks(j.nodes))}</td>
+      <td>${raw(stateBadge(j.state))}</td><td>${start}</td>
       <td class="num">${gpus}</td>
-      <td class="num">${pctBar(j.mean_util)}</td>
-      <td class="num">${escapeHtml(fmtInt(j.gpu_hours_eff))}</td>
+      <td class="num">${raw(pctBar(j.mean_util))}</td>
+      <td class="num">${fmtInt(j.gpu_hours_eff)}</td>
     </tr>`;
 }
 
