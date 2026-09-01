@@ -22,6 +22,7 @@
       "name": "gpu1",
       "partitions": "gpu-h100",
       "real_mem": 5000,
+      "reason": "",
       "state": "MIXED",
       "state_full": "MIXED"
     },
@@ -46,6 +47,7 @@
       "name": "gpu2",
       "partitions": "gpu-h200",
       "real_mem": 5000,
+      "reason": "",
       "state": "ALLOCATED",
       "state_full": "ALLOCATED*"
     },
@@ -63,6 +65,7 @@
       "name": "gpu3",
       "partitions": "gpu-h100",
       "real_mem": 5000,
+      "reason": "",
       "state": "IDLE",
       "state_full": "IDLE"
     },
@@ -87,6 +90,7 @@
       "name": "gpu49",
       "partitions": "gpu-h200",
       "real_mem": 5000,
+      "reason": "",
       "state": "ALLOCATED",
       "state_full": "ALLOCATED"
     },

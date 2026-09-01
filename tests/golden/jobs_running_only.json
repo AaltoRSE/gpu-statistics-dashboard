@@ -4,6 +4,7 @@
     {
       "account": "acc",
       "efficiency": 85.0,
+      "end": null,
       "gpu_group": "h200_3g.71gb",
       "gpu_hours_alloc": 1.0,
       "gpu_hours_eff": 0.85,
@@ -27,6 +28,7 @@
     {
       "account": "acc",
       "efficiency": 50.0,
+      "end": null,
       "gpu_group": "gpu-h100",
       "gpu_hours_alloc": 2.0,
       "gpu_hours_eff": 1.0,
@@ -100,6 +102,7 @@
     {
       "account": "acc",
       "efficiency": 50.0,
+      "end": null,
       "gpu_group": "gpu-h100",
       "gpu_hours_alloc": 2.0,
       "gpu_hours_eff": 1.0,
@@ -123,6 +126,7 @@
     {
       "account": "acc",
       "efficiency": 85.0,
+      "end": null,
       "gpu_group": "h200_3g.71gb",
       "gpu_hours_alloc": 1.0,
       "gpu_hours_eff": 0.85,
@@ -148,6 +152,7 @@
     {
       "account": "acc",
       "efficiency": 85.0,
+      "end": null,
       "gpu_group": "h200_3g.71gb",
       "gpu_hours_alloc": 1.0,
       "gpu_hours_eff": 0.85,
@@ -171,6 +176,7 @@
     {
       "account": "acc",
       "efficiency": 50.0,
+      "end": null,
       "gpu_group": "gpu-h100",
       "gpu_hours_alloc": 2.0,
       "gpu_hours_eff": 1.0,

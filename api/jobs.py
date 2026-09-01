@@ -5,6 +5,7 @@ from fastapi import APIRouter, Query
 import cache
 import deps
 import gpu_groups
+from api.schemas import JobDetailResponse, JobsResponse
 from domain.common import (
     job_window,
     running_gpu_job_ids,
@@ -20,12 +21,7 @@ from slurm import SlurmError
 router = APIRouter()
 
 
-def _public_job(job):
-    """Remove in-process aggregation fields from API job payloads."""
-    return {key: value for key, value in job.items() if not key.startswith("_")}
-
-
-@router.get("/api/jobs")
+@router.get("/api/jobs", response_model=JobsResponse)
 def api_jobs(
     since_hours: float = Query(24, gt=0, le=168),
     partition: str = "",
@@ -95,13 +91,13 @@ def api_jobs(
         "window": window(start, now),
         "count": len(jobs),
         "partitions": partitions,
-        "jobs": [_public_job(j) for j in jobs],
-        "efficiency_high": [_public_job(j) for j in high],
-        "efficiency_low": [_public_job(j) for j in low],
+        "jobs": jobs,
+        "efficiency_high": high,
+        "efficiency_low": low,
     }
 
 
-@router.get("/api/jobs/{jobid}")
+@router.get("/api/jobs/{jobid}", response_model=JobDetailResponse)
 def api_job_detail(jobid: str, since_hours: float = Query(24, gt=0, le=168)):
     start, now = job_window(since_hours)
     step = step_for_range(now - start)
