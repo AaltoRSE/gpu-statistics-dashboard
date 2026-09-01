@@ -14,6 +14,7 @@ import pytest  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 
 import app as appmod  # noqa: E402
+import cache  # noqa: E402
 
 # Deterministic "now" (2026-08-30T18:26:40Z): job 1's sacct start
 # (2026-08-28T00:00:00) is ~2.2 days back, inside the seven-day clamp.
@@ -278,7 +279,7 @@ class FakeProm:
 def fake_prom(monkeypatch):
     fake = FakeProm()
     monkeypatch.setattr(appmod, "get_prom", lambda: fake)
-    monkeypatch.setattr(appmod, "_cache", {})
+    monkeypatch.setattr(appmod, "_route_cache", cache.TtlCache())
     monkeypatch.setattr(appmod, "sacct_jobs",
                         lambda ids, start_iso=None, **kw: {j: SACCT[j] for j in ids
                                                            if j in SACCT})

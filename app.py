@@ -5,7 +5,6 @@ sacct / scontrol sources it needs, with short in-memory TTL caches.
 """
 
 import os
-import threading
 import time
 from collections import defaultdict
 from datetime import datetime, timezone
@@ -14,6 +13,7 @@ from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
+import cache
 import gpu_groups
 from config import ConfigError, load_config
 from prom import PromClient, PrometheusError
@@ -26,8 +26,7 @@ STATIC = os.path.join(HERE, "static")
 app = FastAPI(title="GPU Efficiency Dashboard")
 
 _prom = None
-_cache = {}
-_cache_lock = threading.Lock()
+_route_cache = cache.TtlCache()
 
 
 def get_prom():
@@ -40,19 +39,6 @@ def get_prom():
         _prom = PromClient(
             cfg["api_base"], cfg["username"], cfg["password"], cfg["timeout"])
     return _prom
-
-
-def _cached(key, ttl, fn):
-    with _cache_lock:
-        hit = _cache.get(key)
-        if hit and hit[0] > time.monotonic():
-            return hit[1]
-    value = fn()
-    with _cache_lock:
-        if len(_cache) > 256:
-            _cache.clear()
-        _cache[key] = (time.monotonic() + ttl, value)
-    return value
 
 
 def _step_for_range(seconds):
@@ -91,13 +77,6 @@ def _job_window(since_hours, now=None):
 def _window(start, now):
     """The ``window`` envelope shared by every route's response body."""
     return {"start": start, "end": now}
-
-
-def _invalidate_cache(*keys):
-    """Drop cache entries; used by the forced-refresh path."""
-    with _cache_lock:
-        for key in keys:
-            _cache.pop(key, None)
 
 
 def _running_gpu_job_ids():
@@ -146,8 +125,8 @@ def _fetch_job_window(since_hours, include_vram=True, user=None):
             )
         return util, vram, start, now, step
 
-    key = ("jobs", since_hours, include_vram, user)
-    util, vram, start, now, step = _cached(key, 60, fetch)
+    key = cache.job_window_key(since_hours, include_vram, user)
+    util, vram, start, now, step = _route_cache.get_or_set(key, 60, fetch)
 
     vram_by_job = defaultdict(list)
     for s in vram:
@@ -326,13 +305,13 @@ def _enrich(jobs):
     # Explicit job IDs bound the sacct request, so no visible-window -S
     # date is passed: jobs that started before the chart window still get
     # their name, state, start, and GPU allocation.
-    meta = _cached(("sacct", tuple(ids)), 300,
-                   lambda: sacct_jobs(ids))
+    meta = _route_cache.get_or_set(cache.sacct_key(ids), 300,
+                                    lambda: sacct_jobs(ids))
     # Active-job snapshot for array parents: scontrol only knows jobs the
     # controller still holds, so a miss (or a failed call) falls back to
     # the sacct rows above.
     try:
-        active = _cached("scontrol_jobs", 30, show_jobs)
+        active = _route_cache.get_or_set(cache.scontrol_jobs_key(), 30, show_jobs)
     except SlurmError:
         active = {}
     for job in jobs:
@@ -418,7 +397,7 @@ def api_jobs(
         # and the Prometheus client's 20/60 s response cache instead of
         # redrawing the same data; it also forces a fresh live-ID query.
         get_prom().clear_cache()
-        _invalidate_cache(("jobs", since_hours, True, user or None))
+        _route_cache.invalidate(cache.job_window_key(since_hours, True, user or None))
     if running_only:
         # Live-ID check first: with no running GPU jobs we must not issue
         # the broad window range query at all.
@@ -432,7 +411,8 @@ def api_jobs(
     # not applied after the fact: a single-user request must not pull and
     # scan the whole window for everyone else's jobs.
     jobs, start, now, _ = _fetch_job_window(since_hours, user=user or None)
-    node_types = gpu_groups.build_node_index(_cached("scontrol_nodes", 30, show_nodes))
+    node_types = gpu_groups.build_node_index(
+        _route_cache.get_or_set(cache.scontrol_nodes_key(), 30, show_nodes))
     for j in jobs:
         j["gpu_group"] = gpu_groups.job_gpu_group(j, node_types)
     if running_only:
@@ -558,16 +538,18 @@ def api_job_detail(jobid: str, since_hours: float = Query(24, gt=0, le=168)):
         )
         return util, vram
 
-    util, vram = _cached(("jobdetail", jobid, since_hours), 60, fetch)
+    util, vram = _route_cache.get_or_set(
+        cache.job_detail_key(jobid, since_hours), 60, fetch)
     series = {
         "utilization": _series_payload(util),
         "vram": _series_payload(vram),
     }
     observed = sorted({s["metric"].get("instance", "") for s in util
                        if s["metric"].get("instance")})
-    sacct_meta = _cached(("sacct", (jobid,)), 300, lambda: sacct_jobs([jobid]))
+    sacct_meta = _route_cache.get_or_set(
+        cache.sacct_key([jobid]), 300, lambda: sacct_jobs([jobid]))
     try:
-        active = _cached("scontrol_jobs", 30, show_jobs)
+        active = _route_cache.get_or_set(cache.scontrol_jobs_key(), 30, show_jobs)
     except SlurmError:
         active = {}
     meta = (_resolve_scontrol_metadata(jobid, observed, active)
@@ -619,8 +601,8 @@ def _partition_window(since_hours, running_only=False, now=None,
         )
         return stats, trend, occ, start, now, step
 
-    key = ("parts", since_hours, running_only)
-    stats, trend, occ, start, now, step = _cached(key, 60, fetch)
+    key = cache.partition_window_key(since_hours, running_only)
+    stats, trend, occ, start, now, step = _route_cache.get_or_set(key, 60, fetch)
     # One canonical group name per (job, gpu_type) pair, derived from the
     # summary series' instances so summary, trend, and occupancy agree.
     aliases = gpu_groups.pair_aliases(stats, node_gpu_types)
@@ -728,7 +710,7 @@ def _gpu_capacity(groups, instances, nodes, allocs):
 @app.get("/api/partitions")
 def api_partitions(since_hours: float = Query(24, gt=0, le=168),
                    running_only: bool = Query(False)):
-    nodes = _cached("scontrol_nodes", 30, show_nodes)
+    nodes = _route_cache.get_or_set(cache.scontrol_nodes_key(), 30, show_nodes)
     node_types = gpu_groups.build_node_index(nodes)
     groups, trend, instances, occupancy, start, now, step = _partition_window(
         since_hours, running_only, node_gpu_types=node_types)
@@ -794,7 +776,8 @@ def _vram_job_records(since_hours, running_only=False, partition="",
             start, now, step,
         )
 
-    vram = _cached(("vram_gb", since_hours, running_only), 60, fetch)
+    vram = _route_cache.get_or_set(
+        cache.vram_key(since_hours, running_only), 60, fetch)
     # Per-GPU peak VRAM (GB) over the window; a 0 sample means the GPU was
     # never reported with memory and cannot be a peak.
     peaks = defaultdict(list)
@@ -827,7 +810,8 @@ def _vram_job_records(since_hours, running_only=False, partition="",
     records = records[:_VRAM_RECORD_CAP]
     ids = sorted({r["jobid"] for r in records})
     if ids:
-        meta = _cached(("sacct", tuple(ids)), 300, lambda: sacct_jobs(ids))
+        meta = _route_cache.get_or_set(
+            cache.sacct_key(ids), 300, lambda: sacct_jobs(ids))
         for r in records:
             row = meta.get(r["jobid"]) or {}
             if row.get("gpus") and row.get("elapsed_s"):
@@ -842,7 +826,8 @@ def api_part_vram(since_hours: float = Query(24, gt=0, le=168),
                   running_only: bool = Query(False),
                   partition: str = "",
                   weight: str = Query("alloc", pattern="^(alloc|eff)$")):
-    node_types = gpu_groups.build_node_index(_cached("scontrol_nodes", 30, show_nodes))
+    node_types = gpu_groups.build_node_index(
+        _route_cache.get_or_set(cache.scontrol_nodes_key(), 30, show_nodes))
     records, total, start, now, step = _vram_job_records(
         since_hours, running_only, partition, node_types, weight)
     return {
@@ -874,7 +859,8 @@ def _node_current(node_gpu_types=None):
             "count by (instance, job, gpu_type) (slurm_job_utilization_gpu)")
         return inst_util, inst_vram, active, alloc
 
-    inst_util, inst_vram, active, alloc = _cached("node_current", 30, fetch)
+    inst_util, inst_vram, active, alloc = _route_cache.get_or_set(
+        cache.node_current_key(), 30, fetch)
     cur = {}
     for s in inst_util:
         cur[s["metric"]["instance"]] = {"util": float(s["value"][1])}
@@ -912,8 +898,8 @@ def api_nodes(gpu_only: bool = True, refresh: bool = Query(False)):
         # scontrol cache and the Prometheus client's response cache
         # (60 s range / 20 s instant) instead of redrawing cached data.
         get_prom().clear_cache()
-        _invalidate_cache("scontrol_nodes", "node_current")
-    nodes = _cached("scontrol_nodes", 30, show_nodes)
+        _route_cache.invalidate(cache.scontrol_nodes_key(), cache.node_current_key())
+    nodes = _route_cache.get_or_set(cache.scontrol_nodes_key(), 30, show_nodes)
     if gpu_only:
         nodes = [n for n in nodes if n["gpus"]]
     try:
@@ -996,7 +982,8 @@ def api_node_detail(
         )
         return util, vram
 
-    util, vram = _cached(("nodedetail", name, view, start), 30, fetch)
+    util, vram = _route_cache.get_or_set(
+        cache.node_detail_key(name, view, start), 30, fetch)
     return {
         "node": name,
         "view": view,
