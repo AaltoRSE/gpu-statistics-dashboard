@@ -14,6 +14,7 @@ built, so a reader and its invalidator can't drift apart.
 
 import threading
 import time
+from concurrent.futures import Future
 
 
 class TtlCache:
@@ -24,10 +25,20 @@ class TtlCache:
     oldest entries individually. That matches what both prior
     implementations already did, and is simple enough to reason about
     for a cache holding at most a few hundred short-lived entries.
+
+    ``get_or_set`` single-flights concurrent misses on the same key: a
+    cold seven-day-window request from two browser tabs at once used
+    to issue the same Prometheus range query twice, each occupying a
+    threadpool worker for its duration. The first caller to miss
+    becomes the leader and runs ``fn``; any other caller that misses
+    on the same key while the leader is still running joins its
+    ``Future`` and gets the same result (or the same exception)
+    instead of starting its own fetch.
     """
 
     def __init__(self, max_size=256):
         self._store = {}
+        self._inflight = {}
         self._lock = threading.Lock()
         self._max_size = max_size
 
@@ -36,11 +47,31 @@ class TtlCache:
             hit = self._store.get(key)
             if hit and hit[0] > time.monotonic():
                 return hit[1]
-        value = fn()
+            future = self._inflight.get(key)
+            if future is not None:
+                is_leader = False
+            else:
+                future = Future()
+                self._inflight[key] = future
+                is_leader = True
+        if not is_leader:
+            return future.result()
+        try:
+            value = fn()
+        except BaseException as exc:
+            # Drop the future so the next caller retries instead of
+            # inheriting this exception forever; still deliver it to
+            # any follower already waiting on this one.
+            with self._lock:
+                self._inflight.pop(key, None)
+            future.set_exception(exc)
+            raise
         with self._lock:
             if len(self._store) > self._max_size:
                 self._store.clear()
             self._store[key] = (time.monotonic() + ttl, value)
+            self._inflight.pop(key, None)
+        future.set_result(value)
         return value
 
     def invalidate(self, *keys):

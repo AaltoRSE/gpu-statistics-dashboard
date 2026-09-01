@@ -1,5 +1,10 @@
 """Tests for cache.py's TtlCache and key builders."""
 
+import threading
+import time
+
+import pytest
+
 import cache
 
 
@@ -80,3 +85,84 @@ def test_key_builders_are_stable_and_distinct():
     assert cache.node_current_key() == "node_current"
     assert cache.node_detail_key("gpu1", "job_start", 1000) == (
         "nodedetail", "gpu1", "job_start", 1000)
+
+
+def test_get_or_set_single_flights_concurrent_misses():
+    calls = []
+    call_lock = threading.Lock()
+    release = threading.Event()
+
+    def fn():
+        with call_lock:
+            calls.append(1)
+        # Hold the leader here until every follower has had a chance to
+        # join this same fetch instead of starting its own.
+        assert release.wait(timeout=5)
+        return "value"
+
+    c = cache.TtlCache()
+    results = [None] * 5
+
+    def worker(i):
+        results[i] = c.get_or_set("k", 60, fn)
+
+    threads = [threading.Thread(target=worker, args=(i,)) for i in range(5)]
+    for t in threads:
+        t.start()
+    time.sleep(0.05)  # let all five reach get_or_set before releasing fn
+    release.set()
+    for t in threads:
+        t.join(timeout=5)
+
+    assert calls == [1]  # fn ran exactly once
+    assert results == ["value"] * 5
+
+
+def test_get_or_set_failed_leader_lets_the_next_call_retry():
+    attempts = []
+
+    def fn():
+        attempts.append(1)
+        if len(attempts) == 1:
+            raise RuntimeError("boom")
+        return "value"
+
+    c = cache.TtlCache()
+    with pytest.raises(RuntimeError, match="boom"):
+        c.get_or_set("k", 60, fn)
+    # The failed fetch must not be cached, and must not be left
+    # in-flight forever: the next call retries and succeeds.
+    assert c.get_or_set("k", 60, fn) == "value"
+    assert len(attempts) == 2
+
+
+def test_get_or_set_concurrent_followers_all_see_the_leaders_exception():
+    call_lock = threading.Lock()
+    calls = []
+    release = threading.Event()
+
+    def fn():
+        with call_lock:
+            calls.append(1)
+        assert release.wait(timeout=5)
+        raise RuntimeError("boom")
+
+    c = cache.TtlCache()
+    errors = [None] * 5
+
+    def worker(i):
+        try:
+            c.get_or_set("k", 60, fn)
+        except RuntimeError as exc:
+            errors[i] = str(exc)
+
+    threads = [threading.Thread(target=worker, args=(i,)) for i in range(5)]
+    for t in threads:
+        t.start()
+    time.sleep(0.05)
+    release.set()
+    for t in threads:
+        t.join(timeout=5)
+
+    assert calls == [1]  # fn still ran exactly once
+    assert errors == ["boom"] * 5  # every caller saw the same failure
