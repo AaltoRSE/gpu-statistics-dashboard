@@ -15,6 +15,7 @@ from fastapi.testclient import TestClient  # noqa: E402
 
 import app as appmod  # noqa: E402
 import cache  # noqa: E402
+import deps  # noqa: E402
 
 # Deterministic "now" (2026-08-30T18:26:40Z): job 1's sacct start
 # (2026-08-28T00:00:00) is ~2.2 days back, inside the seven-day clamp.
@@ -277,21 +278,28 @@ class FakeProm:
 
 @pytest.fixture()
 def fake_prom(monkeypatch):
+    # Every external dependency (Prometheus, sacct, scontrol, the clock,
+    # the route cache) is patched here in one place, on deps — not on
+    # appmod — since deps is the one module every call site (regardless
+    # of which file it lives in) reaches these through. Patching appmod
+    # instead would only affect code that still lives in app.py today;
+    # code that later moves to a different module would silently start
+    # hitting the real cluster instead of failing loudly.
     fake = FakeProm()
-    monkeypatch.setattr(appmod, "get_prom", lambda: fake)
-    monkeypatch.setattr(appmod, "_route_cache", cache.TtlCache())
-    monkeypatch.setattr(appmod, "sacct_jobs",
+    monkeypatch.setattr(deps, "get_prom", lambda: fake)
+    monkeypatch.setattr(deps, "route_cache", cache.TtlCache())
+    monkeypatch.setattr(deps, "sacct_jobs",
                         lambda ids, start_iso=None, **kw: {j: SACCT[j] for j in ids
                                                            if j in SACCT})
     # No active controller jobs by default; tests opt in to a snapshot.
-    monkeypatch.setattr(appmod, "show_jobs", lambda: {})
+    monkeypatch.setattr(deps, "show_jobs", lambda: {})
 
     def _show_nodes():
         fake.nodes_calls += 1
         return list(NODES)
 
-    monkeypatch.setattr(appmod, "show_nodes", _show_nodes)
-    monkeypatch.setattr(appmod.time, "time", lambda: NOW)
+    monkeypatch.setattr(deps, "show_nodes", _show_nodes)
+    monkeypatch.setattr(deps, "now", lambda: NOW)
     return fake
 
 
@@ -475,8 +483,8 @@ def test_enrich_merges_active_array_tasks(client, fake_prom, monkeypatch):
     # Bare array parent "42": Prometheus sees it on two nodes; scontrol
     # holds the physical tasks (suffix-tolerant IDs). Both must merge into
     # one row instead of being left blank or misattributed.
-    monkeypatch.setattr(appmod, "sacct_jobs", lambda ids, start_iso=None, **kw: {})
-    monkeypatch.setattr(appmod, "show_jobs", lambda: {
+    monkeypatch.setattr(deps, "sacct_jobs", lambda ids, start_iso=None, **kw: {})
+    monkeypatch.setattr(deps, "show_jobs", lambda: {
         "42_1": _scontrol_row("42_1", "42", "1", "gpu2",
                               start=JOB2_START, elapsed=7200),
         "42_0": _scontrol_row("42_0", "42", "0", "gpu1",
@@ -499,9 +507,9 @@ def test_enrich_merges_active_array_tasks(client, fake_prom, monkeypatch):
 def test_enrich_array_no_node_match_falls_back_without_misattribution(
         client, fake_prom, monkeypatch):
     # 44's only active task ran on a node that did not observe the job.
-    monkeypatch.setattr(appmod, "sacct_jobs",
+    monkeypatch.setattr(deps, "sacct_jobs",
                         lambda ids, start_iso=None, **kw: {})
-    monkeypatch.setattr(appmod, "show_jobs", lambda: {
+    monkeypatch.setattr(deps, "show_jobs", lambda: {
         "44_0": _scontrol_row("44_0", "44", "0", "gpu2"),
     })
     jobs = [{"jobid": "44", "nodes": ["gpu1"], "mean_util": 10.0,
@@ -515,7 +523,7 @@ def test_enrich_scontrol_failure_falls_back_to_sacct(client, fake_prom,
                                                       monkeypatch):
     from slurm import SlurmError
 
-    monkeypatch.setattr(appmod, "show_jobs",
+    monkeypatch.setattr(deps, "show_jobs",
                         lambda: (_ for _ in ()).throw(SlurmError("boom")))
     jobs = [{"jobid": "1", "nodes": ["gpu1"], "mean_util": 40.0,
              "gpu_hours_eff": 0.4}]
@@ -532,8 +540,8 @@ def test_enrich_merges_historical_array_tasks_in_sacct(
     # Historical parent "45": already finished, so scontrol no longer
     # knows it. Three of its sacct tasks ran on the observed node and must
     # merge into one metadata row (the reported array-table gap).
-    monkeypatch.setattr(appmod, "show_jobs", lambda: {})
-    monkeypatch.setattr(appmod, "sacct_jobs", lambda ids, start_iso=None, **kw: {
+    monkeypatch.setattr(deps, "show_jobs", lambda: {})
+    monkeypatch.setattr(deps, "sacct_jobs", lambda ids, start_iso=None, **kw: {
         "45_0": {"jobid": "45_0", "name": "hist.sh", "user": "alice",
                  "account": "acc", "partition": "gpu-h100",
                  "state": "COMPLETED", "start": JOB3_START,
@@ -567,8 +575,8 @@ def test_enrich_array_task_without_node_match_is_not_merged(
         client, fake_prom, monkeypatch):
     # Parent "46" has sacct tasks, but none ran on the observed node;
     # the metadata must stay blank rather than be misattributed.
-    monkeypatch.setattr(appmod, "show_jobs", lambda: {})
-    monkeypatch.setattr(appmod, "sacct_jobs", lambda ids, start_iso=None, **kw: {
+    monkeypatch.setattr(deps, "show_jobs", lambda: {})
+    monkeypatch.setattr(deps, "sacct_jobs", lambda ids, start_iso=None, **kw: {
         "46_0": {"jobid": "46_0", "name": "other.sh", "user": "bob",
                  "account": "acc", "partition": "gpu-h200",
                  "state": "COMPLETED", "start": JOB3_START,
@@ -718,7 +726,7 @@ def test_partitions_vram_records(client):
 
 
 def test_partitions_vram_discloses_truncation(client, fake_prom, monkeypatch):
-    monkeypatch.setattr(appmod, "_VRAM_RECORD_CAP", 2)
+    monkeypatch.setattr(deps, "VRAM_RECORD_CAP", 2)
     r = client.get("/api/partitions/vram", params={"since_hours": 24})
     assert r.status_code == 200
     data = r.json()
@@ -776,7 +784,7 @@ def test_slurm_error_maps_to_502(client, fake_prom, monkeypatch):
     def boom(ids, start_iso=None, **kw):
         raise appmod.SlurmError("sacct timed out")
 
-    monkeypatch.setattr(appmod, "sacct_jobs", boom)
+    monkeypatch.setattr(deps, "sacct_jobs", boom)
     r = client.get("/api/partitions/vram", params={"since_hours": 24})
     # the handler must produce the 502 itself; a reversed
     # JSONResponse(status, body) call turns this into a 500.
@@ -788,7 +796,7 @@ def test_prometheus_error_maps_to_502(client, fake_prom, monkeypatch):
     def boom():
         raise appmod.PrometheusError("prometheus down")
 
-    monkeypatch.setattr(appmod, "get_prom", boom)
+    monkeypatch.setattr(deps, "get_prom", boom)
     # /api/nodes degrades gracefully on Prometheus outages (by design);
     # the vram endpoint propagates, exercising the handler.
     r = client.get("/api/partitions/vram", params={"since_hours": 24})
