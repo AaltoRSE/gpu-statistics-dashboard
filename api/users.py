@@ -2,13 +2,14 @@
 
 from fastapi import APIRouter, Query
 
+from api.schemas import UsersResponse
 from domain.common import running_gpu_job_ids, window
 from domain.jobs import fetch_job_window
 
 router = APIRouter()
 
 
-@router.get("/api/users")
+@router.get("/api/users", response_model=UsersResponse)
 def api_users(since_hours: float = Query(24, gt=0, le=168)):
     """Per-user GPU-activity aggregation over the window.
 

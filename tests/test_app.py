@@ -53,19 +53,21 @@ SACCT = {
 }
 
 NODES = [
-    {"name": "gpu1", "state": "MIXED", "state_full": "MIXED",
+    {"name": "gpu1", "state": "MIXED", "state_full": "MIXED", "reason": "",
      "partitions": "gpu-h100", "cpus": 64, "gpus": 8, "gpu_type": "h100",
      "cpus_alloc": 16, "free_mem": 1000, "real_mem": 5000},
     {"name": "gpu2", "state": "ALLOCATED", "state_full": "ALLOCATED*",
+     "reason": "",
      "partitions": "gpu-h200", "cpus": 64, "gpus": 8, "gpu_type": "h200",
      "cpus_alloc": 32, "free_mem": 900, "real_mem": 5000},
     # idle h100 node: must be included in the h100 group's capacity total
-    {"name": "gpu3", "state": "IDLE", "state_full": "IDLE",
+    {"name": "gpu3", "state": "IDLE", "state_full": "IDLE", "reason": "",
      "partitions": "gpu-h100", "cpus": 64, "gpus": 8, "gpu_type": "h100",
      "cpus_alloc": 0, "free_mem": 4000, "real_mem": 5000},
     # MIG node: its GRES is a MIG profile, so its capacity belongs to the
     # profile group, never to the whole-GPU h200 pool.
     {"name": "gpu49", "state": "ALLOCATED", "state_full": "ALLOCATED",
+     "reason": "",
      "partitions": "gpu-h200", "cpus": 128, "gpus": 8,
      "gpu_type": "h200_3g.71gb",
      "cpus_alloc": 32, "free_mem": 900, "real_mem": 5000},
@@ -74,7 +76,7 @@ NODES = [
      "reason": "maintenance: firmware update scheduled",
      "partitions": "gpu-h200", "cpus": 64, "gpus": 8, "gpu_type": "h200",
      "cpus_alloc": 0, "free_mem": 100, "real_mem": 5000},
-    {"name": "csl1", "state": "IDLE", "state_full": "IDLE",
+    {"name": "csl1", "state": "IDLE", "state_full": "IDLE", "reason": "",
      "partitions": "batch", "cpus": 40, "gpus": 0, "gpu_type": "",
      "cpus_alloc": 0, "free_mem": 100, "real_mem": 200},
 ]

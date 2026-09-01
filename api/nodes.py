@@ -5,6 +5,7 @@ from fastapi import APIRouter, Query
 import cache
 import deps
 import gpu_groups
+from api.schemas import NodeDetailResponse, NodesResponse
 from domain.common import series_payload, step_for_range, window
 from domain.partitions import node_current, node_job_start
 from prom import PrometheusError
@@ -13,7 +14,7 @@ from promql import label_eq, selector
 router = APIRouter()
 
 
-@router.get("/api/nodes")
+@router.get("/api/nodes", response_model=NodesResponse)
 def api_nodes(gpu_only: bool = True, refresh: bool = Query(False)):
     if refresh:
         # Forced refresh bypasses both the dashboard's 30-second
@@ -46,7 +47,7 @@ def api_nodes(gpu_only: bool = True, refresh: bool = Query(False)):
     }
 
 
-@router.get("/api/nodes/{name}")
+@router.get("/api/nodes/{name}", response_model=NodeDetailResponse)
 def api_node_detail(
         name: str, view: str = Query("job_start", pattern="^(job_start|1|6|24)$")):
     now = int(deps.now())

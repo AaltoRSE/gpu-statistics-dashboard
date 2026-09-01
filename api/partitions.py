@@ -5,6 +5,7 @@ from fastapi import APIRouter, Query
 import cache
 import deps
 import gpu_groups
+from api.schemas import PartitionsResponse, VramResponse
 from domain.common import window
 from domain.partitions import gpu_capacity, node_current, partition_window
 from domain.vram import vram_job_records
@@ -12,7 +13,7 @@ from domain.vram import vram_job_records
 router = APIRouter()
 
 
-@router.get("/api/partitions")
+@router.get("/api/partitions", response_model=PartitionsResponse)
 def api_partitions(since_hours: float = Query(24, gt=0, le=168),
                    running_only: bool = Query(False)):
     nodes = deps.route_cache.get_or_set(cache.scontrol_nodes_key(), 30, deps.show_nodes)
@@ -36,7 +37,7 @@ def api_partitions(since_hours: float = Query(24, gt=0, le=168),
     }
 
 
-@router.get("/api/partitions/vram")
+@router.get("/api/partitions/vram", response_model=VramResponse)
 def api_part_vram(since_hours: float = Query(24, gt=0, le=168),
                   running_only: bool = Query(False),
                   partition: str = "",
