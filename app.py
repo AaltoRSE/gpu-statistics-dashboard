@@ -6,6 +6,7 @@ sacct / scontrol sources it needs, with short in-memory TTL caches.
 
 import os
 import re
+import threading
 import time
 from collections import defaultdict
 from datetime import datetime, timezone
@@ -25,7 +26,7 @@ app = FastAPI(title="GPU Efficiency Dashboard")
 
 _prom = None
 _cache = {}
-_cache_lock = None
+_cache_lock = threading.Lock()
 
 
 def get_prom():
@@ -41,11 +42,6 @@ def get_prom():
 
 
 def _cached(key, ttl, fn):
-    import threading
-
-    global _cache_lock
-    if _cache_lock is None:
-        _cache_lock = threading.Lock()
     with _cache_lock:
         hit = _cache.get(key)
         if hit and hit[0] > time.monotonic():
@@ -79,18 +75,25 @@ def _series_values(series):
     return out
 
 
+def _series_payload(series_list):
+    """[{"metric": ..., "values": [(ts, float), ...]}, ...] for a prom
+    range result list; the response shape shared by every detail series."""
+    return [{"metric": s["metric"], "values": _series_values(s)}
+            for s in series_list]
+
+
 def _job_window(since_hours, now=None):
     now = now or int(time.time())
     return now - int(since_hours * 3600), now
 
 
+def _window(start, now):
+    """The ``window`` envelope shared by every route's response body."""
+    return {"start": start, "end": now}
+
+
 def _invalidate_cache(*keys):
     """Drop cache entries; used by the forced-refresh path."""
-    import threading
-
-    global _cache_lock
-    if _cache_lock is None:
-        _cache_lock = threading.Lock()
     with _cache_lock:
         for key in keys:
             _cache.pop(key, None)
@@ -395,7 +398,7 @@ def _apply_metadata(job, row):
         job["gpu_hours_eff"] = round(alloc * util / 100.0, 2)
 
 
-def _enrich(jobs, since_hours):
+def _enrich(jobs):
     ids = [j["jobid"] for j in jobs]
     if not ids:
         return
@@ -445,9 +448,16 @@ def health():
     }
 
 
-# Deep-link routes: the SPA is a single page, so every view path serves the
-# same shell and the frontend (app.js) restores state from the URL path.
-_VIEW_PATHS = ["/jobs", "/partitions", "/users", "/nodes"]
+# Deep-link routes: the SPA is a single page, so every one of these paths
+# serves the same shell and the frontend (app.js) restores state from the
+# URL. Kept as an explicit path list rather than a "/{full_path:path}"
+# catch-all so a mistyped /api/* path still 404s instead of silently
+# returning HTML.
+_VIEW_PATHS = [
+    "/jobs", "/partitions", "/users", "/nodes",
+    "/job/{jobid}", "/node/{nodename}",
+    "/partition/{partition}", "/user/{username}",
+]
 
 
 for _p in _VIEW_PATHS:
@@ -456,26 +466,6 @@ for _p in _VIEW_PATHS:
         lambda: FileResponse(os.path.join(STATIC, "index.html")),
         include_in_schema=False,
     )
-
-
-@app.get("/job/{jobid}")
-def job_page(jobid: str):
-    return FileResponse(os.path.join(STATIC, "index.html"))
-
-
-@app.get("/node/{nodename}")
-def node_page(nodename: str):
-    return FileResponse(os.path.join(STATIC, "index.html"))
-
-
-@app.get("/partition/{partition}")
-def partition_page(partition: str):
-    return FileResponse(os.path.join(STATIC, "index.html"))
-
-
-@app.get("/user/{username}")
-def user_page(username: str):
-    return FileResponse(os.path.join(STATIC, "index.html"))
 
 
 def _efficiency_extremes(jobs, count=30):
@@ -514,7 +504,7 @@ def api_jobs(
         live = _running_gpu_job_ids()
         if not live:
             start, now = _job_window(since_hours)
-            return {"window": {"start": start, "end": now}, "count": 0,
+            return {"window": _window(start, now), "count": 0,
                     "partitions": [], "jobs": [],
                     "efficiency_high": [], "efficiency_low": []}
     # The user filter is pushed into the Prometheus query (server-side),
@@ -542,7 +532,7 @@ def api_jobs(
     # the limit box while that mode is active).
     if not running_only:
         jobs = jobs[:limit]
-    _enrich(jobs, since_hours)
+    _enrich(jobs)
     if search:
         needle = search.lower()
         jobs = [
@@ -556,7 +546,7 @@ def api_jobs(
                          for j in jobs
                          if j.get("gpu_group") or j.get("partition")})
     return {
-        "window": {"start": start, "end": now},
+        "window": _window(start, now),
         "count": len(jobs),
         "partitions": partitions,
         "jobs": [_public_job(j) for j in jobs],
@@ -620,7 +610,7 @@ def api_users(since_hours: float = Query(24, gt=0, le=168)):
     ]
     users.sort(key=lambda r: (-r["util_gpu_hours"], r["user"]))
     return {
-        "window": {"start": start, "end": now},
+        "window": _window(start, now),
         "count": len(users),
         "users": users,
     }
@@ -647,12 +637,8 @@ def api_job_detail(jobid: str, since_hours: float = Query(24, gt=0, le=168)):
 
     util, vram = _cached(("jobdetail", jobid, since_hours), 60, fetch)
     series = {
-        "utilization": [
-            {"metric": s["metric"], "values": _series_values(s)} for s in util
-        ],
-        "vram": [
-            {"metric": s["metric"], "values": _series_values(s)} for s in vram
-        ],
+        "utilization": _series_payload(util),
+        "vram": _series_payload(vram),
     }
     observed = sorted({s["metric"].get("instance", "") for s in util
                        if s["metric"].get("instance")})
@@ -667,7 +653,7 @@ def api_job_detail(jobid: str, since_hours: float = Query(24, gt=0, le=168)):
         # Copy so the cached sacct row is not mutated; the human-readable
         # start/end strings are preserved as-is.
         meta = dict(meta)
-    return {"jobid": jobid, "window": {"start": start, "end": now}, "step": step,
+    return {"jobid": jobid, "window": _window(start, now), "step": step,
             "metadata": meta, "series": series}
 
 
@@ -853,7 +839,7 @@ def api_partitions(since_hours: float = Query(24, gt=0, le=168),
         else:
             g["mean_occupancy"] = None
     return {
-        "window": {"start": start, "end": now},
+        "window": _window(start, now),
         "step": step,
         "partitions": groups,
         "trend": trend,
@@ -957,7 +943,7 @@ def api_part_vram(since_hours: float = Query(24, gt=0, le=168),
     records, total, start, now, step = _vram_job_records(
         since_hours, running_only, partition, node_types, weight)
     return {
-        "window": {"start": start, "end": now},
+        "window": _window(start, now),
         "step": step,
         "total": total,
         "jobs": records,
@@ -1110,15 +1096,11 @@ def api_node_detail(
     return {
         "node": name,
         "view": view,
-        "window": {"start": start, "end": now},
+        "window": _window(start, now),
         "step": step,
         "series": {
-            "utilization": [
-                {"metric": s["metric"], "values": _series_values(s)} for s in util
-            ],
-            "vram": [
-                {"metric": s["metric"], "values": _series_values(s)} for s in vram
-            ],
+            "utilization": _series_payload(util),
+            "vram": _series_payload(vram),
         },
     }
 
