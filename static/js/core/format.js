@@ -103,20 +103,6 @@ export function stateBadge(state, label = state) {
   return html`<span class="badge ${cls}">${label}</span>`;
 }
 
-// scontrol node states carry qualifiers after ``+`` (``IDLE+DRAIN``) and a
-// trailing ``*`` marks a node that is presently not responding; the star is
-// stripped. Every qualifier is rendered as a badge (neutral allocation
-// states included, per the column contract); the parsed drain reason is
-// exposed as the cell title by the caller.
-export function nodeStateBadges(n) {
-  const cleaned = (n.state_full || n.state || "").replace(/\*$/, "");
-  const parts = cleaned.split("+")
-    .map((p) => p.split(":")[0])
-    .filter(Boolean);
-  if (!parts.length) return "";
-  return parts.map((p) => stateBadge(p, p.replace(/_/g, " "))).join(" ");
-}
-
 // One display timezone everywhere (T-23): the cluster's own zone,
 // Europe/Helsinki — not the viewer's browser zone, and not UTC. Stated
 // once in the page header rather than repeated after every timestamp.
