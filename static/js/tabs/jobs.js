@@ -9,7 +9,7 @@
  * module initialization. */
 "use strict";
 
-import { $, debounce, isPlainClick, markSort, emptyRow } from "../core/dom.js";
+import { $, debounce, isPlainClick } from "../core/dom.js";
 import {
   fmt, fmtInt, pctBar, escapeHtml, tsToDate, stateBadge, compareStrings,
   userLink, nodeLinks, partitionLink,
@@ -18,12 +18,12 @@ import { setResultsLoading, showPanelError, panelOk } from "../core/panel.js";
 import { renderPlot, plotTheme, partBarColor } from "../core/plot.js";
 import { api, status } from "../core/api.js";
 import { loaded, setUrl, openUser, openNode, openPartition } from "../core/router.js";
+import { createTable } from "../core/table.js";
 
 let jobRows = [];
 let jobBaseHigh = []; // server-calculated highest efficiency set, scoped by search
 let jobBaseLow = [];
 let jobVisibleRows = []; // searched rows after the client-side partition filter
-let jobSort = { key: "mean_util", dir: "desc" };
 let jobsToken = 0;
 
 function jobLimit() {
@@ -103,18 +103,6 @@ export async function loadJobs(force = false) {
   }
 }
 
-function sortJobRows() {
-  const rows = jobVisibleRows.slice();
-  const k = jobSort.key, s = jobSort.dir === "asc" ? 1 : -1;
-  const key = (v) => Array.isArray(v) ? v.join(",") : v;
-  rows.sort((a, b) => {
-    const va = key(a[k]), vb = key(b[k]);
-    if (typeof va === "number" && typeof vb === "number") return (va - vb) * s;
-    return compareStrings(va, vb) * s;
-  });
-  return rows;
-}
-
 // Name/ID search is server-backed: it is sent to /api/jobs because it
 // determines the efficiency chart's rows, so a search change reloads and
 // refreshes the server-calculated extremes. The partition selector is a
@@ -128,35 +116,18 @@ export function renderJobsView() {
   if (search) rows = rows.filter((j) =>
     j.jobid.includes(search) || (j.name || "").toLowerCase().includes(search));
   jobVisibleRows = rows;
-  renderJobTable(sortJobRows());
-  markSort($("jobTable"), jobSort.key, jobSort.dir);
+  jobTable.setRows(jobVisibleRows);
   $("jCount").textContent = (partition || search)
     ? rows.length + " / " + jobRows.length + " shown"
     : rows.length + " shown";
 }
 
-function renderJobTable(rows) {
-  const tb = $("jobTable").querySelector("tbody");
-  const hasFilters = $("jSearch").value.trim() !== "" || $("jPartition").value !== "";
-  if (!rows.length) {
-    const msg = hasFilters
-      ? "No jobs match the current search / partition filters."
-      : "No jobs in this window.";
-    tb.innerHTML = emptyRow(10, msg, hasFilters ? "reset filters" : null);
-    const reset = tb.querySelector("button[data-empty-reset]");
-    if (reset) reset.addEventListener("click", () => {
-      $("jSearch").value = "";
-      $("jPartition").value = "";
-      loadJobs();
-    });
-    return;
-  }
-  tb.innerHTML = rows.map((j) => {
-    const jobid = escapeHtml(j.jobid);
-    const rawName = j.name || "";
-    const start = escapeHtml((j.start || "").slice(0, 16));
-    const gpus = escapeHtml(j.gpus !== undefined ? j.gpus : "—");
-    return `
+function jobRowHtml(j) {
+  const jobid = escapeHtml(j.jobid);
+  const rawName = j.name || "";
+  const start = escapeHtml((j.start || "").slice(0, 16));
+  const gpus = escapeHtml(j.gpus !== undefined ? j.gpus : "—");
+  return `
     <tr class="row" data-job="${jobid}">
       <td>${jobid}</td><td title="${escapeHtml(rawName)}">${escapeHtml(rawName.slice(0, 40))}</td>
       <td>${userLink(j.user)}</td><td>${partitionLink(j.gpu_group || j.partition)}</td>
@@ -166,36 +137,65 @@ function renderJobTable(rows) {
       <td class="num">${pctBar(j.mean_util)}</td>
       <td class="num">${escapeHtml(fmt(j.vram_avg))}</td>
     </tr>`;
-  }).join("");
-  tb.querySelectorAll("tr.row").forEach((tr) =>
-    tr.addEventListener("click", (e) => {
-      const link = e.target.closest("a.userlink");
-      if (link) {
-        e.stopPropagation();
-        if (!isPlainClick(e)) return;
-        e.preventDefault();
-        openUser(link.dataset.user);
-        return;
-      }
-      const nlink = e.target.closest("a.nodelink");
-      if (nlink) {
-        e.stopPropagation();
-        if (!isPlainClick(e)) return;
-        e.preventDefault();
-        openNode(nlink.dataset.node);
-        return;
-      }
-      const plink = e.target.closest("a.partitionlink");
-      if (plink) {
-        e.stopPropagation();
-        if (!isPlainClick(e)) return;
-        e.preventDefault();
-        openPartition(plink.dataset.partition);
-        return;
-      }
-      loadJobDetail(tr.dataset.job, { kind: "jobs" });
-    }));
 }
+
+function jobRowClick(e, tr) {
+  const link = e.target.closest("a.userlink");
+  if (link) {
+    e.stopPropagation();
+    if (!isPlainClick(e)) return;
+    e.preventDefault();
+    openUser(link.dataset.user);
+    return;
+  }
+  const nlink = e.target.closest("a.nodelink");
+  if (nlink) {
+    e.stopPropagation();
+    if (!isPlainClick(e)) return;
+    e.preventDefault();
+    openNode(nlink.dataset.node);
+    return;
+  }
+  const plink = e.target.closest("a.partitionlink");
+  if (plink) {
+    e.stopPropagation();
+    if (!isPlainClick(e)) return;
+    e.preventDefault();
+    openPartition(plink.dataset.partition);
+    return;
+  }
+  loadJobDetail(tr.dataset.job, { kind: "jobs" });
+}
+
+function jobsEmptyMessage() {
+  const hasFilters = $("jSearch").value.trim() !== "" || $("jPartition").value !== "";
+  return {
+    text: hasFilters
+      ? "No jobs match the current search / partition filters."
+      : "No jobs in this window.",
+    resetLabel: hasFilters ? "reset filters" : null,
+    onReset: () => {
+      $("jSearch").value = "";
+      $("jPartition").value = "";
+      loadJobs();
+    },
+  };
+}
+
+const jobTable = createTable({
+  el: $("jobTable"),
+  columns: [
+    { key: "jobid", type: "text" }, { key: "name", type: "text" },
+    { key: "user", type: "text" }, { key: "partition", type: "text" },
+    { key: "nodes", type: "text" }, { key: "state", type: "text" },
+    { key: "start", type: "text" }, { key: "gpus", type: "number" },
+    { key: "mean_util", type: "number" }, { key: "vram_avg", type: "number" },
+  ],
+  defaultSort: { key: "mean_util", dir: "desc" },
+  renderRow: jobRowHtml,
+  onRowClick: jobRowClick,
+  emptyMessage: jobsEmptyMessage,
+});
 
 let effImpact = false;   // rank by effective GPU-hours instead of average efficiency
 let effShowAll = false;  // show the full top-30 set instead of the default 10
@@ -497,12 +497,3 @@ $("effShowAll").addEventListener("click", (e) => {
   effShowAll = !effShowAll;
   renderJobEfficiency();
 });
-$("jobTable").querySelectorAll("th[data-k]").forEach((th) =>
-  th.addEventListener("click", () => {
-    const k = th.dataset.k;
-    jobSort = (k === jobSort.key)
-      ? { key: k, dir: jobSort.dir === "desc" ? "asc" : "desc" }
-      : { key: k, dir: "desc" };
-    renderJobTable(sortJobRows());
-    markSort($("jobTable"), jobSort.key, jobSort.dir);
-  }));

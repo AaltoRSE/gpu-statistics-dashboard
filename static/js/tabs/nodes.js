@@ -5,7 +5,7 @@
  * other. */
 "use strict";
 
-import { $, isPlainClick, markSort, emptyRow } from "../core/dom.js";
+import { $, isPlainClick } from "../core/dom.js";
 import {
   fmt, pctBar, escapeHtml, compareStrings, nodeStateBadges, jobLink,
   nodeLink, partitionLink,
@@ -14,9 +14,9 @@ import { setResultsLoading, showPanelError, panelOk } from "../core/panel.js";
 import { renderPlot, plotTheme } from "../core/plot.js";
 import { api, status } from "../core/api.js";
 import { loaded, setUrl, openJob, openNode, openPartition } from "../core/router.js";
+import { createTable } from "../core/table.js";
 
 let nodeRows = [];
-let nodeSort = { key: "name", dir: "asc" };
 let nodesToken = 0;
 const nodeFilters = { search: "", gputype: "", busy: false, gpuOnly: true };
 
@@ -69,38 +69,22 @@ function filteredNodes() {
   });
 }
 
-function renderNodeTable() {
-  const rows = filteredNodes();
-  const tb = $("nodeTable").querySelector("tbody");
-  const nodeFiltered = nodeFilters.search || nodeFilters.gputype || nodeFilters.busy;
-  if (!rows.length) {
-    tb.innerHTML = emptyRow(8, nodeFiltered
-      ? "No nodes match the current filters." : "No GPU nodes in this snapshot.",
-      nodeFiltered ? "reset filters" : null);
-    const reset = tb.querySelector("button[data-empty-reset]");
-    if (reset) reset.addEventListener("click", () => {
-      $("nSearch").value = ""; $("nGpuType").value = ""; $("nBusy").checked = false;
-      nodeFilters.search = ""; nodeFilters.gputype = ""; nodeFilters.busy = false;
-      renderNodeTable();
-    });
-    return;
-  }
-  tb.innerHTML = rows.map((n) => {
-    const u = n.current_util;
-    const busy = u !== null && u > 0;
-    const jobs = (n.active_jobs || []).map((j) => jobLink(j.jobid)).join(", ") || "—";
-    const rawName = n.name;
-    const name = escapeHtml(rawName);
-    const gpuType = n.gpu_type
-      ? (n.gpu_group ? partitionLink(n.gpu_group, n.gpu_type)
-                     : escapeHtml(n.gpu_type))
-      : "—";
-    const gpusAlloc = escapeHtml(n.gpus_alloc !== undefined ? n.gpus_alloc : 0);
-    const gpus = escapeHtml(n.gpus);
-    const vram = escapeHtml(n.current_vram === null ? "—" : fmt(n.current_vram));
-    const cpusAlloc = escapeHtml(n.cpus_alloc !== undefined ? n.cpus_alloc : 0);
-    const cpus = escapeHtml(n.cpus);
-    return `
+function nodeRowHtml(n) {
+  const u = n.current_util;
+  const busy = u !== null && u > 0;
+  const jobs = (n.active_jobs || []).map((j) => jobLink(j.jobid)).join(", ") || "—";
+  const rawName = n.name;
+  const name = escapeHtml(rawName);
+  const gpuType = n.gpu_type
+    ? (n.gpu_group ? partitionLink(n.gpu_group, n.gpu_type)
+                   : escapeHtml(n.gpu_type))
+    : "—";
+  const gpusAlloc = escapeHtml(n.gpus_alloc !== undefined ? n.gpus_alloc : 0);
+  const gpus = escapeHtml(n.gpus);
+  const vram = escapeHtml(n.current_vram === null ? "—" : fmt(n.current_vram));
+  const cpusAlloc = escapeHtml(n.cpus_alloc !== undefined ? n.cpus_alloc : 0);
+  const cpus = escapeHtml(n.cpus);
+  return `
     <tr class="row" data-node="${name}" style="${busy ? "" : "opacity:.55"}">
       <td>${nodeLink(rawName)}</td>
       <td>${gpuType}</td>
@@ -111,36 +95,66 @@ function renderNodeTable() {
       <td class="num" title="allocated / total CPUs">${cpusAlloc}/${cpus}</td>
       <td class="small">${jobs}</td>
     </tr>`;
-  }).join("");
-  tb.querySelectorAll("tr.row").forEach((tr) =>
-    tr.addEventListener("click", (e) => {
-      const link = e.target.closest("a.joblink");
-      if (link) {
-        e.stopPropagation();
-        if (!isPlainClick(e)) return;
-        e.preventDefault();
-        openJob(link.dataset.job, { kind: "node", node: tr.dataset.node });
-        return;
-      }
-      const nlink = e.target.closest("a.nodelink");
-      if (nlink) {
-        e.stopPropagation();
-        if (!isPlainClick(e)) return;
-        e.preventDefault();
-        openNode(nlink.dataset.node);
-        return;
-      }
-      const plink = e.target.closest("a.partitionlink");
-      if (plink) {
-        e.stopPropagation();
-        if (!isPlainClick(e)) return;
-        e.preventDefault();
-        openPartition(plink.dataset.partition);
-        return;
-      }
-      loadNodeDetail(tr.dataset.node);
-    }));
-  markSort($("nodeTable"), nodeSort.key, nodeSort.dir);
+}
+
+function nodeRowClick(e, tr) {
+  const link = e.target.closest("a.joblink");
+  if (link) {
+    e.stopPropagation();
+    if (!isPlainClick(e)) return;
+    e.preventDefault();
+    openJob(link.dataset.job, { kind: "node", node: tr.dataset.node });
+    return;
+  }
+  const nlink = e.target.closest("a.nodelink");
+  if (nlink) {
+    e.stopPropagation();
+    if (!isPlainClick(e)) return;
+    e.preventDefault();
+    openNode(nlink.dataset.node);
+    return;
+  }
+  const plink = e.target.closest("a.partitionlink");
+  if (plink) {
+    e.stopPropagation();
+    if (!isPlainClick(e)) return;
+    e.preventDefault();
+    openPartition(plink.dataset.partition);
+    return;
+  }
+  loadNodeDetail(tr.dataset.node);
+}
+
+function nodeTableEmptyMessage() {
+  const nodeFiltered = nodeFilters.search || nodeFilters.gputype || nodeFilters.busy;
+  return {
+    text: nodeFiltered ? "No nodes match the current filters." : "No GPU nodes in this snapshot.",
+    resetLabel: nodeFiltered ? "reset filters" : null,
+    onReset: () => {
+      $("nSearch").value = ""; $("nGpuType").value = ""; $("nBusy").checked = false;
+      nodeFilters.search = ""; nodeFilters.gputype = ""; nodeFilters.busy = false;
+      renderNodeTable();
+    },
+  };
+}
+
+const nodeTable = createTable({
+  el: $("nodeTable"),
+  columns: [
+    { key: "name", type: "text" }, { key: "gpu_type", type: "text" },
+    { key: "state_full", type: "text" }, { key: "gpus_alloc", type: "number" },
+    { key: "current_util", type: "number" }, { key: "current_vram", type: "number" },
+    { key: "cpus_alloc", type: "number" },
+  ],
+  defaultSort: { key: "name", dir: "asc" },
+  renderRow: nodeRowHtml,
+  onRowClick: nodeRowClick,
+  emptyMessage: nodeTableEmptyMessage,
+});
+
+function renderNodeTable() {
+  const rows = filteredNodes();
+  nodeTable.setRows(rows);
   $("nCount").textContent = rows.length + " / " + nodeRows.length;
 }
 
@@ -254,19 +268,3 @@ $("ndJob").addEventListener("change", (e) => {
   nodeDetailJob = e.target.value;
   if (nodeDetailData) renderNodeDetail(nodeDetailData, nodeDetailName);
 });
-$("nodeTable").querySelectorAll("th[data-k]").forEach((th) =>
-  th.addEventListener("click", () => {
-    const k = th.dataset.k;
-    nodeSort = (k === nodeSort.key)
-      ? { key: k, dir: nodeSort.dir === "desc" ? "asc" : "desc" }
-      : { key: k, dir: k === "name" ? "asc" : "desc" };
-    const s = nodeSort.dir === "asc" ? 1 : -1;
-    nodeRows.sort((a, b) => {
-      const va = a[k], vb = b[k];
-      if (va === null || va === undefined) return 1;
-      if (vb === null || vb === undefined) return -1;
-      if (typeof va === "number" && typeof vb === "number") return (va - vb) * s;
-      return compareStrings(va, vb) * s;
-    });
-    renderNodeTable();
-  }));

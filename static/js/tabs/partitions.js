@@ -7,17 +7,17 @@
  * other. */
 "use strict";
 
-import { $, markSort } from "../core/dom.js";
+import { $ } from "../core/dom.js";
 import { escapeHtml, fmtInt, pctBar, compareStrings, tsToDate, partitionLink } from "../core/format.js";
 import { setResultsLoading, showPanelError, panelOk } from "../core/panel.js";
 import { renderPlot, plotTheme, partBarColor } from "../core/plot.js";
 import { api, status } from "../core/api.js";
 import { loaded, setUrl, openPartition } from "../core/router.js";
+import { createTable } from "../core/table.js";
 
 let partRows = [];
 export let partTrendData = {};
 export let selectedPartition = ""; // deep-linked or chosen partition; "" = all
-let partSort = { key: "mean_util", dir: "desc" };
 let partitionsToken = 0;
 
 export function setSelectedPartition(name) {
@@ -74,7 +74,6 @@ export async function loadPartitions() {
   partTrendData = data.trend;
   applyPartitionSelection(selectedPartition);
   renderPartTable();
-  markSort($("partTable"), partSort.key, partSort.dir);
   loaded.partitions = true;
   // The summary panel is unblocked as soon as its response renders; the
   // VRAM distribution then fetches independently under its own panel.
@@ -169,17 +168,38 @@ function renderPartTrend(trend) {
   renderPlot("partTrendPlot", traces, layout);
 }
 
-function renderPartTable() {
-  const tb = $("partTable").querySelector("tbody");
-  tb.innerHTML = partRows.map((p) => `
+function partRowHtml(p) {
+  return `
     <tr class="row" data-partition="${escapeHtml(p.name)}">
       <td>${partitionLink(p.name)}</td>
       <td class="num" title="allocated / total GPUs">${escapeHtml(p.gpus_alloc)}/${escapeHtml(p.gpus_total)}</td>
       <td class="num">${escapeHtml(fmtInt(p.job_count))}</td>
       <td class="num">${pctBar(p.mean_util)}</td>
-    </tr>`).join("");
-  tb.querySelectorAll("tr.row").forEach((tr) =>
-    tr.addEventListener("click", () => openPartition(tr.dataset.partition)));
+    </tr>`;
+}
+
+function partRowClick(e, tr) {
+  openPartition(tr.dataset.partition);
+}
+
+function partTableEmptyMessage() {
+  return { text: "No partitions in this window.", resetLabel: null };
+}
+
+const partTable = createTable({
+  el: $("partTable"),
+  columns: [
+    { key: "name", type: "text" }, { key: "gpus_total", type: "number" },
+    { key: "job_count", type: "number" }, { key: "mean_util", type: "number" },
+  ],
+  defaultSort: { key: "mean_util", dir: "desc" },
+  renderRow: partRowHtml,
+  onRowClick: partRowClick,
+  emptyMessage: partTableEmptyMessage,
+});
+
+function renderPartTable() {
+  partTable.setRows(partRows);
 }
 
 function partControlsChanged() { loadPartitions(); }
@@ -192,21 +212,6 @@ $("pRunning").addEventListener("change", (e) => {
   $("pWindow").disabled = e.target.checked;
   loadPartitions();
 });
-$("partTable").querySelectorAll("th[data-k]").forEach((th) =>
-  th.addEventListener("click", () => {
-    const k = th.dataset.k;
-    partSort = (k === partSort.key)
-      ? { key: k, dir: partSort.dir === "desc" ? "asc" : "desc" }
-      : { key: k, dir: "desc" };
-    const s = partSort.dir === "asc" ? 1 : -1;
-    partRows.sort((a, b) => {
-      const va = a[k], vb = b[k];
-      if (typeof va === "number" && typeof vb === "number") return (va - vb) * s;
-      return compareStrings(va, vb) * s;
-    });
-    renderPartTable();
-    markSort($("partTable"), partSort.key, partSort.dir);
-  }));
 
 /* ---------------- VRAM distribution ----------------
  * VRAM usage of jobs in the window, binned by per-job peak VRAM and
