@@ -90,7 +90,8 @@
             <h2 id="jobHighTitle">Highest average efficiency</h2>
             <div class="row eff-controls">
               <label class="row"><input type="checkbox" id="effImpact"> rank by effective GPU&ndash;hours</label>
-              <a href="#" id="effShowAll">show all 30</a>
+              <span class="small" id="effCapNote"></span>
+              <button type="button" id="effShowAll">show all 30</button>
             </div>
             <div class="chart" id="jobHighBarPlot"></div>
           </div>
@@ -365,7 +366,6 @@
     </div>
   </section>
 </main>
-<div id="status"></div>
 <dialog id="glossaryDialog" class="glossary-dialog">
   <h2>Metric glossary</h2>
   <dl>

@@ -101,6 +101,13 @@ th.sorted-desc::after { content:" \25BC"; font-size:9px; color:var(--acc); }
 .badge.PENDING, .badge.IDLE, .badge.MIXED, .badge.ALLOCATED, .badge.PLANNED { background:#26304a; color:var(--dim); }
 .badge.FAILED, .badge.CANCELLED, .badge.TIMEOUT, .badge.NOT_RESPONDING { background:#3a1e22; color:var(--bad); }
 .badge.DRAIN, .badge.DRAINED, .badge.DRAINING, .badge.DOWN, .badge.RESERVED { background:#3a2c14; color:var(--warn); }
+/* T-27: replaces the old blanket opacity:.55 on an idle node's whole row —
+   a chip next to its scontrol state badges (not one of scontrol's own
+   states, so styled distinctly from .badge.IDLE) plus a muted utilization
+   cell (below), so de-emphasis lands on the specific things that are
+   actually idle rather than the whole row at once. */
+.badge.idle-chip { background:var(--panel2); color:var(--dim); font-weight:400; }
+.muted-cell { opacity:.6; }
 
 .bar-track { display:inline-block; width:64px; height:8px; border-radius:4px; background:var(--panel2);
   vertical-align:middle; margin-right:6px; overflow:hidden; }
@@ -120,8 +127,6 @@ th.sorted-desc::after { content:" \25BC"; font-size:9px; color:var(--acc); }
 .chart.tall { height:420px; }
 #jobDetailPlot, #nodeDetailUtilPlot, #nodeDetailVramPlot { min-height: 360px; }
 .empty { color:var(--dim); font-size:13px; padding:18px 0; text-align:center; }
-#status { position: fixed; right: 14px; bottom: 12px; font-size: 11px; color: var(--dim);
-  background: var(--panel); border:1px solid var(--line); border-radius:6px; padding:4px 10px; opacity:.85; }
 .err { color: var(--bad); font-size: 12px; padding: 8px 10px; background:#2a1518; border:1px solid var(--bad);
   border-radius:6px; margin: 8px 0; display:none; }
 .small { font-size: 11px; color: var(--dim); }
@@ -196,8 +201,9 @@ header .auto-refresh select { background:var(--panel2); color:var(--text); borde
 .eff-controls { justify-content:space-between; gap:8px; margin:0 0 4px;
   font-size:11px; color:var(--dim); }
 .eff-controls label { font-size:11px; cursor:pointer; }
-.eff-controls a { color:var(--acc); font-size:11px; text-decoration:none; white-space:nowrap; }
-.eff-controls a:hover { text-decoration:underline; }
+.eff-controls #effShowAll { all:unset; color:var(--acc); font-size:11px; cursor:pointer;
+  white-space:nowrap; }
+.eff-controls #effShowAll:hover { text-decoration:underline; }
 
 /* metric glossary (T-23) */
 .glossary-dialog { background:var(--panel); color:var(--text); border:1px solid var(--line);

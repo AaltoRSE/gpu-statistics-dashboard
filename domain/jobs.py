@@ -107,8 +107,18 @@ def efficiency_extremes(jobs, count=30):
     job ID so both lists are stable across calls. "Efficiency" here names a
     concept (average GPU utilization), not a separate field — it is
     mean_util itself; there is no dedicated efficiency field on a job.
+
+    Each list is capped at ``min(count, len(jobs) // 2)`` rather than
+    ``count`` outright: with fewer than ``2 * count`` candidates, a plain
+    top-``count``/bottom-``count`` cut overlaps — the same job would appear
+    in both the "highest" and "lowest" charts, which is never a sensible
+    answer to either question. Halving instead keeps the two lists
+    disjoint at every candidate count, including zero and one.
     """
+    n = min(count, len(jobs) // 2)
+    if n <= 0:
+        return [], []
     ordered = sorted(jobs, key=lambda j: (j["mean_util"], j["jobid"]))
-    low = ordered[:count]
-    high = sorted(ordered[-count:], key=lambda j: (-j["mean_util"], j["jobid"]))
+    low = ordered[:n]
+    high = sorted(ordered[-n:], key=lambda j: (-j["mean_util"], j["jobid"]))
     return high, low

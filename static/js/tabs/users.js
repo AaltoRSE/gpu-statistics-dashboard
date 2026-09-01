@@ -20,7 +20,7 @@ import {
   jobLink, nodeLinks, partitionLink, stateBadge,
 } from "../core/format.js";
 import { setResultsLoading, showPanelError, panelOk } from "../core/panel.js";
-import { api, status } from "../core/api.js";
+import { api } from "../core/api.js";
 import { loaded, setUrl, openJob, openNode, openPartition } from "../core/router.js";
 import { createTable } from "../core/table.js";
 
@@ -33,7 +33,6 @@ let userJobsToken = 0;
 export async function loadUsers() {
   const token = ++usersToken;
   setResultsLoading("usersResults", true);
-  status("loading users…");
   try {
     const data = await api("/api/users?since_hours=" + $("uWindow").value);
     if (token !== usersToken) return;
@@ -150,7 +149,6 @@ async function loadUserJobs(user) {
   $("userJobsTitle").textContent =
     "Jobs · " + user + " · last " + $("uWindow").value / 24 + " d";
   setResultsLoading("userJobsResults", true);
-  status("loading " + user + "’s jobs…");
   const params = new URLSearchParams({
     since_hours: $("uWindow").value, user, limit: "500",
   });

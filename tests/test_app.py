@@ -16,6 +16,7 @@ from fastapi.testclient import TestClient  # noqa: E402
 import app as appmod  # noqa: E402
 import cache  # noqa: E402
 import deps  # noqa: E402
+import domain.jobs as domain_jobs  # noqa: E402
 import domain.metadata as domain_metadata  # noqa: E402
 import domain.partitions as domain_partitions  # noqa: E402
 from api import users as api_users  # noqa: E402
@@ -936,10 +937,34 @@ def test_jobs_mean_util_field_and_no_duplicate_efficiency_field(client):
     assert "efficiency" not in by_id["1"]
 
 
+def test_efficiency_extremes_never_overlaps():
+    # 100 candidates: well above the 2*30 threshold, so the classic top/
+    # bottom 30 applies unchanged and the two lists are still disjoint.
+    jobs = [{"jobid": str(i), "mean_util": float(i)} for i in range(100)]
+    high, low = domain_jobs.efficiency_extremes(jobs)
+    assert len(high) == 30 and len(low) == 30
+    assert {j["jobid"] for j in high}.isdisjoint({j["jobid"] for j in low})
+
+    # 5 candidates: below 2*30, so each list is capped at 5 // 2 = 2 rather
+    # than the classic 30 (which would make both lists identical).
+    jobs = [{"jobid": str(i), "mean_util": float(i)} for i in range(5)]
+    high, low = domain_jobs.efficiency_extremes(jobs)
+    assert [j["jobid"] for j in high] == ["4", "3"]
+    assert [j["jobid"] for j in low] == ["0", "1"]
+
+    # 0 or 1 candidates: no meaningful "highest" vs "lowest" distinction
+    # exists, so both lists are empty rather than trivially identical.
+    assert domain_jobs.efficiency_extremes([]) == ([], [])
+    one = [{"jobid": "1", "mean_util": 50.0}]
+    assert domain_jobs.efficiency_extremes(one) == ([], [])
+
+
 def test_jobs_efficiency_extremes(client):
     data = client.get("/api/jobs", params={"since_hours": 24}).json()
-    assert [j["jobid"] for j in data["efficiency_high"]] == ["3", "4", "1", "2"]
-    assert [j["jobid"] for j in data["efficiency_low"]] == ["2", "1", "4", "3"]
+    # 4 candidates -> capped at 4 // 2 = 2 each (T-27), so the two lists
+    # never share a job: job 4 (85.0) no longer appears in both.
+    assert [j["jobid"] for j in data["efficiency_high"]] == ["3", "4"]
+    assert [j["jobid"] for j in data["efficiency_low"]] == ["2", "1"]
 
 
 def test_jobs_extremes_bounded_by_search(client):
@@ -947,8 +972,10 @@ def test_jobs_extremes_bounded_by_search(client):
                       params={"since_hours": 24, "search": "train.sh"}).json()
     # search matches only job 1's sacct name; charts must show the searched rows
     assert [j["jobid"] for j in data["jobs"]] == ["1"]
-    assert [j["jobid"] for j in data["efficiency_high"]] == ["1"]
-    assert [j["jobid"] for j in data["efficiency_low"]] == ["1"]
+    # 1 candidate -> capped at 1 // 2 = 0: showing the sole match as both
+    # "highest" and "lowest" would be a trivial, meaningless overlap (T-27).
+    assert data["efficiency_high"] == []
+    assert data["efficiency_low"] == []
 
 
 def test_jobs_total_candidates_reflects_pre_limit_count(client):
