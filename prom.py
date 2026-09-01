@@ -34,7 +34,8 @@ class PromClient:
         except httpx.HTTPError as exc:
             raise PrometheusError("cannot reach Prometheus: %s" % exc) from exc
         if resp.status_code in (401, 403):
-            raise PrometheusError("Prometheus authentication failed (%s)" % resp.status_code)
+            raise PrometheusError(
+                "Prometheus authentication failed (%s)" % resp.status_code)
         if resp.status_code != 200:
             raise PrometheusError("Prometheus HTTP error %s" % resp.status_code)
         try:
@@ -42,7 +43,8 @@ class PromClient:
         except ValueError as exc:
             raise PrometheusError("Prometheus returned invalid JSON") from exc
         if payload.get("status") != "success":
-            message = payload.get("error") or payload.get("errorType") or "unknown error"
+            message = (payload.get("error") or payload.get("errorType")
+                       or "unknown error")
             raise PrometheusError("Prometheus query failed: %s" % message)
         data = payload.get("data", {})
         with self._lock:
