@@ -223,8 +223,19 @@ const jobTable = createTable({
 // A bucket is never a single job, so there is nothing sensible to click
 // through to a job detail with.
 export function renderJobEfficiency() {
-  const th = plotTheme();
   const buckets = jobEffHistogram;
+  const totalHours = buckets.reduce((s, b) => s + b.gpu_hours, 0);
+  // Collapse to one line of text at the panel's natural height instead of
+  // a full-height chart with an invented axis (PLAN-1 2.3): an empty
+  // Plotly trace still autoscales both axes to something like 0-4 with no
+  // data behind it, which reads as a real (if oddly-scaled) chart, not as
+  // "no data" — the table below this panel already says the same thing in
+  // words, so this only needs to match that, not draw around it.
+  const empty = !buckets.length || totalHours === 0;
+  $("jobEffHistPlot").hidden = empty;
+  $("jobEffHistEmpty").hidden = !empty;
+  if (empty) return;
+  const th = plotTheme();
   const layout = {
     margin: { l: 60, r: 20, t: 10, b: 40 },
     paper_bgcolor: "rgba(0,0,0,0)", plot_bgcolor: "rgba(0,0,0,0)",
@@ -243,16 +254,6 @@ export function renderJobEfficiency() {
       line: { color: th.grid, width: 1, dash: "dot" },
     })),
   };
-  const totalHours = buckets.reduce((s, b) => s + b.gpu_hours, 0);
-  if (!buckets.length || totalHours === 0) {
-    layout.annotations = [{
-      text: "No jobs match the current filters", showarrow: false,
-      xref: "paper", yref: "paper", x: 0.5, y: 0.5,
-      font: { color: th.font.color, size: 12 },
-    }];
-    renderPlot("jobEffHistPlot", [{ type: "bar" }], layout);
-    return;
-  }
   const trace = {
     type: "bar",
     x: buckets.map((b) => (b.bucket_start + b.bucket_end) / 2),
