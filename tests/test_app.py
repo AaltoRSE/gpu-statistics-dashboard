@@ -483,7 +483,7 @@ def test_enrich_merges_active_array_tasks(client, fake_prom, monkeypatch):
     })
     jobs = [{"jobid": "42", "nodes": ["gpu1", "gpu2"], "mean_util": 50.0,
              "gpu_hours_eff": 0.5}]
-    appmod._enrich(jobs, 24)
+    appmod._enrich(jobs)
     job = jobs[0]
     assert job["name"] == "arr.sh"
     assert job["state"] == "RUNNING"
@@ -505,7 +505,7 @@ def test_enrich_array_no_node_match_falls_back_without_misattribution(
     })
     jobs = [{"jobid": "44", "nodes": ["gpu1"], "mean_util": 10.0,
              "gpu_hours_eff": 0.1}]
-    appmod._enrich(jobs, 24)
+    appmod._enrich(jobs)
     for key in ("name", "state", "start", "gpus", "node_list"):
         assert key not in jobs[0]
 
@@ -518,7 +518,7 @@ def test_enrich_scontrol_failure_falls_back_to_sacct(client, fake_prom,
                         lambda: (_ for _ in ()).throw(SlurmError("boom")))
     jobs = [{"jobid": "1", "nodes": ["gpu1"], "mean_util": 40.0,
              "gpu_hours_eff": 0.4}]
-    appmod._enrich(jobs, 24)
+    appmod._enrich(jobs)
     job = jobs[0]
     assert job["name"] == "train.sh"
     assert job["state"] == "RUNNING"
@@ -551,7 +551,7 @@ def test_enrich_merges_historical_array_tasks_in_sacct(
     })
     jobs = [{"jobid": "45", "nodes": ["gpu1"], "mean_util": 50.0,
              "gpu_hours_eff": 0.5}]
-    appmod._enrich(jobs, 24)
+    appmod._enrich(jobs)
     job = jobs[0]
     assert job["name"] == "hist.sh"
     assert job["state"] == "COMPLETED"
@@ -581,7 +581,7 @@ def test_enrich_array_task_without_node_match_is_not_merged(
     })
     jobs = [{"jobid": "46", "nodes": ["gpu1"], "mean_util": 10.0,
              "gpu_hours_eff": 0.1}]
-    appmod._enrich(jobs, 24)
+    appmod._enrich(jobs)
     for key in ("name", "state", "start", "gpus", "node_list"):
         assert key not in jobs[0]
 
