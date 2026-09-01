@@ -272,7 +272,7 @@
       <div class="results-content">
         <div class="card" id="userJobsCard">
           <h2 id="userJobsTitle">Jobs</h2>
-          <div class="table-scroll">
+          <div class="table-scroll compact">
             <table id="userJobsTable">
               <thead><tr>
                 <th data-k="jobid">Job</th><th data-k="name">Name</th>
@@ -372,7 +372,7 @@
     <dd>Utilization-weighted GPU-hours: mean utilization &times; GPU time.
       Ranks users by how much they actually used, not how much they were
       allocated. Not the same figure as a job's effective GPU-hours below.</dd>
-    <dt id="glossary-gpu-hours-eff">Eff. GPU-hours (a user's jobs)</dt>
+    <dt id="glossary-gpu-hours-eff">Effective GPU-hours (a user's jobs)</dt>
     <dd>Effective GPU-hours: allocated GPU-hours (gpus &times; elapsed time)
       &times; mean utilization, once sacct/scontrol metadata resolves the
       allocation. Before that resolves, a Prometheus-only estimate is shown
