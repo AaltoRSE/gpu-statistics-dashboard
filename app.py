@@ -5,40 +5,24 @@ sacct / scontrol sources it needs, with short in-memory TTL caches.
 """
 
 import os
-import time
 from collections import defaultdict
 from datetime import datetime, timezone
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, Query
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 import cache
+import deps
 import gpu_groups
-from config import ConfigError, load_config
-from prom import PromClient, PrometheusError
+from prom import PrometheusError
 from promql import label_eq, label_in, selector
-from slurm import SlurmError, expand_node_list, sacct_jobs, show_jobs, show_nodes
+from slurm import SlurmError, expand_node_list
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 STATIC = os.path.join(HERE, "static")
 
 app = FastAPI(title="GPU Efficiency Dashboard")
-
-_prom = None
-_route_cache = cache.TtlCache()
-
-
-def get_prom():
-    global _prom
-    if _prom is None:
-        try:
-            cfg = load_config()
-        except ConfigError as exc:
-            raise HTTPException(503, str(exc)) from exc
-        _prom = PromClient(
-            cfg["api_base"], cfg["username"], cfg["password"], cfg["timeout"])
-    return _prom
 
 
 def _step_for_range(seconds):
@@ -70,7 +54,7 @@ def _series_payload(series_list):
 
 
 def _job_window(since_hours, now=None):
-    now = now or int(time.time())
+    now = now or int(deps.now())
     return now - int(since_hours * 3600), now
 
 
@@ -85,7 +69,7 @@ def _running_gpu_job_ids():
     A live series is the shared definition of "running" for both the Jobs
     and Partitions running-only controls; it avoids an unbounded sacct scan.
     """
-    series = get_prom().query_instant(
+    series = deps.get_prom().query_instant(
         "count by (slurmjobid) (slurm_job_utilization_gpu)")
     return {s["metric"]["slurmjobid"] for s in series
             if s["metric"].get("slurmjobid")}
@@ -111,14 +95,14 @@ def _fetch_job_window(since_hours, include_vram=True, user=None):
     sel = selector(label_eq("user", user)) if user else ""
 
     def fetch():
-        util = get_prom().query_range(
+        util = deps.get_prom().query_range(
             "max by (slurmjobid, instance, job, user, gpu_type) "
             "(slurm_job_utilization_gpu%s)" % sel,
             start, now, step,
         )
         vram = []
         if include_vram:
-            vram = get_prom().query_range(
+            vram = deps.get_prom().query_range(
                 "avg by (slurmjobid, instance, gpu) (slurm_job_memory_usage_gpu / "
                 "slurm_job_memory_total_gpu * 100)",
                 start, now, step,
@@ -126,7 +110,7 @@ def _fetch_job_window(since_hours, include_vram=True, user=None):
         return util, vram, start, now, step
 
     key = cache.job_window_key(since_hours, include_vram, user)
-    util, vram, start, now, step = _route_cache.get_or_set(key, 60, fetch)
+    util, vram, start, now, step = deps.route_cache.get_or_set(key, 60, fetch)
 
     vram_by_job = defaultdict(list)
     for s in vram:
@@ -305,13 +289,14 @@ def _enrich(jobs):
     # Explicit job IDs bound the sacct request, so no visible-window -S
     # date is passed: jobs that started before the chart window still get
     # their name, state, start, and GPU allocation.
-    meta = _route_cache.get_or_set(cache.sacct_key(ids), 300,
-                                    lambda: sacct_jobs(ids))
+    meta = deps.route_cache.get_or_set(
+        cache.sacct_key(ids), 300, lambda: deps.sacct_jobs(ids))
     # Active-job snapshot for array parents: scontrol only knows jobs the
     # controller still holds, so a miss (or a failed call) falls back to
     # the sacct rows above.
     try:
-        active = _route_cache.get_or_set(cache.scontrol_jobs_key(), 30, show_jobs)
+        active = deps.route_cache.get_or_set(
+            cache.scontrol_jobs_key(), 30, deps.show_jobs)
     except SlurmError:
         active = {}
     for job in jobs:
@@ -343,7 +328,7 @@ def index():
 def health():
     return {
         "ok": True,
-        "prometheus": get_prom().api_base,
+        "prometheus": deps.get_prom().api_base,
         "time": datetime.now(timezone.utc).isoformat(),
     }
 
@@ -396,8 +381,9 @@ def api_jobs(
         # Forced refresh bypasses both the app's 60-second window cache
         # and the Prometheus client's 20/60 s response cache instead of
         # redrawing the same data; it also forces a fresh live-ID query.
-        get_prom().clear_cache()
-        _route_cache.invalidate(cache.job_window_key(since_hours, True, user or None))
+        deps.get_prom().clear_cache()
+        deps.route_cache.invalidate(
+            cache.job_window_key(since_hours, True, user or None))
     if running_only:
         # Live-ID check first: with no running GPU jobs we must not issue
         # the broad window range query at all.
@@ -412,7 +398,7 @@ def api_jobs(
     # scan the whole window for everyone else's jobs.
     jobs, start, now, _ = _fetch_job_window(since_hours, user=user or None)
     node_types = gpu_groups.build_node_index(
-        _route_cache.get_or_set(cache.scontrol_nodes_key(), 30, show_nodes))
+        deps.route_cache.get_or_set(cache.scontrol_nodes_key(), 30, deps.show_nodes))
     for j in jobs:
         j["gpu_group"] = gpu_groups.job_gpu_group(j, node_types)
     if running_only:
@@ -521,7 +507,7 @@ def api_users(since_hours: float = Query(24, gt=0, le=168)):
 def api_job_detail(jobid: str, since_hours: float = Query(24, gt=0, le=168)):
     start, now = _job_window(since_hours)
     step = _step_for_range(now - start)
-    prom = get_prom()
+    prom = deps.get_prom()
 
     sel = selector(label_eq("slurmjobid", jobid))
 
@@ -538,7 +524,7 @@ def api_job_detail(jobid: str, since_hours: float = Query(24, gt=0, le=168)):
         )
         return util, vram
 
-    util, vram = _route_cache.get_or_set(
+    util, vram = deps.route_cache.get_or_set(
         cache.job_detail_key(jobid, since_hours), 60, fetch)
     series = {
         "utilization": _series_payload(util),
@@ -546,10 +532,11 @@ def api_job_detail(jobid: str, since_hours: float = Query(24, gt=0, le=168)):
     }
     observed = sorted({s["metric"].get("instance", "") for s in util
                        if s["metric"].get("instance")})
-    sacct_meta = _route_cache.get_or_set(
-        cache.sacct_key([jobid]), 300, lambda: sacct_jobs([jobid]))
+    sacct_meta = deps.route_cache.get_or_set(
+        cache.sacct_key([jobid]), 300, lambda: deps.sacct_jobs([jobid]))
     try:
-        active = _route_cache.get_or_set(cache.scontrol_jobs_key(), 30, show_jobs)
+        active = deps.route_cache.get_or_set(
+            cache.scontrol_jobs_key(), 30, deps.show_jobs)
     except SlurmError:
         active = {}
     meta = (_resolve_scontrol_metadata(jobid, observed, active)
@@ -584,25 +571,25 @@ def _partition_window(since_hours, running_only=False, now=None,
         sel = selector(label_in("slurmjobid", live))
 
     def fetch():
-        stats = get_prom().query_range(
+        stats = deps.get_prom().query_range(
             "max by (slurmjobid, instance, job, gpu_type) "
             "(slurm_job_utilization_gpu%s)" % sel,
             start, now, step,
         )
-        trend = get_prom().query_range(
+        trend = deps.get_prom().query_range(
             "avg by (job, gpu_type) (slurm_job_utilization_gpu%s)" % sel,
             start, now, step,
         )
         # Concurrent allocated GPUs per group, for the window-average
         # occupancy chart (same selector so running-only matches here too).
-        occ = get_prom().query_range(
+        occ = deps.get_prom().query_range(
             "count by (job, gpu_type) (slurm_job_utilization_gpu%s)" % sel,
             start, now, step,
         )
         return stats, trend, occ, start, now, step
 
     key = cache.partition_window_key(since_hours, running_only)
-    stats, trend, occ, start, now, step = _route_cache.get_or_set(key, 60, fetch)
+    stats, trend, occ, start, now, step = deps.route_cache.get_or_set(key, 60, fetch)
     # One canonical group name per (job, gpu_type) pair, derived from the
     # summary series' instances so summary, trend, and occupancy agree.
     aliases = gpu_groups.pair_aliases(stats, node_gpu_types)
@@ -710,7 +697,7 @@ def _gpu_capacity(groups, instances, nodes, allocs):
 @app.get("/api/partitions")
 def api_partitions(since_hours: float = Query(24, gt=0, le=168),
                    running_only: bool = Query(False)):
-    nodes = _route_cache.get_or_set(cache.scontrol_nodes_key(), 30, show_nodes)
+    nodes = deps.route_cache.get_or_set(cache.scontrol_nodes_key(), 30, deps.show_nodes)
     node_types = gpu_groups.build_node_index(nodes)
     groups, trend, instances, occupancy, start, now, step = _partition_window(
         since_hours, running_only, node_gpu_types=node_types)
@@ -729,13 +716,6 @@ def api_partitions(since_hours: float = Query(24, gt=0, le=168),
         "partitions": groups,
         "trend": trend,
     }
-
-
-# sacct -j over tens of thousands of IDs exceeds the command timeout, so
-# the VRAM chart enriches at most this many jobs (top by effective
-# GPU-hours); the response reports the total candidate count so the UI
-# can disclose the truncation.
-_VRAM_RECORD_CAP = 2000
 
 
 def _vram_job_records(since_hours, running_only=False, partition="",
@@ -770,13 +750,13 @@ def _vram_job_records(since_hours, running_only=False, partition="",
     sel = "" if live is None else selector(label_in("slurmjobid", live))
 
     def fetch():
-        return get_prom().query_range(
+        return deps.get_prom().query_range(
             "max by (slurmjobid, instance, gpu) (slurm_job_memory_usage_gpu%s / "
             "1073741824)" % sel,
             start, now, step,
         )
 
-    vram = _route_cache.get_or_set(
+    vram = deps.route_cache.get_or_set(
         cache.vram_key(since_hours, running_only), 60, fetch)
     # Per-GPU peak VRAM (GB) over the window; a 0 sample means the GPU was
     # never reported with memory and cannot be a peak.
@@ -807,11 +787,11 @@ def _vram_job_records(since_hours, running_only=False, partition="",
     # orders the capped, enriched set for the client.
     records.sort(key=lambda r: r["gpu_hours_eff"], reverse=True)
     total = len(records)
-    records = records[:_VRAM_RECORD_CAP]
+    records = records[:deps.VRAM_RECORD_CAP]
     ids = sorted({r["jobid"] for r in records})
     if ids:
-        meta = _route_cache.get_or_set(
-            cache.sacct_key(ids), 300, lambda: sacct_jobs(ids))
+        meta = deps.route_cache.get_or_set(
+            cache.sacct_key(ids), 300, lambda: deps.sacct_jobs(ids))
         for r in records:
             row = meta.get(r["jobid"]) or {}
             if row.get("gpus") and row.get("elapsed_s"):
@@ -827,7 +807,7 @@ def api_part_vram(since_hours: float = Query(24, gt=0, le=168),
                   partition: str = "",
                   weight: str = Query("alloc", pattern="^(alloc|eff)$")):
     node_types = gpu_groups.build_node_index(
-        _route_cache.get_or_set(cache.scontrol_nodes_key(), 30, show_nodes))
+        deps.route_cache.get_or_set(cache.scontrol_nodes_key(), 30, deps.show_nodes))
     records, total, start, now, step = _vram_job_records(
         since_hours, running_only, partition, node_types, weight)
     return {
@@ -840,7 +820,7 @@ def api_part_vram(since_hours: float = Query(24, gt=0, le=168),
 
 def _node_current(node_gpu_types=None):
     node_gpu_types = node_gpu_types or {}
-    prom = get_prom()
+    prom = deps.get_prom()
 
     def fetch():
         inst_util = prom.query_instant("max by (instance) (slurm_job_utilization_gpu)")
@@ -859,7 +839,7 @@ def _node_current(node_gpu_types=None):
             "count by (instance, job, gpu_type) (slurm_job_utilization_gpu)")
         return inst_util, inst_vram, active, alloc
 
-    inst_util, inst_vram, active, alloc = _route_cache.get_or_set(
+    inst_util, inst_vram, active, alloc = deps.route_cache.get_or_set(
         cache.node_current_key(), 30, fetch)
     cur = {}
     for s in inst_util:
@@ -897,9 +877,10 @@ def api_nodes(gpu_only: bool = True, refresh: bool = Query(False)):
         # Forced refresh bypasses both the dashboard's 30-second
         # scontrol cache and the Prometheus client's response cache
         # (60 s range / 20 s instant) instead of redrawing cached data.
-        get_prom().clear_cache()
-        _route_cache.invalidate(cache.scontrol_nodes_key(), cache.node_current_key())
-    nodes = _route_cache.get_or_set(cache.scontrol_nodes_key(), 30, show_nodes)
+        deps.get_prom().clear_cache()
+        deps.route_cache.invalidate(
+            cache.scontrol_nodes_key(), cache.node_current_key())
+    nodes = deps.route_cache.get_or_set(cache.scontrol_nodes_key(), 30, deps.show_nodes)
     if gpu_only:
         nodes = [n for n in nodes if n["gpus"]]
     try:
@@ -917,7 +898,7 @@ def api_nodes(gpu_only: bool = True, refresh: bool = Query(False)):
             key=lambda j: j["util"], reverse=True,
         )[:10]
     return {
-        "time": int(time.time()),
+        "time": int(deps.now()),
         "count": len(nodes),
         "nodes": nodes,
     }
@@ -935,7 +916,7 @@ def _node_job_start(name, now):
     try:
         live = {
             s["metric"]["slurmjobid"]
-            for s in get_prom().query_instant(
+            for s in deps.get_prom().query_instant(
                 "count by (slurmjobid) (slurm_job_utilization_gpu%s)" % sel
             )
             if s["metric"].get("slurmjobid")
@@ -945,7 +926,7 @@ def _node_job_start(name, now):
     if not live:
         return fallback_start
     try:
-        meta = sacct_jobs(sorted(live))
+        meta = deps.sacct_jobs(sorted(live))
     except SlurmError:
         return fallback_start
     starts = [e for e in (_sacct_epoch((meta.get(j) or {}).get("start"))
@@ -958,13 +939,13 @@ def _node_job_start(name, now):
 @app.get("/api/nodes/{name}")
 def api_node_detail(
         name: str, view: str = Query("job_start", pattern="^(job_start|1|6|24)$")):
-    now = int(time.time())
+    now = int(deps.now())
     if view == "job_start":
         start = _node_job_start(name, now)
     else:
         start = now - int(float(view) * 3600)
     step = _step_for_range(now - start)
-    prom = get_prom()
+    prom = deps.get_prom()
     sel = selector(label_eq("instance", name))
 
     def fetch():
@@ -982,7 +963,7 @@ def api_node_detail(
         )
         return util, vram
 
-    util, vram = _route_cache.get_or_set(
+    util, vram = deps.route_cache.get_or_set(
         cache.node_detail_key(name, view, start), 30, fetch)
     return {
         "node": name,
