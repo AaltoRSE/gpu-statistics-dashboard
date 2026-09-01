@@ -5,7 +5,6 @@ sacct / scontrol sources it needs, with short in-memory TTL caches.
 """
 
 import os
-import re
 import threading
 import time
 from collections import defaultdict
@@ -15,6 +14,7 @@ from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
+import gpu_groups
 from config import ConfigError, load_config
 from prom import PromClient, PrometheusError
 from promql import label_eq, label_in, selector
@@ -118,78 +118,6 @@ def _sacct_epoch(value):
         return datetime.fromisoformat(value).timestamp()
     except (TypeError, ValueError):
         return None
-
-_MIG_GRES_RE = re.compile(r"^(?:[A-Za-z0-9]+_)?\d+[gm]\.\d+[gm]b?$",
-                           re.IGNORECASE)
-
-
-def _is_mig_gres(name):
-    """True when a GRES name is a MIG profile (``h200_3g.71gb``, or the bare
-    Prometheus profile ``3g.70gb``) rather than a whole GPU."""
-    return bool(_MIG_GRES_RE.match(name or ""))
-
-
-def _gpu_group_name(metric, node_gpu_types, aliases=None):
-    """Canonical partition-view group name for one metric series.
-
-    MIG GPUs must never merge into their node's whole-GPU pool: a series
-    observed on a node whose scontrol GRES is a MIG profile belongs to that
-    profile (``h200_3g.71gb``), not the bare family. A profile that cannot
-    be resolved to a node falls back to ``<job>_<gpu_type>`` so it stays
-    separated from whole GPUs; everything else keeps the Prometheus ``job``
-    label (the Slurm partition).
-    """
-    job = metric.get("job", "") or ""
-    gtype = metric.get("gpu_type", "") or ""
-    if aliases is not None:
-        alias = aliases.get((job, gtype))
-        if alias:
-            return alias
-    inst = metric.get("instance", "")
-    if inst:
-        ntype = node_gpu_types.get(inst)
-        if ntype and _is_mig_gres(ntype):
-            return ntype
-    if _is_mig_gres(gtype):
-        return job + "_" + gtype if job else gtype
-    return job or "unknown"
-
-
-def _job_gpu_group(job, node_gpu_types):
-    """Canonical partition-view group for a job from its observed nodes."""
-    mig = set()
-    for name in job.get("nodes") or []:
-        ntype = node_gpu_types.get(name)
-        if ntype and _is_mig_gres(ntype):
-            mig.add(ntype)
-    if not mig and _is_mig_gres(job.get("gpu_type") or ""):
-        mig.add(job["gpu_type"])
-    if not mig:
-        return job.get("partition") or "unknown"
-    if len(mig) == 1:
-        return mig.pop()
-    return (job.get("partition") or "unknown") + "_" + ",".join(sorted(mig))
-
-
-def _node_gpu_group(node):
-    """Canonical partition-view group for one node.
-
-    MIG-gres nodes (``gpu_type=h200_3g.71gb``) always belong to their
-    profile group, even when their ``partitions`` field also lists the
-    whole-GPU partition; everything else uses the first non-empty
-    partition, which is the group the Partitions tab keys on. Nodes
-    without a GPU type (CPU-only) resolve to ``""``.
-    """
-    if not (node.get("gpu_type") or "").strip():
-        return ""
-    if _is_mig_gres(node["gpu_type"]):
-        return node["gpu_type"]
-    for p in (node.get("partitions") or "").split(","):
-        p = p.strip()
-        if p:
-            return p
-    return ""
-
 
 def _fetch_job_window(since_hours, include_vram=True, user=None):
     """Fetch job-level utilization (and optionally vram) series for a window.
@@ -504,9 +432,9 @@ def api_jobs(
     # not applied after the fact: a single-user request must not pull and
     # scan the whole window for everyone else's jobs.
     jobs, start, now, _ = _fetch_job_window(since_hours, user=user or None)
-    node_types = _gpu_type_by_node(_cached("scontrol_nodes", 30, show_nodes))
+    node_types = gpu_groups.build_node_index(_cached("scontrol_nodes", 30, show_nodes))
     for j in jobs:
-        j["gpu_group"] = _job_gpu_group(j, node_types)
+        j["gpu_group"] = gpu_groups.job_gpu_group(j, node_types)
     if running_only:
         jobs = [j for j in jobs if j["jobid"] in live]
     if partition:
@@ -652,11 +580,6 @@ def api_job_detail(jobid: str, since_hours: float = Query(24, gt=0, le=168)):
             "metadata": meta, "series": series}
 
 
-def _gpu_type_by_node(nodes):
-    """``{node name: scontrol gpu_type}`` for the partition analytics."""
-    return {n["name"]: n.get("gpu_type") or "" for n in nodes}
-
-
 def _partition_window(since_hours, running_only=False, now=None,
                       node_gpu_types=None):
     """Slurm-partition utilization window.
@@ -700,25 +623,10 @@ def _partition_window(since_hours, running_only=False, now=None,
     stats, trend, occ, start, now, step = _cached(key, 60, fetch)
     # One canonical group name per (job, gpu_type) pair, derived from the
     # summary series' instances so summary, trend, and occupancy agree.
-    pairs = {(m.get("job", ""), m.get("gpu_type", "")) for m in
-             (s["metric"] for s in stats)}
-    aliases = {}
-    for job, gtype in pairs:
-        mig = {
-            node_gpu_types.get(s["metric"].get("instance", ""))
-            for s in stats
-            if s["metric"].get("job", "") == job
-            and s["metric"].get("gpu_type", "") == gtype
-            and (node_gpu_types.get(s["metric"].get("instance", "")) or "")
-            and _is_mig_gres(node_gpu_types.get(s["metric"].get("instance", "")))
-        }
-        aliases[(job, gtype)] = (mig.pop() if len(mig) == 1
-                                 else _gpu_group_name(
-                                     {"job": job, "gpu_type": gtype},
-                                     node_gpu_types))
+    aliases = gpu_groups.pair_aliases(stats, node_gpu_types)
     out = aggregate_partition_stats(stats, node_gpu_types, aliases)
     trend_out = {
-        _gpu_group_name(s["metric"], node_gpu_types, aliases):
+        gpu_groups.gpu_group_name(s["metric"], node_gpu_types, aliases):
         _series_values(s)
         for s in trend
     }
@@ -727,7 +635,7 @@ def _partition_window(since_hours, running_only=False, now=None,
     for s in occ:
         values = _series_values(s)
         if values:
-            name = _gpu_group_name(s["metric"], node_gpu_types, aliases)
+            name = gpu_groups.gpu_group_name(s["metric"], node_gpu_types, aliases)
             occupancy[name] = sum(v for _, v in values) / len(values)
     # Observed instances per group, for the capacity join in api_partitions.
     instances = {}
@@ -735,7 +643,7 @@ def _partition_window(since_hours, running_only=False, now=None,
         m = s["metric"]
         inst = m.get("instance", "")
         if inst:
-            name = _gpu_group_name(m, node_gpu_types, aliases)
+            name = gpu_groups.gpu_group_name(m, node_gpu_types, aliases)
             instances.setdefault(name, set()).add(inst)
     return out, trend_out, instances, occupancy, start, now, step
 
@@ -752,7 +660,7 @@ def aggregate_partition_stats(stats, node_gpu_types=None, aliases=None):
     parts = {}
     for s in stats:
         m = s["metric"]
-        name = _gpu_group_name(m, node_gpu_types, aliases)
+        name = gpu_groups.gpu_group_name(m, node_gpu_types, aliases)
         values = _series_values(s)
         if not values:
             continue
@@ -801,7 +709,7 @@ def _gpu_capacity(groups, instances, nodes, allocs):
         ]
         by_partition = [
             n for n in nodes
-            if (n["gpus"] and not _is_mig_gres(n.get("gpu_type"))
+            if (n["gpus"] and not gpu_groups.is_mig_gres(n.get("gpu_type"))
                 and g["name"] in (n["partitions"] or "").split(","))
         ]
         if by_type:
@@ -821,7 +729,7 @@ def _gpu_capacity(groups, instances, nodes, allocs):
 def api_partitions(since_hours: float = Query(24, gt=0, le=168),
                    running_only: bool = Query(False)):
     nodes = _cached("scontrol_nodes", 30, show_nodes)
-    node_types = _gpu_type_by_node(nodes)
+    node_types = gpu_groups.build_node_index(nodes)
     groups, trend, instances, occupancy, start, now, step = _partition_window(
         since_hours, running_only, node_gpu_types=node_types)
     _, _, allocs_by_node, allocs_by_group = _node_current(node_types)
@@ -872,7 +780,7 @@ def _vram_job_records(since_hours, running_only=False, partition="",
             return [], 0, start, now, step
     jobs, start, now, step = _fetch_job_window(since_hours, include_vram=False)
     for j in jobs:
-        j["gpu_group"] = _job_gpu_group(j, node_gpu_types)
+        j["gpu_group"] = gpu_groups.job_gpu_group(j, node_gpu_types)
     if live is not None:
         jobs = [j for j in jobs if j["jobid"] in live]
     if partition:
@@ -934,7 +842,7 @@ def api_part_vram(since_hours: float = Query(24, gt=0, le=168),
                   running_only: bool = Query(False),
                   partition: str = "",
                   weight: str = Query("alloc", pattern="^(alloc|eff)$")):
-    node_types = _gpu_type_by_node(_cached("scontrol_nodes", 30, show_nodes))
+    node_types = gpu_groups.build_node_index(_cached("scontrol_nodes", 30, show_nodes))
     records, total, start, now, step = _vram_job_records(
         since_hours, running_only, partition, node_types, weight)
     return {
@@ -992,7 +900,7 @@ def _node_current(node_gpu_types=None):
             continue
         count = int(float(s["value"][1]))
         allocs_by_node[inst] = allocs_by_node.get(inst, 0) + count
-        group = _gpu_group_name(m, node_gpu_types)
+        group = gpu_groups.gpu_group_name(m, node_gpu_types)
         allocs_by_group[group] = allocs_by_group.get(group, 0) + count
     return cur, jobs_by_node, allocs_by_node, allocs_by_group
 
@@ -1013,7 +921,7 @@ def api_nodes(gpu_only: bool = True, refresh: bool = Query(False)):
     except PrometheusError:
         cur, jobs_by_node, allocs, _ = {}, {}, {}, {}
     for n in nodes:
-        n["gpu_group"] = _node_gpu_group(n)
+        n["gpu_group"] = gpu_groups.node_gpu_group(n)
         c = cur.get(n["name"], {})
         n["current_util"] = c.get("util")
         n["current_vram"] = c.get("vram")
