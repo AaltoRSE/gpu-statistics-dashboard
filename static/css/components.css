@@ -57,9 +57,18 @@ th { text-align:left; color:var(--dim); font-weight:600; font-size:11px; text-tr
    end up shorter than the cell and leave an unclickable strip above or
    below it depending on how tall the row's other headers are. */
 th[data-k] { cursor:pointer; padding:0; position:relative; }
-th[data-k] button { all:unset; box-sizing:border-box; cursor:pointer;
+th[data-k] > button:not(.glossary-btn) { all:unset; box-sizing:border-box; cursor:pointer;
   position:absolute; inset:0; padding:6px 8px; font:inherit; color:inherit;
   text-align:inherit; white-space:inherit; }
+/* Sits in the corner, above the sort button beneath it (later in DOM
+   order, so it paints on top at the same default stacking level without
+   needing an explicit z-index) and independently clickable there. */
+.glossary-btn { all:unset; position:absolute; top:2px; right:2px; width:14px; height:14px;
+  box-sizing:border-box; display:flex; align-items:center; justify-content:center;
+  font-size:9px; font-weight:700; line-height:1; color:var(--dim); background:var(--panel2);
+  border:1px solid var(--line); border-radius:50%; cursor:help; }
+.glossary-btn:hover, .glossary-btn:focus-visible { color:var(--acc); border-color:var(--acc); }
+h2 .glossary-btn { position:static; display:inline-flex; margin-left:4px; }
 th.num, td.num { text-align:right; font-family: "SFMono-Regular", Consolas, monospace; }
 td { padding:5px 8px; border-bottom:1px solid var(--line); white-space:nowrap; }
 tr.row { cursor:pointer; }
@@ -173,3 +182,15 @@ header .auto-refresh select { background:var(--panel2); color:var(--text); borde
 .eff-controls label { font-size:11px; cursor:pointer; }
 .eff-controls a { color:var(--acc); font-size:11px; text-decoration:none; white-space:nowrap; }
 .eff-controls a:hover { text-decoration:underline; }
+
+/* metric glossary (T-23) */
+.glossary-dialog { background:var(--panel); color:var(--text); border:1px solid var(--line);
+  border-radius:10px; padding:18px 20px; max-width:520px; width:90vw; max-height:80vh;
+  overflow-y:auto; }
+.glossary-dialog::backdrop { background:rgba(0,0,0,.5); }
+.glossary-dialog h2 { margin:0 0 12px; font-size:16px; }
+.glossary-dialog dt { font-weight:700; margin-top:14px; color:var(--text); }
+.glossary-dialog dt:first-of-type { margin-top:0; }
+.glossary-dialog dd { margin:4px 0 0; color:var(--dim); font-size:13px; line-height:1.5; }
+.glossary-dialog #glossaryClose { margin-top:18px; background:var(--panel2); color:var(--text);
+  border:1px solid var(--line); border-radius:6px; padding:6px 14px; cursor:pointer; font-size:12px; }

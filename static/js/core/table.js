@@ -95,12 +95,19 @@ export function createTable({ el, columns, defaultSort, renderRow, onRowClick, e
   // screen-reader-reachable), wired once; every later render only
   // rewrites the tbody.
   el.querySelectorAll("th[data-k]").forEach((th) => {
+    // A header can carry a glossary trigger (core/glossary.js) alongside
+    // its label; detach it before reading textContent (else its own "?"
+    // text ends up folded into the label) and reattach it as the sort
+    // button's sibling once the button exists.
+    const glossaryBtn = th.querySelector(".glossary-btn");
+    if (glossaryBtn) glossaryBtn.remove();
     const label = th.textContent;
     th.textContent = "";
     const btn = document.createElement("button");
     btn.type = "button";
     btn.textContent = label;
     th.appendChild(btn);
+    if (glossaryBtn) th.appendChild(glossaryBtn);
     btn.addEventListener("click", () => {
       const k = th.dataset.k;
       sort = k === sort.key

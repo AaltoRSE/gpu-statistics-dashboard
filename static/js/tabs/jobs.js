@@ -11,8 +11,8 @@
 
 import { $, debounce, isPlainClick } from "../core/dom.js";
 import {
-  fmt, fmtInt, pctBar, escapeHtml, html, raw, tsToDate, stateBadge, compareStrings,
-  userLink, nodeLinks, partitionLink,
+  fmt, fmtInt, pctBar, escapeHtml, html, raw, tsToDate, fmtSacctTime, stateBadge,
+  compareStrings, userLink, nodeLinks, partitionLink,
 } from "../core/format.js";
 import { setResultsLoading, showPanelError, panelOk } from "../core/panel.js";
 import { renderPlot, plotTheme, partBarColor } from "../core/plot.js";
@@ -88,7 +88,7 @@ export async function loadJobs(force = false) {
     $("jMetaCount").textContent = data.count + " jobs";
     $("jMeta").textContent = $("jRunning").checked
       ? "live jobs · instantaneous"
-      : tsToDate(w.start) + " → " + tsToDate(w.end) + " UTC";
+      : tsToDate(w.start) + " → " + tsToDate(w.end);
     renderJobEfficiency();
     renderJobsView();
     loaded.jobs = true;
@@ -126,7 +126,7 @@ export function renderJobsView() {
 function jobRowHtml(j) {
   const jobid = j.jobid;
   const rawName = j.name || "";
-  const start = (j.start || "").slice(0, 16);
+  const start = fmtSacctTime(j.start);
   const gpus = j.gpus !== undefined ? j.gpus : "—";
   return html`
     <tr class="row" data-job="${jobid}">
@@ -426,8 +426,8 @@ export function renderJobDetail(data) {
   if (m.partition) metaBits.push("partition " + m.partition);
   if (m.node_list) metaBits.push("nodes " + m.node_list);
   if (m.gpus) metaBits.push(m.gpus + "× " + (m.gpu_type || "gpu"));
-  if (m.start) metaBits.push("start " + m.start);
-  if (m.end) metaBits.push("end " + m.end);
+  if (m.start) metaBits.push("start " + fmtSacctTime(m.start));
+  if (m.end) metaBits.push("end " + fmtSacctTime(m.end));
   $("jobDetailMeta").textContent = metaBits.join(" · ");
   // No known origin (deep link / direct open): offer the job's partition as
   // a useful next investigation step, but only once metadata has loaded.

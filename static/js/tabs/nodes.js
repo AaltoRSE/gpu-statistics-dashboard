@@ -37,7 +37,7 @@ export async function loadNodes(force = false) {
       timeZone: "Europe/Helsinki", hour: "2-digit", minute: "2-digit",
       hour12: false, timeZoneName: "short",
     }).format(data.time * 1000);
-    $("nMeta").textContent = data.count + " GPU nodes · snapshot " + t + " (Europe/Helsinki)";
+    $("nMeta").textContent = data.count + " GPU nodes · snapshot " + t;
     fill("nGpuType", [...new Set(nodeRows.map((n) => n.gpu_type).filter(Boolean))].sort());
     renderNodeTable();
     loaded.nodes = true;

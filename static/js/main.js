@@ -9,6 +9,7 @@ import { escapeHtml } from "./core/format.js";
 import { api } from "./core/api.js";
 import { errBox, initAutoRefresh } from "./core/panel.js";
 import { initTheme } from "./core/theme.js";
+import { initGlossary } from "./core/glossary.js";
 import {
   showTab, setUrl, restoreFromUrl, rerenderAllPlots, clearPartitionSelection,
   refreshActiveTab,
@@ -33,6 +34,7 @@ async function checkHealth() {
 
 initTheme(rerenderAllPlots);
 initAutoRefresh(refreshActiveTab);
+initGlossary();
 
 window.addEventListener("popstate", restoreFromUrl);
 document.querySelectorAll("nav.tabs button").forEach((b) =>
