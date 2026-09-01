@@ -373,8 +373,9 @@ async function loadJobs(force = false) {
       .some((option) => option.value === selectedPartition) ? selectedPartition : "";
     const w = data.window;
     $("jMetaCount").textContent = data.count + " jobs";
-    $("jMeta").textContent =
-      tsToDate(w.start) + " → " + tsToDate(w.end) + " UTC";
+    $("jMeta").textContent = $("jRunning").checked
+      ? "live jobs · instantaneous"
+      : tsToDate(w.start) + " → " + tsToDate(w.end) + " UTC";
     renderJobEfficiency();
     renderJobsView();
     loaded.jobs = true;
@@ -1086,7 +1087,9 @@ async function loadPartitions() {
   partRows = data.partitions;
   const w = data.window;
   $("pCount").textContent = data.partitions.length + " partitions · " +
-    tsToDate(w.start) + " → " + tsToDate(w.end) + " UTC";
+    ($("pRunning").checked
+      ? "live jobs · instantaneous"
+      : tsToDate(w.start) + " → " + tsToDate(w.end) + " UTC");
   renderPartBar();
   renderPartOccupancy();
   partTrendData = data.trend;
