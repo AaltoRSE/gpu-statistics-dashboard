@@ -2,6 +2,16 @@
  * visibility, the responsive breakpoints, and the grid/card containers
  * everything else sits inside. */
 * { box-sizing: border-box; }
+
+/* T-25: every interactive element gets a visible keyboard-focus ring. A
+   couple of buttons (core/table.js's sortable-header button, the
+   glossary "?") reset all their own styling with all:unset, which also
+   strips the browser's default outline — this is re-asserted per element
+   below rather than relying on the catch-all alone, since a plain
+   :focus-visible rule and an all:unset rule can otherwise land at the
+   same specificity and the source order between two different files
+   would decide the winner by accident. */
+:focus-visible { outline: 2px solid var(--acc); outline-offset: 2px; }
 body { margin:0; font-family: -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
        background: var(--bg); color: var(--text); }
 header { padding: 14px 22px; border-bottom: 1px solid var(--line); display:flex; align-items:baseline; gap:16px; }

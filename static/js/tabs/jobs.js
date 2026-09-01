@@ -130,7 +130,7 @@ function jobRowHtml(j) {
   const gpus = j.gpus !== undefined ? j.gpus : "—";
   return html`
     <tr class="row" data-job="${jobid}">
-      <td>${jobid}</td><td title="${rawName}">${rawName.slice(0, 40)}</td>
+      <td>${jobid}</td><td class="name-cell" title="${rawName}">${rawName}</td>
       <td>${raw(userLink(j.user))}</td><td>${raw(partitionLink(j.gpu_group || j.partition))}</td>
       <td>${raw(nodeLinks(j.nodes))}</td>
       <td>${raw(stateBadge(j.state))}</td><td>${start}</td>
