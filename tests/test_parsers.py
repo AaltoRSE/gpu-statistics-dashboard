@@ -183,14 +183,15 @@ PartitionName=interactive
 
 def test_parse_sacct_row():
     row = _parse_sacct_row(
-        "19807768|train.sh|gomeze1|aalto_users|gpu-v100-32g|RUNNING"
+        "19807768|19807768|train.sh|gomeze1|aalto_users|gpu-v100-32g|RUNNING"
         "|2026-08-25T14:32:59|Unknown|3-03:59:44"
         "|billing=64,cpu=8,gres/gpu:v100=2|gpu3|8".split("|")
     )
     assert row["JobID"] == "19807768"
+    assert row["JobIDRaw"] == "19807768"
     assert row["User"] == "gomeze1"
     assert row["AllocTRES"] == "billing=64,cpu=8,gres/gpu:v100=2"
-    assert len(SACCT_FIELDS) == 12
+    assert len(SACCT_FIELDS) == 13
 
 
 def test_read_jobgraph_conf_bare(tmp_path):
@@ -234,6 +235,45 @@ def test_sacct_batch_no_start_iso_omits_flag(monkeypatch):
     slurm._sacct_batch(["7"], start_iso="2020-01-01")
     assert "-S" in cmds["cmd"]
     assert cmds["cmd"][cmds["cmd"].index("-S") + 1] == "2020-01-01"
+
+
+def test_sacct_batch_indexes_array_task_by_raw_id_too(monkeypatch):
+    # A GPU-utilization series' slurmjobid label (and thus a caller's -j
+    # lookup) is the raw numeric JobIDRaw, not sacct's own
+    # "ArrayJobID_ArrayTaskID" notation for an array task: task 47 of array
+    # 20001465 has JobID "20001465_47" but JobIDRaw "20008872" — sacct -j
+    # 20008872 finds this exact row internally, but our own result dict
+    # must be keyed so a caller who looked it up *by* "20008872" (the only
+    # string they had) can find it, not just by "20001465_47".
+    import slurm
+
+    def fake_run(cmd, timeout=30):
+        return "\n".join([
+            "20001465_47|20008872|job_loop.sh|olkkonj1|aalto_users|"
+            "gpu-v100-32g|COMPLETED|2026-08-31T11:43:55|2026-09-01T02:50:54|"
+            "15:06:59|gres/gpu:v100=1|gpu5|2",
+            # Step rows carry the same JobIDRaw split with a dot suffix —
+            # must still be filtered out, not indexed under a bogus key.
+            "20001465_47.batch|20008872.batch|batch|||||||||1",
+        ])
+
+    monkeypatch.setattr(slurm, "_run", fake_run)
+    jobs = slurm._sacct_batch(["20008872"])
+    assert set(jobs) == {"20001465_47", "20008872"}
+    assert jobs["20008872"] is jobs["20001465_47"]
+    assert jobs["20008872"]["User"] == "olkkonj1"
+
+
+def test_sacct_batch_non_array_job_id_equals_raw_no_duplicate_key(monkeypatch):
+    import slurm
+
+    def fake_run(cmd, timeout=30):
+        return ("20015894|20015894|train.sh|alice|acc|gpu-h100|RUNNING|"
+                "2026-08-30T10:00:00|Unknown|01:00:00|gres/gpu:h100=1|gpu1|8")
+
+    monkeypatch.setattr(slurm, "_run", fake_run)
+    jobs = slurm._sacct_batch(["20015894"])
+    assert set(jobs) == {"20015894"}
 
 
 def test_sacct_jobs_default_no_date(monkeypatch):

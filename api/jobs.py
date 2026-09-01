@@ -10,11 +10,17 @@ from domain.common import (
     job_window,
     running_gpu_job_ids,
     series_payload,
+    series_values,
     step_for_range,
     window,
 )
 from domain.jobs import efficiency_histogram, fetch_job_window
-from domain.metadata import enrich, resolve_sacct_metadata, resolve_scontrol_metadata
+from domain.metadata import (
+    apply_metadata,
+    enrich,
+    resolve_sacct_metadata,
+    resolve_scontrol_metadata,
+)
 from promql import label_eq, selector
 from slurm import SlurmError
 
@@ -145,5 +151,24 @@ def api_job_detail(jobid: str, since_hours: float = Query(24, gt=0, le=168)):
         # Copy so the cached sacct row is not mutated; the human-readable
         # start/end strings are preserved as-is.
         meta = dict(meta)
+    # Summary-row figures (PLAN-2): mean utilization is a plain time
+    # average over every matched GPU series in this window; gpu_hours_eff
+    # starts as the same Prometheus-only estimate fetch_job_window uses,
+    # then apply_metadata below overwrites it with the allocation-based
+    # figure (and sets gpu_hours_alloc) once metadata resolves — the same
+    # override the Jobs-list endpoint applies, reused here rather than
+    # duplicated.
+    all_values = [v for s in util for _, v in series_values(s)]
+    mean_util = round(sum(all_values) / len(all_values), 2) if all_values else 0.0
+    summary = {
+        "mean_util": mean_util,
+        "gpu_hours_eff": round(sum(all_values) * step / 3600.0 / 100.0, 2),
+    }
+    if meta:
+        apply_metadata(summary, meta)
     return {"jobid": jobid, "window": window(start, now), "step": step,
-            "metadata": meta, "series": series}
+            "metadata": meta, "series": series,
+            "mean_util": summary["mean_util"],
+            "gpu_hours_eff": summary["gpu_hours_eff"],
+            "gpu_hours_alloc": summary.get("gpu_hours_alloc"),
+            "elapsed_s": (meta or {}).get("elapsed_s") or None}

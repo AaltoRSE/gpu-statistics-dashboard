@@ -474,6 +474,30 @@ def test_job_detail_200_with_human_readable_meta(client):
     assert "end_epoch" not in meta
 
 
+def test_job_detail_summary_row_fields(client):
+    # PLAN-2: the summary row above the trend chart needs mean utilization,
+    # GPU-hours, and elapsed time computed for the single job in view, not
+    # taken from the (separate) Jobs-list fetch.
+    data = client.get("/api/jobs/1", params={"since_hours": 24}).json()
+    assert data["mean_util"] == 50.0  # mean of job 1's util series (40, 60)
+    assert data["gpu_hours_alloc"] == 2.0  # 2 gpus x 1h elapsed
+    assert data["gpu_hours_eff"] == 1.0  # 2.0 alloc x 50% mean_util
+    assert data["elapsed_s"] == 3600
+
+
+def test_job_detail_summary_fields_null_without_metadata(
+        client, fake_prom, monkeypatch):
+    # No sacct/scontrol record resolves for this ID: mean_util still comes
+    # from the series alone, but the allocation-based fields have nothing
+    # to compute from.
+    monkeypatch.setattr(deps, "sacct_jobs", lambda ids, start_iso=None, **kw: {})
+    data = client.get("/api/jobs/1", params={"since_hours": 24}).json()
+    assert data["metadata"] is None
+    assert data["mean_util"] == 50.0
+    assert data["gpu_hours_alloc"] is None
+    assert data["elapsed_s"] is None
+
+
 def test_job_detail_end_human_readable(client):
     meta = client.get("/api/jobs/2", params={"since_hours": 24}).json()["metadata"]
     assert meta["end"] == JOB2_END

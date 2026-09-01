@@ -1,5 +1,9 @@
 {
+  "elapsed_s": 3600,
+  "gpu_hours_alloc": 2.0,
+  "gpu_hours_eff": 1.0,
   "jobid": "1",
+  "mean_util": 50.0,
   "metadata": {
     "account": "acc",
     "elapsed_s": 3600,

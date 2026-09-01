@@ -12,6 +12,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 SACCT_FIELDS = [
     "JobID",
+    "JobIDRaw",
     "JobName",
     "User",
     "Account",
@@ -347,6 +348,17 @@ def _sacct_batch(job_ids, start_iso=None):
             continue  # step/array rows
         if jobid not in jobs:
             jobs[jobid] = row
+        # A GPU-utilization series' slurmjobid label is the raw numeric
+        # JobIDRaw, not sacct's own "ArrayJobID_ArrayTaskID" notation for
+        # an array task (e.g. task 47 of array 20001465 has JobID
+        # "20001465_47" but JobIDRaw "20008872" — the string Prometheus
+        # and a caller's -j lookup both actually use). Index by both so a
+        # raw-ID lookup resolves to the same row as the notation lookup;
+        # a raw numeric string can never collide with a "_"-joined
+        # notation key, so this never overwrites an unrelated job.
+        raw = row.get("JobIDRaw")
+        if raw and raw != jobid and raw not in jobs:
+            jobs[raw] = row
     return jobs
 
 

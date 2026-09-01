@@ -125,6 +125,24 @@ class JobDetailResponse(BaseModel):
                     "array_task_id/allocation_seconds from the merge across "
                     "its physical tasks.")
     series: Series
+    mean_util: float = Field(
+        description="Time-weighted mean GPU utilization over the window "
+                    "(%), across every matched GPU series — same figure as "
+                    "Job.mean_util.")
+    gpu_hours_eff: float = Field(
+        description="Effective GPU-hours: allocated GPU-hours x mean "
+                    "utilization once metadata resolves (see "
+                    "gpu_hours_alloc); the Prometheus-only estimate before "
+                    "that — same figure as Job.gpu_hours_eff.")
+    gpu_hours_alloc: Optional[float] = Field(
+        default=None,
+        description="Allocated GPU-hours (gpus x elapsed hours) from "
+                    "metadata; null when metadata didn't resolve.")
+    elapsed_s: Optional[int] = Field(
+        default=None,
+        description="The job's own elapsed running time in seconds, from "
+                    "metadata; null when metadata didn't resolve. Not the "
+                    "query window's length.")
 
 
 # ---- /api/users -------------------------------------------------------
