@@ -56,8 +56,8 @@ class Job(BaseModel):
     mean_util: float = Field(
         description="Time-weighted mean GPU utilization over the window "
                     "(%). Also referred to as a job's \"efficiency\" "
-                    "elsewhere in this API (efficiency_high/efficiency_low "
-                    "below) and in the UI — that is this same field, not a "
+                    "elsewhere in this API (efficiency_histogram below) "
+                    "and in the UI — that is this same field, not a "
                     "separate one.")
     max_util: float
     gpu_hours_eff: float = Field(
@@ -83,6 +83,16 @@ class Job(BaseModel):
                     "value) stays absent as null.")
 
 
+class EfficiencyHistogramBin(BaseModel):
+    bucket_start: int = Field(description="Inclusive lower bound of the "
+                              "mean-utilization bucket (%).")
+    bucket_end: int = Field(description="Exclusive upper bound of the "
+                            "mean-utilization bucket (%).")
+    gpu_hours: float = Field(
+        description="Summed gpu_hours_eff of jobs whose mean_util falls "
+                    "in this bucket.")
+
+
 class JobsResponse(BaseModel):
     window: Window
     count: int
@@ -95,10 +105,12 @@ class JobsResponse(BaseModel):
                     "that it doesn't exist in the window.")
     partitions: List[str]
     jobs: List[Job]
-    efficiency_high: List[Job] = Field(
-        description="The 30 highest average-efficiency jobs, descending.")
-    efficiency_low: List[Job] = Field(
-        description="The 30 lowest average-efficiency jobs, ascending.")
+    efficiency_histogram: List[EfficiencyHistogramBin] = Field(
+        description="GPU-hours consumed by mean-utilization bucket (10%-"
+                    "wide, 0-100), over the same pre-limit candidate set as "
+                    "total_candidates. Shows where capacity is wasted "
+                    "without the ranked highest/lowest lists this replaced "
+                    "going degenerate on a small candidate set.")
 
 
 class JobDetailResponse(BaseModel):

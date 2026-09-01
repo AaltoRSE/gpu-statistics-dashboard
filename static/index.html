@@ -85,21 +85,10 @@
       <div id="jobExplorerBody">
     <div id="jobEfficiencyResults" class="results-panel">
       <div class="results-content">
-        <div class="grid two">
-          <div class="card">
-            <h2 id="jobHighTitle">Highest average efficiency</h2>
-            <div class="row eff-controls">
-              <label class="row"><input type="checkbox" id="effImpact"> rank by effective GPU&ndash;hours</label>
-              <span class="small" id="effCapNote"></span>
-              <button type="button" id="effShowAll">show all 30</button>
-            </div>
-            <div class="chart" id="jobHighBarPlot"></div>
-          </div>
-          <div class="card">
-            <h2 id="jobLowTitle">Lowest average efficiency</h2>
-            <div class="row eff-controls"><span class="small" id="effLowNote"></span></div>
-            <div class="chart" id="jobLowBarPlot"></div>
-          </div>
+        <div class="card">
+          <h2>GPU-hours by utilization</h2>
+          <div class="chart" id="jobEffHistPlot"></div>
+          <div class="hint">where capacity is being wasted, across the current window's candidate jobs</div>
         </div>
         <div class="legend">
           <span class="legend-key" style="background:var(--bad)"></span> &lt;40%

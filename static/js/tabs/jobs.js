@@ -12,7 +12,7 @@
 import { $, debounce, isPlainClick } from "../core/dom.js";
 import {
   fmt, fmtInt, pctBar, escapeHtml, html, raw, tsToDate, fmtSacctTime, stateBadge,
-  compareStrings, userLink, nodeLinks, partitionLink,
+  userLink, nodeLinks, partitionLink,
 } from "../core/format.js";
 import { setResultsLoading, showPanelError, panelOk } from "../core/panel.js";
 import { renderPlot, plotTheme, partBarColor } from "../core/plot.js";
@@ -21,8 +21,7 @@ import { loaded, setUrl, openUser, openNode, openPartition } from "../core/route
 import { createTable } from "../core/table.js";
 
 let jobRows = [];
-let jobBaseHigh = []; // server-calculated highest efficiency set, scoped by search
-let jobBaseLow = [];
+let jobEffHistogram = []; // server-computed GPU-hours-by-utilization-bucket, scoped by search
 let jobVisibleRows = []; // searched rows after the client-side partition filter
 let jobTotalCandidates = 0; // candidates before the "show top N" limit cut
 let jobsToken = 0;
@@ -72,9 +71,8 @@ export async function loadJobs(force = false) {
     panelOk("jobEfficiencyResults");
     jobRows = data.jobs;
     jobTotalCandidates = data.total_candidates || 0;
-    // The server computes highest/lowest efficiency from the searched rows.
-    jobBaseHigh = data.efficiency_high || [];
-    jobBaseLow = data.efficiency_low || [];
+    // The server computes the histogram from the searched rows.
+    jobEffHistogram = data.efficiency_histogram || [];
     // Preserve a compatible local partition selection across a search refresh.
     const selectedPartition = $("jPartition").value;
     $("jPartition").innerHTML =
@@ -217,108 +215,58 @@ const jobTable = createTable({
   emptyMessage: jobsEmptyMessage,
 });
 
-let effImpact = false;   // rank by effective GPU-hours instead of average efficiency
-let effShowAll = false;  // show the full top-30 set instead of the default 10
-
-// One horizontal efficiency bar chart. ``sortKey`` ranks the rows (and
-// ``dir`` chooses which end is "first"); ``barKey`` sets the bar length so
-// color and length encode the same quantity. Efficiency mode keeps them
-// equal (efficiency). Impact mode makes the high chart rank and measure by
-// effective GPU-hours, and reorders the low chart by GPU-hours while its
-// bars still show average efficiency — the cheap-to-fix-inefficiency list
-// then surfaces the jobs that burned the most capacity (no waste metric is
-// available, so we never claim one).
-function renderJobEffChart(elId, jobs, sortKey, barKey, dir) {
-  const val = (j) => j[sortKey] || 0;
-  let rows = jobs.slice().sort((a, b) => {
-    const va = val(a), vb = val(b);
-    return dir === "high" ? (vb - va) || compareStrings(a.jobid, b.jobid)
-                          : (va - vb) || compareStrings(a.jobid, b.jobid);
-  });
-  if (!effShowAll) rows = rows.slice(0, 10);
+// One histogram of GPU-hours by utilization bucket (Phase 1.3): replaces
+// the old twin "highest/lowest average efficiency" ranked-job charts, which
+// degenerated on a small candidate set (a handful of jobs all near 100%
+// left "lowest" empty) and couldn't answer "where is capacity being
+// wasted" directly — only "which jobs", which said nothing about scale.
+// A bucket is never a single job, so there is nothing sensible to click
+// through to a job detail with.
+export function renderJobEfficiency() {
   const th = plotTheme();
-  const isGpuHours = barKey === "gpu_hours_eff";
+  const buckets = jobEffHistogram;
   const layout = {
-    margin: { l: 130, r: 20, t: 10, b: 30 },
+    margin: { l: 60, r: 20, t: 10, b: 40 },
     paper_bgcolor: "rgba(0,0,0,0)", plot_bgcolor: "rgba(0,0,0,0)",
     font: th.font,
-    xaxis: { title: isGpuHours ? "effective GPU-hours" : "average efficiency %",
-      range: isGpuHours ? undefined : [0, 105], gridcolor: th.grid },
-    yaxis: { autorange: "reversed", gridcolor: th.grid },
-    // Threshold markers (T-27): the 40/75% bands are otherwise only
-    // legible from bar color, which is exactly the red-vs-green
-    // distinction a colorblind operator can't rely on. Only meaningful on
-    // the efficiency-% axis, not the GPU-hours one.
-    shapes: isGpuHours ? [] : [40, 75].map((x) => ({
+    xaxis: {
+      title: "average efficiency %", range: [0, 100], gridcolor: th.grid,
+      tickvals: buckets.map((b) => (b.bucket_start + b.bucket_end) / 2),
+      ticktext: buckets.map((b) => b.bucket_start + "-" + b.bucket_end),
+    },
+    yaxis: { title: "GPU-hours", gridcolor: th.grid, rangemode: "tozero" },
+    // Threshold markers (carried over from T-27): the 40/75% bands are
+    // otherwise only legible from bar color, which is exactly the
+    // red-vs-green distinction a colorblind operator can't rely on.
+    shapes: [40, 75].map((x) => ({
       type: "line", x0: x, x1: x, xref: "x", yref: "paper", y0: 0, y1: 1,
       line: { color: th.grid, width: 1, dash: "dot" },
     })),
   };
-  if (!rows.length) {
-    layout.xaxis.showaxis = false;
-    layout.yaxis.showaxis = false;
+  const totalHours = buckets.reduce((s, b) => s + b.gpu_hours, 0);
+  if (!buckets.length || totalHours === 0) {
     layout.annotations = [{
       text: "No jobs match the current filters", showarrow: false,
       xref: "paper", yref: "paper", x: 0.5, y: 0.5,
       font: { color: th.font.color, size: 12 },
     }];
-    renderPlot(elId, [{ type: "bar" }], layout);
+    renderPlot("jobEffHistPlot", [{ type: "bar" }], layout);
     return;
   }
   const trace = {
-    type: "bar", orientation: "h",
-    y: rows.map((j) => j.jobid + " · " + j.user),
-    x: rows.map((j) => j[barKey] || 0),
-    customdata: rows.map((j) => [j.jobid, j.mean_util, j.gpu_hours_eff || 0,
-      j.gpu_group || j.partition || "", j.gpu_type || ""]),
+    type: "bar",
+    x: buckets.map((b) => (b.bucket_start + b.bucket_end) / 2),
+    y: buckets.map((b) => b.gpu_hours),
+    width: buckets.map((b) => (b.bucket_end - b.bucket_start) * 0.9),
+    customdata: buckets.map((b) => [b.bucket_start, b.bucket_end]),
     marker: {
-      color: rows.map((j) => partBarColor(j.mean_util)),
+      color: buckets.map((b) => partBarColor((b.bucket_start + b.bucket_end) / 2)),
       line: { width: 0 },
     },
-    hovertemplate: (isGpuHours
-      ? "<b>%{y}</b><br>effective GPU-hours: %{x:.1f}<br>average efficiency: %{customdata[1]:.1f}%"
-      : "<b>%{y}</b><br>average efficiency: %{x:.1f}%<br>effective GPU-hours: %{customdata[2]:.1f}") +
-      "<br>partition: %{customdata[3]} · %{customdata[4]}<extra></extra>",
+    hovertemplate: "%{customdata[0]}-%{customdata[1]}%<br>" +
+      "GPU-hours: %{y:.1f}<extra></extra>",
   };
-  renderPlot(elId, [trace], layout).then((g) => {
-    // Plotly.react keeps the graph div across renders: clear stale
-    // handlers before rebinding or one click fires N detail loads.
-    g.removeAllListeners("plotly_click");
-    g.on("plotly_click", (ev) => {
-      const id = ev.points[0].customdata[0];
-      if (id) loadJobDetail(id, { kind: "jobs" });
-    });
-  });
-}
-
-export function renderJobEfficiency() {
-  // High chart: efficiency mode ranks+measures by average efficiency
-  // (mean_util); impact mode ranks+measures by effective GPU-hours consumed.
-  const highSort = effImpact ? "gpu_hours_eff" : "mean_util";
-  const highBar = effImpact ? "gpu_hours_eff" : "mean_util";
-  // Low chart: bars always show average efficiency; impact mode only
-  // reorders it by effective GPU-hours (descending) so the top rows are the
-  // inefficient jobs that consumed the most capacity.
-  const lowSort = effImpact ? "gpu_hours_eff" : "mean_util";
-  const lowDir = effImpact ? "high" : "low";
-  renderJobEffChart("jobHighBarPlot", jobBaseHigh, highSort, highBar, "high");
-  renderJobEffChart("jobLowBarPlot", jobBaseLow, lowSort, "mean_util", lowDir);
-  $("jobHighTitle").textContent = effImpact
-    ? "Highest effective GPU-hours" : "Highest average efficiency";
-  $("jobLowTitle").textContent = effImpact
-    ? "Lowest efficiency · most GPU-hours consumed" : "Lowest average efficiency";
-  $("effShowAll").textContent = effShowAll
-    ? "show top 10" : "show all " + (jobBaseHigh.length || 30);
-  $("effLowNote").textContent = effImpact
-    ? "reordered by effective GPU-hours consumed (bars = average efficiency)" : "";
-  // Under 60 candidates, the backend halves each list instead of the usual
-  // top/bottom 30 so the two charts never share a job (T-27) — say so,
-  // rather than leaving a shorter-than-usual chart unexplained.
-  const capped = jobBaseHigh.length < 30;
-  $("effCapNote").textContent = !capped ? ""
-    : jobBaseHigh.length > 0
-      ? "fewer than 60 candidates — top/bottom " + jobBaseHigh.length + " shown to avoid overlap"
-      : "too few candidates for distinct highest/lowest sets";
+  renderPlot("jobEffHistPlot", [trace], layout);
 }
 
 let jobDetailFrom = null; // { node } when the job was opened from a node's Active jobs
@@ -524,11 +472,3 @@ $("jobDetailBack").addEventListener("click", (e) => {
   // which is the source context.
 });
 $("jobExplorerToggle").addEventListener("click", () => toggleJobExplorer());
-$("effImpact").addEventListener("change", (e) => {
-  effImpact = e.target.checked;
-  renderJobEfficiency();
-});
-$("effShowAll").addEventListener("click", () => {
-  effShowAll = !effShowAll;
-  renderJobEfficiency();
-});

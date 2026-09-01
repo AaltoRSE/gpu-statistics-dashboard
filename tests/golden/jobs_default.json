@@ -1,99 +1,55 @@
 {
   "count": 4,
-  "efficiency_high": [
+  "efficiency_histogram": [
     {
-      "account": "acc",
-      "end": "2026-08-28T00:00:00",
-      "gpu_group": "gpu-h200",
-      "gpu_hours_alloc": 96.0,
-      "gpu_hours_eff": 88.8,
-      "gpu_type": "h200",
-      "gpus": 4,
-      "jobid": "3",
-      "max_util": 95.0,
-      "mean_util": 92.5,
-      "name": "infer.sh",
-      "ncpus": 8,
-      "node_list": "gpu2",
-      "nodes": [
-        "gpu2"
-      ],
-      "partition": "gpu-h200",
-      "start": "2026-08-27T00:00:00",
-      "state": "COMPLETED",
-      "user": "carol",
-      "vram_avg": null
+      "bucket_end": 10,
+      "bucket_start": 0,
+      "gpu_hours": 0.0
     },
     {
-      "account": "acc",
-      "end": null,
-      "gpu_group": "h200_3g.71gb",
-      "gpu_hours_alloc": 1.0,
-      "gpu_hours_eff": 0.85,
-      "gpu_type": "h200_3g.71gb",
-      "gpus": 1,
-      "jobid": "4",
-      "max_util": 90.0,
-      "mean_util": 85.0,
-      "name": "mig.sh",
-      "ncpus": 32,
-      "node_list": "gpu49",
-      "nodes": [
-        "gpu49"
-      ],
-      "partition": "gpu-h200",
-      "start": "2026-08-29T00:00:00",
-      "state": "RUNNING",
-      "user": "dave",
-      "vram_avg": null
-    }
-  ],
-  "efficiency_low": [
-    {
-      "account": "acc",
-      "end": "2026-08-29T02:00:00",
-      "gpu_group": "gpu-h100",
-      "gpu_hours_alloc": 2.0,
-      "gpu_hours_eff": 0.2,
-      "gpu_type": "h100",
-      "gpus": 1,
-      "jobid": "2",
-      "max_util": 10.0,
-      "mean_util": 10.0,
-      "name": "fin.sh",
-      "ncpus": 4,
-      "node_list": "gpu1",
-      "nodes": [
-        "gpu1"
-      ],
-      "partition": "gpu-h100",
-      "start": "2026-08-29T00:00:00",
-      "state": "COMPLETED",
-      "user": "bob",
-      "vram_avg": null
+      "bucket_end": 20,
+      "bucket_start": 10,
+      "gpu_hours": 0.0
     },
     {
-      "account": "acc",
-      "end": null,
-      "gpu_group": "gpu-h100",
-      "gpu_hours_alloc": 2.0,
-      "gpu_hours_eff": 1.0,
-      "gpu_type": "h100",
-      "gpus": 2,
-      "jobid": "1",
-      "max_util": 60.0,
-      "mean_util": 50.0,
-      "name": "train.sh",
-      "ncpus": 8,
-      "node_list": "gpu1",
-      "nodes": [
-        "gpu1"
-      ],
-      "partition": "gpu-h100",
-      "start": "2026-08-28T00:00:00",
-      "state": "RUNNING",
-      "user": "alice",
-      "vram_avg": 11.0
+      "bucket_end": 30,
+      "bucket_start": 20,
+      "gpu_hours": 0.0
+    },
+    {
+      "bucket_end": 40,
+      "bucket_start": 30,
+      "gpu_hours": 0.0
+    },
+    {
+      "bucket_end": 50,
+      "bucket_start": 40,
+      "gpu_hours": 0.0
+    },
+    {
+      "bucket_end": 60,
+      "bucket_start": 50,
+      "gpu_hours": 0.03
+    },
+    {
+      "bucket_end": 70,
+      "bucket_start": 60,
+      "gpu_hours": 0.0
+    },
+    {
+      "bucket_end": 80,
+      "bucket_start": 70,
+      "gpu_hours": 0.0
+    },
+    {
+      "bucket_end": 90,
+      "bucket_start": 80,
+      "gpu_hours": 0.06
+    },
+    {
+      "bucket_end": 100,
+      "bucket_start": 90,
+      "gpu_hours": 0.06
     }
   ],
   "jobs": [

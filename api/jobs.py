@@ -13,7 +13,7 @@ from domain.common import (
     step_for_range,
     window,
 )
-from domain.jobs import efficiency_extremes, fetch_job_window
+from domain.jobs import efficiency_histogram, fetch_job_window
 from domain.metadata import enrich, resolve_sacct_metadata, resolve_scontrol_metadata
 from promql import label_eq, selector
 from slurm import SlurmError
@@ -47,7 +47,7 @@ def api_jobs(
             start, now = job_window(since_hours)
             return {"window": window(start, now), "count": 0,
                     "total_candidates": 0, "partitions": [], "jobs": [],
-                    "efficiency_high": [], "efficiency_low": []}
+                    "efficiency_histogram": efficiency_histogram([])}
     # The user filter is pushed into the Prometheus query (server-side),
     # not applied after the fact: a single-user request must not pull and
     # scan the whole window for everyone else's jobs.
@@ -64,10 +64,10 @@ def api_jobs(
         # PromQL's exact user matcher is case-sensitive; retain the typed
         # label case for the query, then accept capitalization drift here.
         jobs = [j for j in jobs if j["user"].casefold() == user.casefold()]
-    # Efficiency extremes over the full filtered candidate set (before the
-    # table limit and sacct enrichment): the high/low charts must not be
-    # biased by job duration or the bounded table rows.
-    high, low = efficiency_extremes(jobs)
+    # Histogram over the full filtered candidate set (before the table
+    # limit and sacct enrichment): the chart must not be biased by the
+    # bounded table rows.
+    histogram = efficiency_histogram(jobs)
     # The pre-limit candidate count: how many jobs matched partition/user/
     # running_only before the sacct-enrichment cap below. A search that
     # matches nothing can then tell the difference between "no such job in
@@ -87,9 +87,9 @@ def api_jobs(
             j for j in jobs
             if needle in j["jobid"] or needle in (j.get("name") or "").lower()
         ]
-        # Name search matches sacct names, so the charts must show the same
+        # Name search matches sacct names, so the chart must show the same
         # bounded searched rows.
-        high, low = efficiency_extremes(jobs)
+        histogram = efficiency_histogram(jobs)
     partitions = sorted({j["gpu_group"] or j["partition"]
                          for j in jobs
                          if j.get("gpu_group") or j.get("partition")})
@@ -99,8 +99,7 @@ def api_jobs(
         "total_candidates": total_candidates,
         "partitions": partitions,
         "jobs": jobs,
-        "efficiency_high": high,
-        "efficiency_low": low,
+        "efficiency_histogram": histogram,
     }
 
 

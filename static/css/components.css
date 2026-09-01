@@ -210,14 +210,6 @@ header .auto-refresh select { background:var(--panel2); color:var(--text); borde
   display:flex; align-items:center; gap:10px; }
 .no-data { color:var(--dim); font-size:12px; padding:14px 0; text-align:center; }
 
-/* efficiency chart controls */
-.eff-controls { justify-content:space-between; gap:8px; margin:0 0 4px;
-  font-size:11px; color:var(--dim); }
-.eff-controls label { font-size:11px; cursor:pointer; }
-.eff-controls #effShowAll { all:unset; color:var(--acc); font-size:11px; cursor:pointer;
-  white-space:nowrap; }
-.eff-controls #effShowAll:hover { text-decoration:underline; }
-
 /* metric glossary (T-23) */
 .glossary-dialog { background:var(--panel); color:var(--text); border:1px solid var(--line);
   border-radius:10px; padding:18px 20px; max-width:520px; width:90vw; max-height:80vh;
