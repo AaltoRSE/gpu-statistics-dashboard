@@ -12,7 +12,7 @@ import { initTheme } from "./core/theme.js";
 import { initGlossary } from "./core/glossary.js";
 import {
   showTab, setUrl, restoreFromUrl, rerenderAllPlots, clearPartitionSelection,
-  refreshActiveTab,
+  refreshActiveTab, initStickyOffsets,
 } from "./core/router.js";
 
 import { loadJobs } from "./tabs/jobs.js";
@@ -35,6 +35,8 @@ async function checkHealth() {
 initTheme(rerenderAllPlots);
 initAutoRefresh(refreshActiveTab);
 initGlossary();
+
+initStickyOffsets();
 
 window.addEventListener("popstate", restoreFromUrl);
 document.querySelectorAll("nav.tabs button").forEach((b) =>
