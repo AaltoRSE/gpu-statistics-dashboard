@@ -5,11 +5,11 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from config import _read_jobgraph_conf  # noqa: E402
 from slurm import (  # noqa: E402
     SACCT_FIELDS,
     _parse_kv_block,
     _parse_sacct_row,
-    _run,
     expand_node_list,
     parse_alloc_tres,
     parse_elapsed,
@@ -18,7 +18,6 @@ from slurm import (  # noqa: E402
     parse_scontrol_nodes,
     parse_scontrol_partitions,
 )
-from config import _read_jobgraph_conf  # noqa: E402
 
 
 def test_expand_node_list_range_and_list():
@@ -251,11 +250,20 @@ def test_sacct_jobs_default_no_date(monkeypatch):
     assert seen["start_iso"] is None
 
 
-SCTRL_JOB_SAMPLE = """\
-JobId=100 JobName=train UserId=alice(1001) GroupId=alice(1001) Account=acc QOS=normal JobState=RUNNING NodeList=gpu1-2 NumNodes=2 NumCPUs=16 RunTime=01:02:03 StartTime=2026-08-30T10:00:00 EndTime=2026-08-31T10:00:00 Partition=gpu-h100 AllocTRES=cpu=16,gres/gpu:h100=4
-JobId=201 JobName=arr UserId=bob(1002) GroupId=bob(1002) Account=acc QOS=normal JobState=PENDING NodeList= NumNodes=1 NumCPUs=4 RunTime=00:00:00 StartTime=Unknown EndTime=Unknown Partition=batch AllocTRES=cpu=4
-JobId=202 ArrayJobId=201 ArrayTaskId=0-224 JobName=arr UserId=bob(1002) GroupId=bob(1002) Account=acc QOS=normal JobState=PENDING NodeList= NumNodes=1 NumCPUs=4 RunTime=00:00:00 StartTime=Unknown EndTime=Unknown Partition=batch AllocTRES=cpu=4
-"""
+SCTRL_JOB_SAMPLE = (
+    "JobId=100 JobName=train UserId=alice(1001) GroupId=alice(1001) Account=acc "
+    "QOS=normal JobState=RUNNING NodeList=gpu1-2 NumNodes=2 NumCPUs=16 "
+    "RunTime=01:02:03 StartTime=2026-08-30T10:00:00 EndTime=2026-08-31T10:00:00 "
+    "Partition=gpu-h100 AllocTRES=cpu=16,gres/gpu:h100=4\n"
+    "JobId=201 JobName=arr UserId=bob(1002) GroupId=bob(1002) Account=acc "
+    "QOS=normal JobState=PENDING NodeList= NumNodes=1 NumCPUs=4 "
+    "RunTime=00:00:00 StartTime=Unknown EndTime=Unknown Partition=batch "
+    "AllocTRES=cpu=4\n"
+    "JobId=202 ArrayJobId=201 ArrayTaskId=0-224 JobName=arr UserId=bob(1002) "
+    "GroupId=bob(1002) Account=acc QOS=normal JobState=PENDING NodeList= "
+    "NumNodes=1 NumCPUs=4 RunTime=00:00:00 StartTime=Unknown EndTime=Unknown "
+    "Partition=batch AllocTRES=cpu=4\n"
+)
 
 
 def test_parse_scontrol_jobs_normal_job():
@@ -310,7 +318,8 @@ def test_parse_scontrol_jobs_invalid_runtime():
     sample = (
         "JobId=301 JobName=a UserId=carol(1003) GroupId=carol(1003) Account=acc "
         "QOS=normal JobState=PENDING NodeList= NumNodes=1 NumCPUs=4 "
-        "RunTime=INVALID StartTime=Unknown EndTime=Unknown Partition=batch AllocTRES=cpu=4\n"
+        "RunTime=INVALID StartTime=Unknown EndTime=Unknown Partition=batch "
+        "AllocTRES=cpu=4\n"
         "JobId=302 JobName=b UserId=dave(1004) GroupId=dave(1004) Account=acc "
         "QOS=normal JobState=RUNNING NodeList=gpu1 NumNodes=1 NumCPUs=8 "
         "RunTime=02:03:04 StartTime=2026-08-30T10:00:00 EndTime=2026-08-31T10:00:00 "

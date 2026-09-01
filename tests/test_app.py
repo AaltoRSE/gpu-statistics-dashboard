@@ -1,9 +1,12 @@
-"""Endpoint tests with a fake Prometheus client. Run: .venv/bin/python -m pytest tests/ -q"""
+"""Endpoint tests with a fake Prometheus client.
+
+Run: .venv/bin/python -m pytest tests/ -q
+"""
 
 import os
 import re
 import sys
-from datetime import datetime, timezone
+from datetime import datetime
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -817,13 +820,16 @@ def test_nodes_gpu_group(client):
 def test_node_gpu_group_first_nonempty_partition():
     # A leading-empty or comma-only partitions value must not yield "":
     # the first non-empty (trimmed) partition wins.
-    assert appmod._node_gpu_group({"gpu_type": "h100", "partitions": ",gpu-h100"}) == "gpu-h100"
-    assert appmod._node_gpu_group({"gpu_type": "h100", "partitions": "  , gpu-h100 ,"}) == "gpu-h100"
+    assert appmod._node_gpu_group(
+        {"gpu_type": "h100", "partitions": ",gpu-h100"}) == "gpu-h100"
+    assert appmod._node_gpu_group(
+        {"gpu_type": "h100", "partitions": "  , gpu-h100 ,"}) == "gpu-h100"
     assert appmod._node_gpu_group({"gpu_type": "h100", "partitions": "a,b"}) == "a"
     assert appmod._node_gpu_group({"gpu_type": "h100", "partitions": ""}) == ""
     assert appmod._node_gpu_group({"gpu_type": "h100", "partitions": ","}) == ""
     # MIG profile beats the partition list; CPU-only nodes have no group.
-    assert appmod._node_gpu_group({"gpu_type": "h200_3g.71gb", "partitions": "gpu-h200"}) == "h200_3g.71gb"
+    assert appmod._node_gpu_group(
+        {"gpu_type": "h200_3g.71gb", "partitions": "gpu-h200"}) == "h200_3g.71gb"
     assert appmod._node_gpu_group({"gpu_type": "", "partitions": "batch"}) == ""
 
 

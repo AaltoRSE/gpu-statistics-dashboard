@@ -16,8 +16,7 @@ from fastapi.staticfiles import StaticFiles
 
 from config import ConfigError, load_config
 from prom import PromClient, PrometheusError
-from slurm import (SlurmError, expand_node_list, sacct_jobs, show_jobs,
-                   show_nodes)
+from slurm import SlurmError, expand_node_list, sacct_jobs, show_jobs, show_nodes
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 STATIC = os.path.join(HERE, "static")
@@ -36,7 +35,8 @@ def get_prom():
             cfg = load_config()
         except ConfigError as exc:
             raise HTTPException(503, str(exc)) from exc
-        _prom = PromClient(cfg["api_base"], cfg["username"], cfg["password"], cfg["timeout"])
+        _prom = PromClient(
+            cfg["api_base"], cfg["username"], cfg["password"], cfg["timeout"])
     return _prom
 
 
@@ -634,8 +634,8 @@ def api_job_detail(jobid: str, since_hours: float = Query(24, gt=0, le=168)):
 
     def fetch():
         util = prom.query_range(
-            'max by (slurmjobid, instance, gpu) (slurm_job_utilization_gpu{slurmjobid="%s"})'
-            % jobid,
+            'max by (slurmjobid, instance, gpu) '
+            '(slurm_job_utilization_gpu{slurmjobid="%s"})' % jobid,
             start, now, step,
         )
         vram = prom.query_range(
@@ -954,7 +954,8 @@ def api_part_vram(since_hours: float = Query(24, gt=0, le=168),
                   partition: str = "",
                   weight: str = Query("alloc", pattern="^(alloc|eff)$")):
     node_types = _gpu_type_by_node(_cached("scontrol_nodes", 30, show_nodes))
-    records, total, start, now, step = _vram_job_records(since_hours, running_only, partition, node_types, weight)
+    records, total, start, now, step = _vram_job_records(
+        since_hours, running_only, partition, node_types, weight)
     return {
         "window": {"start": start, "end": now},
         "step": step,
@@ -1080,7 +1081,8 @@ def _node_job_start(name, now):
 
 
 @app.get("/api/nodes/{name}")
-def api_node_detail(name: str, view: str = Query("job_start", pattern="^(job_start|1|6|24)$")):
+def api_node_detail(
+        name: str, view: str = Query("job_start", pattern="^(job_start|1|6|24)$")):
     now = int(time.time())
     if view == "job_start":
         start = _node_job_start(name, now)
@@ -1091,7 +1093,8 @@ def api_node_detail(name: str, view: str = Query("job_start", pattern="^(job_sta
 
     def fetch():
         util = prom.query_range(
-            'max by (slurmjobid, gpu) (slurm_job_utilization_gpu{instance="%s"})' % name,
+            'max by (slurmjobid, gpu) '
+            '(slurm_job_utilization_gpu{instance="%s"})' % name,
             start, now, step,
         )
         vram = prom.query_range(

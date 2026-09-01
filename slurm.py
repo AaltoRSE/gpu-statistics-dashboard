@@ -284,6 +284,7 @@ def parse_scontrol_jobs(output):
         user = f.get("UserId", "")
         user = re.sub(r"\(\d+\)$", "", user)
         gpus, gpu_type = parse_alloc_tres(f.get("AllocTRES"))
+        start = f.get("StartTime", "")
         jobs[jobid] = {
             "jobid": jobid,
             "array_jobid": f.get("ArrayJobId", "") or "",
@@ -293,7 +294,7 @@ def parse_scontrol_jobs(output):
             "account": f.get("Account", "") or "",
             "partition": f.get("Partition", "") or "",
             "state": state,
-            "start": f.get("StartTime", "") if f.get("StartTime", "") != "Unknown" else "",
+            "start": start if start != "Unknown" else "",
             "end": end,
             "elapsed_s": parse_elapsed(f.get("RunTime", "")),
             "gpus": gpus,
@@ -361,7 +362,6 @@ def sacct_jobs(job_ids, start_iso=None, workers=8):
         return {}
     batches = [job_ids[i : i + 100] for i in range(0, len(job_ids), 100)]
     results = {}
-    warnings = []
 
     def fetch(batch):
         return _sacct_batch(batch, start_iso)
