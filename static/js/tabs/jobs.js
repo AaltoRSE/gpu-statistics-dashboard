@@ -240,10 +240,10 @@ function renderJobEffChart(elId, jobs, sortKey, barKey, dir) {
     type: "bar", orientation: "h",
     y: rows.map((j) => j.jobid + " · " + j.user),
     x: rows.map((j) => j[barKey] || 0),
-    customdata: rows.map((j) => [j.jobid, j.efficiency, j.gpu_hours_eff || 0,
+    customdata: rows.map((j) => [j.jobid, j.mean_util, j.gpu_hours_eff || 0,
       j.gpu_group || j.partition || "", j.gpu_type || ""]),
     marker: {
-      color: rows.map((j) => partBarColor(j.efficiency)),
+      color: rows.map((j) => partBarColor(j.mean_util)),
       line: { width: 0 },
     },
     hovertemplate: (isGpuHours
@@ -263,17 +263,17 @@ function renderJobEffChart(elId, jobs, sortKey, barKey, dir) {
 }
 
 export function renderJobEfficiency() {
-  // High chart: efficiency mode ranks+measures by average efficiency;
-  // impact mode ranks+measures by effective GPU-hours consumed.
-  const highSort = effImpact ? "gpu_hours_eff" : "efficiency";
-  const highBar = effImpact ? "gpu_hours_eff" : "efficiency";
+  // High chart: efficiency mode ranks+measures by average efficiency
+  // (mean_util); impact mode ranks+measures by effective GPU-hours consumed.
+  const highSort = effImpact ? "gpu_hours_eff" : "mean_util";
+  const highBar = effImpact ? "gpu_hours_eff" : "mean_util";
   // Low chart: bars always show average efficiency; impact mode only
   // reorders it by effective GPU-hours (descending) so the top rows are the
   // inefficient jobs that consumed the most capacity.
-  const lowSort = effImpact ? "gpu_hours_eff" : "efficiency";
+  const lowSort = effImpact ? "gpu_hours_eff" : "mean_util";
   const lowDir = effImpact ? "high" : "low";
   renderJobEffChart("jobHighBarPlot", jobBaseHigh, highSort, highBar, "high");
-  renderJobEffChart("jobLowBarPlot", jobBaseLow, lowSort, "efficiency", lowDir);
+  renderJobEffChart("jobLowBarPlot", jobBaseLow, lowSort, "mean_util", lowDir);
   $("jobHighTitle").textContent = effImpact
     ? "Highest effective GPU-hours" : "Highest average efficiency";
   $("jobLowTitle").textContent = effImpact
