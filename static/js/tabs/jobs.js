@@ -26,6 +26,18 @@ let jobVisibleRows = []; // searched rows after the client-side partition filter
 let jobTotalCandidates = 0; // candidates before the "show top N" limit cut
 let jobsToken = 0;
 
+const JOB_LIMIT_DEFAULT = 100; // matches jLimit's value="100" in index.html
+
+// PLAN-1 3.5: "show top N" persists across tab navigation with nothing on
+// screen marking it as non-default — a badge on the tab itself (not just
+// the controls row) surfaces that regardless of which tab is active.
+function updateLimitBadge() {
+  const badge = $("jobsLimitBadge");
+  const active = !$("jRunning").checked && Number($("jLimit").value) !== JOB_LIMIT_DEFAULT;
+  badge.hidden = !active;
+  if (active) badge.textContent = $("jLimit").value;
+}
+
 function jobLimit() {
   // The box is the only source of the historical fetch cap: validate it
   // strictly so the backend never sees an out-of-range or fractional value.
@@ -86,6 +98,7 @@ export async function loadJobs(force = false) {
     $("jMeta").textContent = $("jRunning").checked
       ? "live jobs · instantaneous"
       : tsToDate(w.start) + " → " + tsToDate(w.end);
+    updateLimitBadge();
     renderJobEfficiency();
     renderJobsView();
     loaded.jobs = true;
@@ -183,6 +196,7 @@ function jobsEmptyMessage() {
       resetLabel: "increase limit",
       onReset: () => {
         $("jLimit").value = String(Math.min(1000, jobTotalCandidates));
+        updateLimitBadge();
         loadJobs();
       },
     };
@@ -469,9 +483,11 @@ $("jWindow").addEventListener("change", () => {
 $("jRunning").addEventListener("change", (e) => {
   $("jWindow").disabled = e.target.checked;
   $("jLimit").disabled = e.target.checked;
+  updateLimitBadge();
   loadJobs();
 });
 $("jLimit").addEventListener("change", loadJobs);
+$("jLimit").addEventListener("input", updateLimitBadge);
 // Search refreshes the server-calculated highest-efficiency chart. Debounced
 // so typing doesn't fire a request per keystroke; partition filtering is
 // local because it only changes the table.
