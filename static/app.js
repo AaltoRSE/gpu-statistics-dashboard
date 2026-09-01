@@ -223,6 +223,14 @@ function debounce(fn, wait) {
   return wrapped;
 }
 
+// True for a plain left-click with no modifier held. Cross-tab links carry a
+// real href now, so a modified click (cmd/ctrl/shift/alt, or a non-primary
+// button) must fall through to the browser's own new-tab/download handling
+// instead of being intercepted for the in-page SPA transition.
+function isPlainClick(e) {
+  return e.button === 0 && !e.metaKey && !e.ctrlKey && !e.shiftKey && !e.altKey;
+}
+
 /* ---------------- health ---------------- */
 
 async function checkHealth() {
@@ -457,11 +465,29 @@ function renderJobTable(rows) {
   tb.querySelectorAll("tr.row").forEach((tr) =>
     tr.addEventListener("click", (e) => {
       const link = e.target.closest("a.userlink");
-      if (link) { e.stopPropagation(); openUser(link.dataset.user); return; }
+      if (link) {
+        e.stopPropagation();
+        if (!isPlainClick(e)) return;
+        e.preventDefault();
+        openUser(link.dataset.user);
+        return;
+      }
       const nlink = e.target.closest("a.nodelink");
-      if (nlink) { e.stopPropagation(); openNode(nlink.dataset.node); return; }
+      if (nlink) {
+        e.stopPropagation();
+        if (!isPlainClick(e)) return;
+        e.preventDefault();
+        openNode(nlink.dataset.node);
+        return;
+      }
       const plink = e.target.closest("a.partitionlink");
-      if (plink) { e.stopPropagation(); openPartition(plink.dataset.partition); return; }
+      if (plink) {
+        e.stopPropagation();
+        if (!isPlainClick(e)) return;
+        e.preventDefault();
+        openPartition(plink.dataset.partition);
+        return;
+      }
       loadJobDetail(tr.dataset.job, { kind: "jobs" });
     }));
 }
@@ -953,11 +979,29 @@ function renderUserJobsTable() {
   tb.querySelectorAll("tr.row").forEach((tr) =>
     tr.addEventListener("click", (e) => {
       const link = e.target.closest("a.joblink");
-      if (link) { e.stopPropagation(); openJob(link.dataset.job, { kind: "user", user: userSelected }); return; }
+      if (link) {
+        e.stopPropagation();
+        if (!isPlainClick(e)) return;
+        e.preventDefault();
+        openJob(link.dataset.job, { kind: "user", user: userSelected });
+        return;
+      }
       const nlink = e.target.closest("a.nodelink");
-      if (nlink) { e.stopPropagation(); openNode(nlink.dataset.node); return; }
+      if (nlink) {
+        e.stopPropagation();
+        if (!isPlainClick(e)) return;
+        e.preventDefault();
+        openNode(nlink.dataset.node);
+        return;
+      }
       const plink = e.target.closest("a.partitionlink");
-      if (plink) { e.stopPropagation(); openPartition(plink.dataset.partition); return; }
+      if (plink) {
+        e.stopPropagation();
+        if (!isPlainClick(e)) return;
+        e.preventDefault();
+        openPartition(plink.dataset.partition);
+        return;
+      }
       openJob(tr.dataset.job, { kind: "user", user: userSelected });
     }));
 }
@@ -1461,11 +1505,29 @@ function renderNodeTable() {
   tb.querySelectorAll("tr.row").forEach((tr) =>
     tr.addEventListener("click", (e) => {
       const link = e.target.closest("a.joblink");
-      if (link) { e.stopPropagation(); openJob(link.dataset.job, { kind: "node", node: tr.dataset.node }); return; }
+      if (link) {
+        e.stopPropagation();
+        if (!isPlainClick(e)) return;
+        e.preventDefault();
+        openJob(link.dataset.job, { kind: "node", node: tr.dataset.node });
+        return;
+      }
       const nlink = e.target.closest("a.nodelink");
-      if (nlink) { e.stopPropagation(); openNode(nlink.dataset.node); return; }
+      if (nlink) {
+        e.stopPropagation();
+        if (!isPlainClick(e)) return;
+        e.preventDefault();
+        openNode(nlink.dataset.node);
+        return;
+      }
       const plink = e.target.closest("a.partitionlink");
-      if (plink) { e.stopPropagation(); openPartition(plink.dataset.partition); return; }
+      if (plink) {
+        e.stopPropagation();
+        if (!isPlainClick(e)) return;
+        e.preventDefault();
+        openPartition(plink.dataset.partition);
+        return;
+      }
       loadNodeDetail(tr.dataset.node);
     }));
   markSort($("nodeTable"), nodeSort.key, nodeSort.dir);
@@ -1630,21 +1692,24 @@ function escapeList(values) {
 
 function jobLink(jobid) {
   const safe = escapeHtml(jobid);
-  return '<a class="joblink" data-job="' + safe +
+  const href = escapeHtml("/job/" + encodeURIComponent(jobid));
+  return '<a class="joblink" href="' + href + '" data-job="' + safe +
     '" title="open job ' + safe + ' in the Jobs tab">' + safe + "</a>";
 }
 
 function userLink(user) {
   if (!user) return "—";
   const safe = escapeHtml(user);
-  return '<a class="userlink" data-user="' + safe +
+  const href = escapeHtml("/user/" + encodeURIComponent(user));
+  return '<a class="userlink" href="' + href + '" data-user="' + safe +
     '" title="open ' + safe + ' in the Users tab">' + safe + "</a>";
 }
 
 function nodeLink(node) {
   if (!node) return "—";
   const safe = escapeHtml(node);
-  return '<a class="nodelink" data-node="' + safe +
+  const href = escapeHtml("/node/" + encodeURIComponent(node));
+  return '<a class="nodelink" href="' + href + '" data-node="' + safe +
     '" title="open ' + safe + ' in the Nodes tab">' + safe + "</a>";
 }
 
@@ -1656,7 +1721,8 @@ function nodeLinks(values) {
 function partitionLink(partition, label = partition) {
   if (!partition) return "—";
   const safe = escapeHtml(partition);
-  return '<a class="partitionlink" data-partition="' + safe +
+  const href = escapeHtml("/partition/" + encodeURIComponent(partition));
+  return '<a class="partitionlink" href="' + href + '" data-partition="' + safe +
     '" title="open ' + safe + ' in the Partitions tab">' +
     escapeHtml(label) + "</a>";
 }
