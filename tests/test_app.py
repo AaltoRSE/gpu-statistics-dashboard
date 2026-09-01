@@ -16,6 +16,9 @@ from fastapi.testclient import TestClient  # noqa: E402
 import app as appmod  # noqa: E402
 import cache  # noqa: E402
 import deps  # noqa: E402
+import domain.metadata as domain_metadata  # noqa: E402
+import domain.partitions as domain_partitions  # noqa: E402
+from api import users as api_users  # noqa: E402
 
 # Deterministic "now" (2026-08-30T18:26:40Z): job 1's sacct start
 # (2026-08-28T00:00:00) is ~2.2 days back, inside the seven-day clamp.
@@ -415,9 +418,12 @@ def test_users_mean_util_weights_samples_not_effective_gpu_hours(client, monkeyp
          "gpu_hours_eff": 0.9, "_util_sum": 90.0, "_util_samples": 1,
          "gpu_type": "h100", "vram_avg": None},
     ]
-    monkeypatch.setattr(appmod, "_fetch_job_window",
+    # api_users looks these names up in its own module (api.users), since
+    # it imported them with `from domain.X import Y` — patching the domain
+    # module itself would not affect this already-bound reference.
+    monkeypatch.setattr(api_users, "fetch_job_window",
                         lambda since_hours: (jobs, 1, 2, 120))
-    monkeypatch.setattr(appmod, "_running_gpu_job_ids", lambda: set())
+    monkeypatch.setattr(api_users, "running_gpu_job_ids", lambda: set())
     data = client.get("/api/users", params={"since_hours": 24}).json()
     assert data["users"][0]["mean_util"] == 50.0
 
@@ -492,7 +498,7 @@ def test_enrich_merges_active_array_tasks(client, fake_prom, monkeypatch):
     })
     jobs = [{"jobid": "42", "nodes": ["gpu1", "gpu2"], "mean_util": 50.0,
              "gpu_hours_eff": 0.5}]
-    appmod._enrich(jobs)
+    domain_metadata.enrich(jobs)
     job = jobs[0]
     assert job["name"] == "arr.sh"
     assert job["state"] == "RUNNING"
@@ -514,7 +520,7 @@ def test_enrich_array_no_node_match_falls_back_without_misattribution(
     })
     jobs = [{"jobid": "44", "nodes": ["gpu1"], "mean_util": 10.0,
              "gpu_hours_eff": 0.1}]
-    appmod._enrich(jobs)
+    domain_metadata.enrich(jobs)
     for key in ("name", "state", "start", "gpus", "node_list"):
         assert key not in jobs[0]
 
@@ -527,7 +533,7 @@ def test_enrich_scontrol_failure_falls_back_to_sacct(client, fake_prom,
                         lambda: (_ for _ in ()).throw(SlurmError("boom")))
     jobs = [{"jobid": "1", "nodes": ["gpu1"], "mean_util": 40.0,
              "gpu_hours_eff": 0.4}]
-    appmod._enrich(jobs)
+    domain_metadata.enrich(jobs)
     job = jobs[0]
     assert job["name"] == "train.sh"
     assert job["state"] == "RUNNING"
@@ -560,7 +566,7 @@ def test_enrich_merges_historical_array_tasks_in_sacct(
     })
     jobs = [{"jobid": "45", "nodes": ["gpu1"], "mean_util": 50.0,
              "gpu_hours_eff": 0.5}]
-    appmod._enrich(jobs)
+    domain_metadata.enrich(jobs)
     job = jobs[0]
     assert job["name"] == "hist.sh"
     assert job["state"] == "COMPLETED"
@@ -590,7 +596,7 @@ def test_enrich_array_task_without_node_match_is_not_merged(
     })
     jobs = [{"jobid": "46", "nodes": ["gpu1"], "mean_util": 10.0,
              "gpu_hours_eff": 0.1}]
-    appmod._enrich(jobs)
+    domain_metadata.enrich(jobs)
     for key in ("name", "state", "start", "gpus", "node_list"):
         assert key not in jobs[0]
 
@@ -906,7 +912,7 @@ def test_aggregate_partition_stats_fixture():
         {"metric": {"slurmjobid": "2", "instance": "gpu1", "job": "gpu-h100"},
          "values": [[1, "10"]]},
     ]
-    out = appmod.aggregate_partition_stats(stats)
+    out = domain_partitions.aggregate_partition_stats(stats)
     assert out[0]["name"] == "gpu-h100"
     assert out[0]["mean_util"] == pytest.approx(36.67, abs=0.01)
     assert out[0]["max_util"] == 60.0
