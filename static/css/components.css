@@ -31,10 +31,6 @@
 .controls .controls-actions { margin-left:auto; align-self:flex-end;
   display:flex; align-items:center; gap:10px; padding-bottom:6px; }
 .controls.bare { background:none; border:none; padding:0 0 6px; margin-bottom:8px; }
-/* Sticky filter row (T-1.1/1.2): --nav-h is set once (core/layout.js) from
-   nav.tabs's actual rendered height; already has an opaque background from
-   .controls/.filter-card above. */
-.sticky-filters { position: sticky; top: var(--nav-h, 45px); z-index: 4; }
 
 .user-selected { display:none; align-items:center; gap:12px; margin:0 0 12px;
   background:var(--panel2); border:1px solid var(--acc); border-radius:8px; padding:10px 14px; }
@@ -46,16 +42,12 @@
   border:1px solid var(--line); border-radius:6px; padding:5px 12px; font-size:12px; cursor:pointer; }
 
 .table-scroll { position: relative; }
-/* Sticks below both the nav bar and the tab's own filter row (T-1.1/1.2) —
-   previously stuck at top:0 of a now-removed 520px inner scroll box
-   (VIS-6), which also meant its "top of container" position had nothing
-   to do with the nav/filters actually covering it on the real page. Both
-   custom properties are set once (core/layout.js) from the actually
-   rendered heights, not hardcoded, since the filter row's height varies
-   by tab and by viewport width. */
-.table-scroll thead th { position: sticky;
-  top: calc(var(--nav-h, 45px) + var(--controls-h, 60px));
-  z-index: 2; background: var(--panel); }
+/* Sticky positioning removed from the nav bar, each tab's filter row, and
+   this <thead> (previously T-1.1/1.2's sticky stack): a live check found
+   the pinned elements overlapping/misrendering against content scrolling
+   underneath them. The whole page scrolls as one unit instead — nav,
+   filters, and table header all move with the content now. */
+.table-scroll thead th { background: var(--panel); }
 /* theme-aware scrollbars for table overflow containers (defaults are
    white-on-white in dark mode) */
 .table-scroll { scrollbar-width: thin; scrollbar-color: var(--line) transparent; }

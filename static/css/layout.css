@@ -19,15 +19,11 @@ header h1 { font-size: 18px; margin:0; font-weight: 600; }
 header .sub { color: var(--dim); font-size: 12px; }
 header .live { margin-left:auto; font-size:12px; color: var(--dim); }
 header .live b { color: var(--ok); }
-/* Sticky stack (T-1.1/1.2, PLAN-1/VIS-6/VIS-7): nav sits at the very top;
-   each tab's own filter row (.sticky-filters — main.js/core/layout.js sets
-   --nav-h/--controls-h from the actually-rendered heights, since the
-   filter row's height varies by tab and by viewport width, not just the
-   820px breakpoint) sticks right below it; a table's own <thead>
-   (components.css) sticks below both. All three need an opaque background
-   or whatever scrolls underneath would show through. */
-nav.tabs { display:flex; gap:4px; padding: 10px 22px 0; position: sticky; top: 0;
-  z-index: 5; background: var(--ground); }
+/* Sticky positioning removed (PLAN-1 follow-up, superseding T-1.1/1.2's
+   sticky stack): a live check found the pinned nav bar, filter row, and
+   table <thead> overlapping/misrendering against content scrolling
+   underneath them. The nav bar now scrolls with the rest of the page. */
+nav.tabs { display:flex; gap:4px; padding: 10px 22px 0; background: var(--ground); }
 nav.tabs button { background:none; border:none; border-bottom: 2px solid transparent; color: var(--dim);
   font-size: 14px; padding: 8px 16px; cursor:pointer; }
 nav.tabs button.active { color: var(--text); border-bottom-color: var(--acc); }

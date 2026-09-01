@@ -22,12 +22,19 @@ import * as nodesTab from "../tabs/nodes.js";
 
 export const loaded = { jobs: false, partitions: false, users: false, nodes: false };
 
+// PLAN-1 3.4: document.title was the same string on every route despite
+// real per-tab URLs already existing (/jobs, /partitions, /users, /nodes,
+// and the job/node/user/partition deep links, which all resolve to one of
+// these four tabs). Every route funnels through showTab, so setting it
+// here covers all of them in one place.
+const TAB_TITLES = { jobs: "Jobs", partitions: "Partitions", users: "Users", nodes: "Nodes" };
+
 export function showTab(name) {
   document.querySelectorAll("nav.tabs button").forEach((b) =>
     b.classList.toggle("active", b.dataset.tab === name));
   document.querySelectorAll(".tabpage").forEach((p) =>
     p.classList.toggle("active", p.id === "tab-" + name));
-  updateStickyOffsets();
+  document.title = (TAB_TITLES[name] || "Dashboard") + " — Triton GPU Efficiency Dashboard";
   let p = Promise.resolve();
   if (name === "jobs" && !loaded.jobs) p = jobsTab.loadJobs();
   if (name === "partitions" && !loaded.partitions) p = partitionsTab.loadPartitions();
@@ -35,33 +42,6 @@ export function showTab(name) {
   if (name === "nodes" && !loaded.nodes) p = nodesTab.loadNodes();
   window.dispatchEvent(new Event("resize")); // refit hidden plots
   return p;
-}
-
-// Sticky stack (T-1.1/1.2): --nav-h and --controls-h back the top: offsets
-// css/layout.css's nav.tabs and css/components.css's .sticky-filters /
-// .table-scroll thead th use.
-export function updateStickyOffsets() {
-  const nav = document.querySelector("nav.tabs");
-  const filters = document.querySelector(".tabpage.active .sticky-filters");
-  const root = document.documentElement.style;
-  if (nav) root.setProperty("--nav-h", nav.getBoundingClientRect().height + "px");
-  if (filters) root.setProperty("--controls-h", filters.getBoundingClientRect().height + "px");
-}
-
-// A one-shot measurement at load isn't enough: a filter row's own height
-// changes once its meta-count/freshness text populates after the first
-// fetch (flex-wrap can break onto a different number of lines once that
-// text is no longer empty), independent of any window resize. A
-// ResizeObserver on every .sticky-filters element (only the active one
-// affects layout; the rest are display:none) plus nav.tabs itself catches
-// every actual cause of a size change — data populating, wrapping at a
-// breakpoint, a real window resize — in one place, rather than hunting
-// down each call site that might change these elements' height.
-export function initStickyOffsets() {
-  updateStickyOffsets();
-  if (typeof ResizeObserver === "undefined") return; // not a load-bearing feature; degrade quietly
-  const observer = new ResizeObserver(() => updateStickyOffsets());
-  document.querySelectorAll("nav.tabs, .sticky-filters").forEach((el) => observer.observe(el));
 }
 
 export function setUrl(path) {

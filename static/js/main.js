@@ -12,10 +12,10 @@ import { initTheme } from "./core/theme.js";
 import { initGlossary } from "./core/glossary.js";
 import {
   showTab, setUrl, restoreFromUrl, rerenderAllPlots, clearPartitionSelection,
-  refreshActiveTab, initStickyOffsets,
+  refreshActiveTab,
 } from "./core/router.js";
 
-import { loadJobs } from "./tabs/jobs.js";
+import "./tabs/jobs.js";
 import "./tabs/users.js";
 import "./tabs/partitions.js";
 import "./tabs/nodes.js";
@@ -37,8 +37,6 @@ initAutoRefresh(refreshActiveTab);
 initGlossary();
 initChipToggle();
 
-initStickyOffsets();
-
 window.addEventListener("popstate", restoreFromUrl);
 document.querySelectorAll("nav.tabs button").forEach((b) =>
   b.addEventListener("click", () => {
@@ -52,7 +50,9 @@ document.querySelectorAll("nav.tabs button").forEach((b) =>
 
 checkHealth();
 if (location.pathname === "/" || location.pathname === "") {
-  loadJobs();
+  // showTab (not loadJobs directly) so the root path also gets the
+  // per-tab document.title set for it, the same as every other route.
+  showTab("jobs");
 } else {
   restoreFromUrl();
 }
