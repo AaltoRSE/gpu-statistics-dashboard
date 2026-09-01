@@ -1,0 +1,50 @@
+{
+  "jobs": [
+    {
+      "gpu_hours": 96.0,
+      "gpu_hours_eff": 0.06,
+      "gpu_type": "h200",
+      "jobid": "3",
+      "mean_util": 92.5,
+      "partition": "gpu-h200",
+      "user": "carol",
+      "vram_gb": 8.0
+    },
+    {
+      "gpu_hours": 2.0,
+      "gpu_hours_eff": 0.03,
+      "gpu_type": "h100",
+      "jobid": "1",
+      "mean_util": 50.0,
+      "partition": "gpu-h100",
+      "user": "alice",
+      "vram_gb": 15.0
+    },
+    {
+      "gpu_hours": 2.0,
+      "gpu_hours_eff": 0.0,
+      "gpu_type": "h100",
+      "jobid": "2",
+      "mean_util": 10.0,
+      "partition": "gpu-h100",
+      "user": "bob",
+      "vram_gb": 30.0
+    },
+    {
+      "gpu_hours": 1.0,
+      "gpu_hours_eff": 0.06,
+      "gpu_type": "h200_3g.71gb",
+      "jobid": "4",
+      "mean_util": 85.0,
+      "partition": "h200_3g.71gb",
+      "user": "dave",
+      "vram_gb": 22.0
+    }
+  ],
+  "step": 120,
+  "total": 4,
+  "window": {
+    "end": 1788100000,
+    "start": 1788013600
+  }
+}

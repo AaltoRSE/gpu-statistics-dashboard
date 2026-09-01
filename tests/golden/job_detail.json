@@ -1,0 +1,79 @@
+{
+  "jobid": "1",
+  "metadata": {
+    "account": "acc",
+    "elapsed_s": 3600,
+    "end": "",
+    "gpu_type": "h100",
+    "gpus": 2,
+    "jobid": "1",
+    "name": "train.sh",
+    "ncpus": 8,
+    "node_list": "gpu1",
+    "partition": "gpu-h100",
+    "start": "2026-08-28T00:00:00",
+    "state": "RUNNING",
+    "user": "alice"
+  },
+  "series": {
+    "utilization": [
+      {
+        "metric": {
+          "gpu": "0",
+          "instance": "gpu1",
+          "slurmjobid": "1"
+        },
+        "values": [
+          [
+            1000.0,
+            40.0
+          ],
+          [
+            1120.0,
+            60.0
+          ]
+        ]
+      },
+      {
+        "metric": {
+          "gpu": "1",
+          "instance": "gpu1",
+          "slurmjobid": "1"
+        },
+        "values": [
+          [
+            1000.0,
+            20.0
+          ],
+          [
+            1120.0,
+            80.0
+          ]
+        ]
+      }
+    ],
+    "vram": [
+      {
+        "metric": {
+          "gpu": "0",
+          "instance": "gpu1"
+        },
+        "values": [
+          [
+            1000.0,
+            12.5
+          ],
+          [
+            1120.0,
+            13.5
+          ]
+        ]
+      }
+    ]
+  },
+  "step": 120,
+  "window": {
+    "end": 1788100000,
+    "start": 1788013600
+  }
+}

@@ -1,0 +1,113 @@
+{
+  "count": 5,
+  "nodes": [
+    {
+      "active_jobs": [
+        {
+          "job": "gpu-h100",
+          "jobid": "1",
+          "user": "alice",
+          "util": 77.0
+        }
+      ],
+      "cpus": 64,
+      "cpus_alloc": 16,
+      "current_util": 55.5,
+      "current_vram": 41.2,
+      "free_mem": 1000,
+      "gpu_group": "gpu-h100",
+      "gpu_type": "h100",
+      "gpus": 8,
+      "gpus_alloc": 2,
+      "name": "gpu1",
+      "partitions": "gpu-h100",
+      "real_mem": 5000,
+      "state": "MIXED",
+      "state_full": "MIXED"
+    },
+    {
+      "active_jobs": [
+        {
+          "job": "gpu-h200",
+          "jobid": "3",
+          "user": "carol",
+          "util": 90.0
+        }
+      ],
+      "cpus": 64,
+      "cpus_alloc": 32,
+      "current_util": 10.0,
+      "current_vram": 8.0,
+      "free_mem": 900,
+      "gpu_group": "gpu-h200",
+      "gpu_type": "h200",
+      "gpus": 8,
+      "gpus_alloc": 3,
+      "name": "gpu2",
+      "partitions": "gpu-h200",
+      "real_mem": 5000,
+      "state": "ALLOCATED",
+      "state_full": "ALLOCATED*"
+    },
+    {
+      "active_jobs": [],
+      "cpus": 64,
+      "cpus_alloc": 0,
+      "current_util": null,
+      "current_vram": null,
+      "free_mem": 4000,
+      "gpu_group": "gpu-h100",
+      "gpu_type": "h100",
+      "gpus": 8,
+      "gpus_alloc": 0,
+      "name": "gpu3",
+      "partitions": "gpu-h100",
+      "real_mem": 5000,
+      "state": "IDLE",
+      "state_full": "IDLE"
+    },
+    {
+      "active_jobs": [
+        {
+          "job": "gpu-h200",
+          "jobid": "4",
+          "user": "dave",
+          "util": 85.0
+        }
+      ],
+      "cpus": 128,
+      "cpus_alloc": 32,
+      "current_util": 60.0,
+      "current_vram": 40.0,
+      "free_mem": 900,
+      "gpu_group": "h200_3g.71gb",
+      "gpu_type": "h200_3g.71gb",
+      "gpus": 8,
+      "gpus_alloc": 1,
+      "name": "gpu49",
+      "partitions": "gpu-h200",
+      "real_mem": 5000,
+      "state": "ALLOCATED",
+      "state_full": "ALLOCATED"
+    },
+    {
+      "active_jobs": [],
+      "cpus": 64,
+      "cpus_alloc": 0,
+      "current_util": null,
+      "current_vram": null,
+      "free_mem": 100,
+      "gpu_group": "gpu-h200",
+      "gpu_type": "h200",
+      "gpus": 8,
+      "gpus_alloc": 0,
+      "name": "gpu51",
+      "partitions": "gpu-h200",
+      "real_mem": 5000,
+      "reason": "maintenance: firmware update scheduled",
+      "state": "IDLE",
+      "state_full": "IDLE+DRAIN"
+    }
+  ],
+  "time": 1788100000
+}
