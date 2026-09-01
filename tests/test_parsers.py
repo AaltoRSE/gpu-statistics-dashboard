@@ -47,6 +47,11 @@ def test_parse_elapsed_short():
 def test_parse_elapsed_bad():
     assert parse_elapsed("Unknown") == 0
     assert parse_elapsed("") == 0
+    # Malformed Slurm run times (e.g. RunTime: INVALID) degrade to 0.
+    assert parse_elapsed("INVALID") == 0
+    assert parse_elapsed("INVALID-04:00:56") == 0
+    # More than three colon components is not a valid elapsed string.
+    assert parse_elapsed("1:02:03:04") == 0
 
 
 def test_parse_gres():
@@ -297,3 +302,48 @@ def test_show_jobs_command(monkeypatch):
     jobs = slurm.show_jobs()
     assert cmds["cmd"] == ["scontrol", "show", "job", "-o"]
     assert set(jobs) == {"100", "201", "202"}
+
+
+def test_parse_scontrol_jobs_invalid_runtime():
+    # A malformed RunTime (Slurm reports RunTime: INVALID for jobs that never
+    # started) must degrade to 0 and must not abort the parse of the rest.
+    sample = (
+        "JobId=301 JobName=a UserId=carol(1003) GroupId=carol(1003) Account=acc "
+        "QOS=normal JobState=PENDING NodeList= NumNodes=1 NumCPUs=4 "
+        "RunTime=INVALID StartTime=Unknown EndTime=Unknown Partition=batch AllocTRES=cpu=4\n"
+        "JobId=302 JobName=b UserId=dave(1004) GroupId=dave(1004) Account=acc "
+        "QOS=normal JobState=RUNNING NodeList=gpu1 NumNodes=1 NumCPUs=8 "
+        "RunTime=02:03:04 StartTime=2026-08-30T10:00:00 EndTime=2026-08-31T10:00:00 "
+        "Partition=gpu-h100 AllocTRES=cpu=8,gres/gpu:h100=1\n"
+    )
+    jobs = parse_scontrol_jobs(sample)
+    assert set(jobs) == {"301", "302"}
+    assert jobs["301"]["elapsed_s"] == 0
+    assert jobs["302"]["elapsed_s"] == 2 * 3600 + 3 * 60 + 4
+
+
+def test_sacct_jobs_invalid_elapsed(monkeypatch):
+    import slurm
+
+    def fake_batch(job_ids, start_iso=None):
+        return {
+            "401": {
+                "JobID": "401", "JobName": "c", "User": "erin", "Account": "acc",
+                "Partition": "batch", "State": "PENDING", "Start": "Unknown",
+                "End": "Unknown", "Elapsed": "INVALID",
+                "AllocTRES": "cpu=4", "NodeList": "", "NCPUS": "4",
+            },
+            "402": {
+                "JobID": "402", "JobName": "d", "User": "frank", "Account": "acc",
+                "Partition": "gpu-h100", "State": "RUNNING",
+                "Start": "2026-08-30T10:00:00", "End": "2026-08-31T10:00:00",
+                "Elapsed": "00:05:06",
+                "AllocTRES": "cpu=8,gres/gpu:h100=1", "NodeList": "gpu1", "NCPUS": "8",
+            },
+        }
+
+    monkeypatch.setattr(slurm, "_sacct_batch", fake_batch)
+    jobs = slurm.sacct_jobs(["401", "402"])
+    assert set(jobs) == {"401", "402"}
+    assert jobs["401"]["elapsed_s"] == 0
+    assert jobs["402"]["elapsed_s"] == 5 * 60 + 6

@@ -58,14 +58,21 @@ def parse_elapsed(text):
     text = (text or "").strip()
     if not text or text == "Unknown":
         return 0
-    days = 0
-    if "-" in text:
-        days_part, text = text.split("-", 1)
-        days = int(days_part)
-    parts = [int(p) for p in text.split(":")]
+    try:
+        days = 0
+        if "-" in text:
+            days_part, text = text.split("-", 1)
+            days = int(days_part)
+        parts = [int(p) for p in text.split(":")]
+    except ValueError:
+        # Slurm reports malformed run times (e.g. ``RunTime: INVALID`` for
+        # jobs that never started); treat them as "no elapsed time".
+        return 0
+    if len(parts) > 3:
+        return 0
     while len(parts) < 3:
         parts.insert(0, 0)
-    h, m, s = parts[0], parts[1], parts[2]
+    h, m, s = parts
     return days * 86400 + h * 3600 + m * 60 + s
 
 
