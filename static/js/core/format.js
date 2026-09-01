@@ -112,21 +112,25 @@ export function compareStrings(a, b) {
   return a.length - b.length;
 }
 
+// entity-link (static/css/components.css) is the one class that styles
+// all four link types; joblink/userlink/nodelink/partitionlink stay on the
+// markup too because tabs/*.js's onRowClick handlers key off them to tell
+// which kind of link a click landed on.
 export function jobLink(jobid) {
   const href = "/job/" + encodeURIComponent(jobid);
-  return html`<a class="joblink" href="${href}" data-job="${jobid}" title="open job ${jobid} in the Jobs tab">${jobid}</a>`;
+  return html`<a class="entity-link joblink" href="${href}" data-job="${jobid}" title="open job ${jobid} in the Jobs tab">${jobid}</a>`;
 }
 
 export function userLink(user) {
   if (!user) return "—";
   const href = "/user/" + encodeURIComponent(user);
-  return html`<a class="userlink" href="${href}" data-user="${user}" title="open ${user} in the Users tab">${user}</a>`;
+  return html`<a class="entity-link userlink" href="${href}" data-user="${user}" title="open ${user} in the Users tab">${user}</a>`;
 }
 
 export function nodeLink(node) {
   if (!node) return "—";
   const href = "/node/" + encodeURIComponent(node);
-  return html`<a class="nodelink" href="${href}" data-node="${node}" title="open ${node} in the Nodes tab">${node}</a>`;
+  return html`<a class="entity-link nodelink" href="${href}" data-node="${node}" title="open ${node} in the Nodes tab">${node}</a>`;
 }
 
 export function nodeLinks(values) {
@@ -137,5 +141,5 @@ export function nodeLinks(values) {
 export function partitionLink(partition, label = partition) {
   if (!partition) return "—";
   const href = "/partition/" + encodeURIComponent(partition);
-  return html`<a class="partitionlink" href="${href}" data-partition="${partition}" title="open ${partition} in the Partitions tab">${label}</a>`;
+  return html`<a class="entity-link partitionlink" href="${href}" data-partition="${partition}" title="open ${partition} in the Partitions tab">${label}</a>`;
 }

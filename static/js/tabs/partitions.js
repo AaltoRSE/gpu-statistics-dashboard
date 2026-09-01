@@ -59,7 +59,7 @@ export async function loadPartitions() {
       setResultsLoading("partitionsResults", false);
       showPanelError("partitionsResults", e, loadPartitions, "the partition data");
     }
-    throw e;
+    return;
   }
   if (token !== partitionsToken) return; // a newer request supersedes this one
   panelOk("partitionsResults");
@@ -79,7 +79,7 @@ export async function loadPartitions() {
   // VRAM distribution then fetches independently under its own panel.
   setResultsLoading("partitionsResults", false);
   if (token !== partitionsToken) return;
-  await loadVram().catch(() => {});
+  await loadVram();
 }
 
 function renderPartBar() {
@@ -206,7 +206,7 @@ function partControlsChanged() { loadPartitions(); }
 $("pWindow").addEventListener("change", partControlsChanged);
 $("pPartition").addEventListener("change", () => {
   applyPartitionSelection($("pPartition").value);
-  loadVram().catch(() => {});
+  loadVram();
 });
 $("pRunning").addEventListener("change", (e) => {
   $("pWindow").disabled = e.target.checked;
@@ -247,7 +247,6 @@ export async function loadVram() {
   } catch (e) {
     if (token === vramToken && origin === partitionsToken)
       showPanelError("vramResults", e, loadVram, "the VRAM distribution");
-    throw e;
   } finally {
     if (token === vramToken && origin === partitionsToken)
       setResultsLoading("vramResults", false);
@@ -396,7 +395,7 @@ export function clearPartitionSelection() {
   selectedPartition = "";
   $("pPartition").value = "";
   renderPartTrend(partTrendData);
-  if (loaded.partitions) loadVram().catch(() => {});
+  if (loaded.partitions) loadVram();
 }
 
 export { renderPartBar, renderPartOccupancy, renderPartTrend, renderVram };

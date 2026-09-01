@@ -43,7 +43,7 @@ export function setUrl(path) {
 }
 
 export function openJob(jobid, from) {
-  showTab("jobs").then(() => jobsTab.loadJobDetail(jobid, from)).catch(() => {});
+  showTab("jobs").then(() => jobsTab.loadJobDetail(jobid, from));
 }
 
 export function openUser(user) {
@@ -52,11 +52,11 @@ export function openUser(user) {
     // keeps the URL in sync (/user/<name>, /users on deselect). It
     // accepts raw text, so a user with no window activity still resolves.
     usersTab.finalizeUser(user);
-  }).catch(() => {});
+  });
 }
 
 export function openNode(node) {
-  showTab("nodes").then(() => nodesTab.loadNodeDetail(node)).catch(() => {});
+  showTab("nodes").then(() => nodesTab.loadNodeDetail(node));
 }
 
 export function openPartition(partition) {
@@ -67,8 +67,8 @@ export function openPartition(partition) {
     // (/partition/<name>). A fresh loadPartitions already scoped the VRAM
     // fetch on its own, so only a pre-loaded tab needs one here.
     partitionsTab.applyPartitionSelection(partitionsTab.selectedPartition);
-    if (wasLoaded) partitionsTab.loadVram().catch(() => {});
-  }).catch(() => {});
+    if (wasLoaded) partitionsTab.loadVram();
+  });
 }
 
 export function clearPartitionSelection() {
@@ -77,17 +77,17 @@ export function clearPartitionSelection() {
 
 export function restoreFromUrl() {
   let m = location.pathname.match(/^\/job\/([^/]+)\/?$/);
-  if (m) { showTab("jobs").then(() => jobsTab.loadJobDetail(m[1])).catch(() => {}); return; }
+  if (m) { showTab("jobs").then(() => jobsTab.loadJobDetail(m[1])); return; }
   m = location.pathname.match(/^\/node\/([^/]+)\/?$/);
   if (m) {
     const node = decodeURIComponent(m[1]);
-    showTab("nodes").then(() => nodesTab.loadNodeDetail(node)).catch(() => {});
+    showTab("nodes").then(() => nodesTab.loadNodeDetail(node));
     return;
   }
   m = location.pathname.match(/^\/user\/([^/]+)\/?$/);
   if (m) {
     const user = decodeURIComponent(m[1]);
-    showTab("users").then(() => { usersTab.finalizeUser(user); }).catch(() => {});
+    showTab("users").then(() => { usersTab.finalizeUser(user); });
     return;
   }
   m = location.pathname.match(/^\/partition\/([^/]+)\/?$/);
