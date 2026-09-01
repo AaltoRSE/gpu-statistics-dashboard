@@ -35,7 +35,7 @@
 
   <!-- ============ JOBS ============ -->
   <section class="tabpage active" id="tab-jobs">
-    <div class="controls">
+    <div class="controls sticky-filters">
       <label>Window
         <select id="jWindow">
           <option value="24" selected>last 24 h</option>
@@ -113,7 +113,7 @@
       <div class="results-content">
         <div class="card" style="margin-top:14px">
           <h2>Job table <span class="small" id="jCount"></span></h2>
-          <div class="table-scroll" style="overflow-x:auto; max-height:520px; overflow-y:auto">
+          <div class="table-scroll">
             <table id="jobTable">
               <thead><tr>
                 <th data-k="jobid">Job</th><th data-k="name">Name</th><th data-k="user">User</th>
@@ -137,7 +137,7 @@
 
   <!-- ============ PARTITIONS ============ -->
   <section class="tabpage" id="tab-partitions">
-    <div class="controls">
+    <div class="controls sticky-filters">
       <label>Window
         <select id="pWindow">
           <option value="24" selected>last 24 h</option>
@@ -178,7 +178,7 @@
       <div class="card" style="margin-top:14px">
         <h2>Partition table <span class="small" id="pCount"></span>
           <span class="small" data-fresh-for="partitionsResults"></span></h2>
-        <div class="table-scroll" style="overflow-x:auto">
+        <div class="table-scroll">
           <table id="partTable">
             <thead><tr>
               <th data-k="name">Partition</th>
@@ -225,7 +225,7 @@
 
   <!-- ============ USERS ============ -->
   <section class="tabpage" id="tab-users">
-    <div class="filter-card">
+    <div class="filter-card sticky-filters">
       <h2>Users</h2>
       <div class="controls" style="margin-bottom:0">
         <label>Window
@@ -258,7 +258,7 @@
           <button class="us-clear" id="userSelectedClear" type="button">clear selection</button>
         </div>
           <h2>User table <span class="small" id="uCount"></span></h2>
-          <div class="table-scroll" style="overflow-x:auto; max-height:520px; overflow-y:auto">
+          <div class="table-scroll">
             <table id="userTable">
               <thead><tr>
                 <th data-k="user">User</th>
@@ -281,7 +281,7 @@
       <div class="results-content">
         <div class="card" id="userJobsCard">
           <h2 id="userJobsTitle">Jobs</h2>
-          <div class="table-scroll" style="overflow-x:auto; max-height:420px; overflow-y:auto">
+          <div class="table-scroll">
             <table id="userJobsTable">
               <thead><tr>
                 <th data-k="jobid">Job</th><th data-k="name">Name</th>
@@ -303,7 +303,7 @@
 
   <!-- ============ NODES ============ -->
   <section class="tabpage" id="tab-nodes">
-    <div class="controls">
+    <div class="controls sticky-filters">
       <label>Search (node)
         <input id="nSearch" type="text" placeholder="e.g. gpu3" style="min-width:130px">
       </label>
@@ -322,7 +322,7 @@
       <div class="results-content">
       <div class="card">
         <h2>Nodes <span class="small" id="nCount"></span></h2>
-        <div class="table-scroll" style="overflow-x:auto; max-height:560px; overflow-y:auto">
+        <div class="table-scroll">
           <table id="nodeTable">
             <thead><tr>
               <th data-k="name">Node</th><th data-k="gpu_type">GPU type</th>
