@@ -82,17 +82,26 @@ function nodeRowHtml(n) {
   const gpusAlloc = n.gpus_alloc !== undefined ? n.gpus_alloc : 0;
   const vram = n.current_vram === null ? "—" : fmt(n.current_vram);
   const cpusAlloc = n.cpus_alloc !== undefined ? n.cpus_alloc : 0;
+  // The drain reason and the alloc/total split were tooltip-only —
+  // invisible on touch and to screen readers. Both are now in the cell
+  // itself; title attributes stay as a hover convenience, not the only way
+  // to read them.
+  const reasonLine = n.reason ? html`<div class="small reason-line">${n.reason}</div>` : "";
   return html`
     <tr class="row" data-node="${rawName}" style="${busy ? "" : "opacity:.55"}">
       <td>${raw(nodeLink(rawName))}</td>
       <td>${gpuType}</td>
-      <td title="${n.reason || ""}">${raw(nodeStateBadges(n))}</td>
-      <td class="num" title="allocated / total GPUs">${gpusAlloc}/${n.gpus}</td>
+      <td title="${n.reason || ""}">${raw(nodeStateBadges(n))}${raw(reasonLine)}</td>
+      <td class="num" title="allocated / total GPUs">${raw(allocSplit(gpusAlloc, n.gpus))}</td>
       <td class="num">${u === null ? "idle" : raw(pctBar(u))}</td>
       <td class="num">${vram}</td>
-      <td class="num" title="allocated / total CPUs">${cpusAlloc}/${n.cpus}</td>
+      <td class="num" title="allocated / total CPUs">${raw(allocSplit(cpusAlloc, n.cpus))}</td>
       <td class="small">${jobs}</td>
     </tr>`;
+}
+
+function allocSplit(alloc, total) {
+  return html`<span class="alloc-split">${alloc}/${total}<span class="alloc-split-label">alloc/total</span></span>`;
 }
 
 function nodeRowClick(e, tr) {

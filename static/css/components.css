@@ -60,6 +60,8 @@ th[data-k] { cursor:pointer; padding:0; position:relative; }
 th[data-k] > button:not(.glossary-btn) { all:unset; box-sizing:border-box; cursor:pointer;
   position:absolute; inset:0; padding:6px 8px; font:inherit; color:inherit;
   text-align:inherit; white-space:inherit; }
+th[data-k] > button:not(.glossary-btn):focus-visible { outline: 2px solid var(--acc);
+  outline-offset: -2px; }
 /* Sits in the corner, above the sort button beneath it (later in DOM
    order, so it paints on top at the same default stacking level without
    needing an explicit z-index) and independently clickable there. */
@@ -68,9 +70,23 @@ th[data-k] > button:not(.glossary-btn) { all:unset; box-sizing:border-box; curso
   font-size:9px; font-weight:700; line-height:1; color:var(--dim); background:var(--panel2);
   border:1px solid var(--line); border-radius:50%; cursor:help; }
 .glossary-btn:hover, .glossary-btn:focus-visible { color:var(--acc); border-color:var(--acc); }
+.glossary-btn:focus-visible { outline: 2px solid var(--acc); outline-offset: 1px; }
 h2 .glossary-btn { position:static; display:inline-flex; margin-left:4px; }
 th.num, td.num { text-align:right; font-family: "SFMono-Regular", Consolas, monospace; }
+/* T-25: the alloc/total split and a drain reason were tooltip-only before
+   — invisible on touch and to screen readers — so both now render in the
+   cell itself; the title attribute on their parent <td> stays only as a
+   hover convenience. */
+.alloc-split { display:inline-flex; flex-direction:column; align-items:flex-end; line-height:1.25; }
+.alloc-split-label { font-size:9px; font-weight:400; color:var(--dim); text-transform:none;
+  font-family:-apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif; letter-spacing:normal; }
+.reason-line { text-transform:none; white-space:normal; margin-top:2px; }
 td { padding:5px 8px; border-bottom:1px solid var(--line); white-space:nowrap; }
+/* T-25: a job name was hard-truncated in JS to 40 characters with no
+   visible sign anything was cut, and the full name was only in the title
+   tooltip. The full name is now always in the cell (and the title); this
+   is what makes truncation visible instead of silent. */
+.name-cell { max-width:220px; overflow:hidden; text-overflow:ellipsis; }
 tr.row { cursor:pointer; }
 tr.row:hover td { background: var(--panel2); }
 tr.row.sel td { background: #233052; }
