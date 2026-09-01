@@ -17,6 +17,7 @@ import { createTable } from "../core/table.js";
 
 let partRows = [];
 export let partTrendData = {};
+let partTrendStep = 300; // seconds; set from the API response, used to size the smoothing window
 export let selectedPartition = ""; // deep-linked or chosen partition; "" = all
 let partitionsToken = 0;
 
@@ -76,6 +77,7 @@ export async function loadPartitions() {
   renderPartBar();
   renderPartOccupancy();
   partTrendData = data.trend;
+  partTrendStep = data.step;
   applyPartitionSelection(selectedPartition);
   renderPartTable();
   loaded.partitions = true;
@@ -146,6 +148,30 @@ function renderPartOccupancy() {
   });
 }
 
+// Centered rolling mean over a fixed WALL-CLOCK window (not a fixed point
+// count): the trend query's own step varies with the selected time range
+// (120s at 24h, up to 900s at 7d — domain/common.py's step_for_range), so
+// a fixed point count would smooth a 7-day view far more aggressively
+// than a 24h one. Targeting ~1h of averaging either way keeps the amount
+// of smoothing consistent across window choices (PLAN-1 3.8) — seven raw
+// per-scrape series over a week were noisy enough to hide the shape of
+// the week itself.
+const TREND_SMOOTH_SECONDS = 3600;
+
+function rollingMean(values, windowPoints) {
+  if (windowPoints <= 1 || values.length <= windowPoints) return values;
+  const half = Math.floor(windowPoints / 2);
+  const out = new Array(values.length);
+  for (let i = 0; i < values.length; i++) {
+    const lo = Math.max(0, i - half);
+    const hi = Math.min(values.length - 1, i + half);
+    let sum = 0;
+    for (let j = lo; j <= hi; j++) sum += values[j][1];
+    out[i] = [values[i][0], sum / (hi - lo + 1)];
+  }
+  return out;
+}
+
 function renderPartTrend(trend) {
   const th = plotTheme();
   const entries = selectedPartition
@@ -159,11 +185,15 @@ function renderPartTrend(trend) {
     .map(([name, values]) => ({ name, values,
       mean: values.reduce((a, v) => a + v[1], 0) / values.length }))
     .sort((a, b) => b.mean - a.mean || compareStrings(a.name, b.name));
-  const traces = ranked.map((r, i) => ({
-    type: "scatter", mode: "lines", name: r.name,
-    x: r.values.map((v) => v[0] * 1000), y: r.values.map((v) => v[1]),
-    line: { width: 1.5, color: th.colors[i % th.colors.length] },
-  }));
+  const windowPoints = Math.max(1, Math.round(TREND_SMOOTH_SECONDS / (partTrendStep || 300)));
+  const traces = ranked.map((r, i) => {
+    const smoothed = rollingMean(r.values, windowPoints);
+    return {
+      type: "scatter", mode: "lines", name: r.name,
+      x: smoothed.map((v) => v[0] * 1000), y: smoothed.map((v) => v[1]),
+      line: { width: 1.5, color: th.colors[i % th.colors.length] },
+    };
+  });
   const layout = {
     margin: { l: 40, r: 20, t: 10, b: 30 },
     paper_bgcolor: "rgba(0,0,0,0)", plot_bgcolor: "rgba(0,0,0,0)",
