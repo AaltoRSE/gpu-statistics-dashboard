@@ -1,0 +1,49 @@
+{
+  "partitions": [
+    {
+      "gpus_alloc": 1,
+      "gpus_total": 8,
+      "job_count": 1,
+      "max_util": 90.0,
+      "mean_occupancy": 12.5,
+      "mean_util": 85.0,
+      "name": "h200_3g.71gb"
+    },
+    {
+      "gpus_alloc": 2,
+      "gpus_total": 16,
+      "job_count": 2,
+      "max_util": 60.0,
+      "mean_occupancy": 12.5,
+      "mean_util": 36.67,
+      "name": "gpu-h100"
+    }
+  ],
+  "step": 120,
+  "trend": {
+    "gpu-h100": [
+      [
+        1000.0,
+        25.0
+      ],
+      [
+        1120.0,
+        35.0
+      ]
+    ],
+    "h200_3g.71gb": [
+      [
+        1000.0,
+        80.0
+      ],
+      [
+        1120.0,
+        90.0
+      ]
+    ]
+  },
+  "window": {
+    "end": 1788100000,
+    "start": 1788013600
+  }
+}

@@ -1,0 +1,53 @@
+{
+  "count": 4,
+  "users": [
+    {
+      "gpu_types": [
+        "h200"
+      ],
+      "jobs": 1,
+      "mean_util": 92.5,
+      "running_jobs": 0,
+      "user": "carol",
+      "util_gpu_hours": 0.06,
+      "vram_avg": null
+    },
+    {
+      "gpu_types": [
+        "h200_3g.71gb"
+      ],
+      "jobs": 1,
+      "mean_util": 85.0,
+      "running_jobs": 1,
+      "user": "dave",
+      "util_gpu_hours": 0.06,
+      "vram_avg": null
+    },
+    {
+      "gpu_types": [
+        "h100"
+      ],
+      "jobs": 1,
+      "mean_util": 50.0,
+      "running_jobs": 1,
+      "user": "alice",
+      "util_gpu_hours": 0.03,
+      "vram_avg": 11.0
+    },
+    {
+      "gpu_types": [
+        "h100"
+      ],
+      "jobs": 1,
+      "mean_util": 10.0,
+      "running_jobs": 1,
+      "user": "bob",
+      "util_gpu_hours": 0.0,
+      "vram_avg": null
+    }
+  ],
+  "window": {
+    "end": 1788100000,
+    "start": 1788013600
+  }
+}
