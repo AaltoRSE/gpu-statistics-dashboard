@@ -181,7 +181,7 @@ export async function loadNodeDetail(name) {
   $("nodeDetailResults").style.display = "block";
   $("nodeDetailTitle").textContent = "Node " + name;
   setResultsLoading("nodeDetailResults", true);
-  $("nodeDetailResults").scrollIntoView({ behavior: "smooth", block: "nearest" });
+  clearNodeTableHighlight();
   try {
     const data = await api("/api/nodes/" + encodeURIComponent(name) + "?view=" + $("ndWindow").value);
     if (token !== nodeDetailToken) return;
@@ -191,12 +191,35 @@ export async function loadNodeDetail(name) {
     nodeDetailJob = ""; // a window/node change invalidates the job choice
     fillNodeJobSelect(data);
     renderNodeDetail(data, name);
+    // Land the deep link, not a thousand pixels above it (PLAN-1 2.2):
+    // scrolling before the detail panel's real content (charts, job
+    // select) has rendered targets whatever height its loading skeleton
+    // happened to have, not where the panel actually ends up. block:
+    // "start" (not "nearest") always aligns the panel's own top edge to
+    // the viewport, regardless of whether it already overlapped it.
+    $("nodeDetailResults").scrollIntoView({ behavior: "smooth", block: "start" });
+    highlightNodeRow(name);
   } catch (e) {
     if (token === nodeDetailToken)
       showPanelError("nodeDetailResults", e, () => loadNodeDetail(name), "the node detail");
   } finally {
     if (token === nodeDetailToken) setResultsLoading("nodeDetailResults", false);
   }
+}
+
+function highlightNodeRow(name) {
+  clearNodeTableHighlight();
+  const tr = $("nodeTable").querySelector('tr.row[data-node="' + name + '"]');
+  // No scrollIntoView here: the detail panel's own scroll above is the
+  // actual navigation target (that's the whole fix for 2.2) — this is
+  // just a visual marker for whoever scrolls back up to the table, not a
+  // second place to land.
+  if (tr) tr.classList.add("sel");
+}
+
+function clearNodeTableHighlight() {
+  const tb = $("nodeTable").querySelector("tbody");
+  if (tb) tb.querySelectorAll("tr.row.sel").forEach((t) => t.classList.remove("sel"));
 }
 
 function fillNodeJobSelect(data) {
