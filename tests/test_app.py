@@ -937,45 +937,61 @@ def test_jobs_mean_util_field_and_no_duplicate_efficiency_field(client):
     assert "efficiency" not in by_id["1"]
 
 
-def test_efficiency_extremes_never_overlaps():
-    # 100 candidates: well above the 2*30 threshold, so the classic top/
-    # bottom 30 applies unchanged and the two lists are still disjoint.
-    jobs = [{"jobid": str(i), "mean_util": float(i)} for i in range(100)]
-    high, low = domain_jobs.efficiency_extremes(jobs)
-    assert len(high) == 30 and len(low) == 30
-    assert {j["jobid"] for j in high}.isdisjoint({j["jobid"] for j in low})
-
-    # 5 candidates: below 2*30, so each list is capped at 5 // 2 = 2 rather
-    # than the classic 30 (which would make both lists identical).
-    jobs = [{"jobid": str(i), "mean_util": float(i)} for i in range(5)]
-    high, low = domain_jobs.efficiency_extremes(jobs)
-    assert [j["jobid"] for j in high] == ["4", "3"]
-    assert [j["jobid"] for j in low] == ["0", "1"]
-
-    # 0 or 1 candidates: no meaningful "highest" vs "lowest" distinction
-    # exists, so both lists are empty rather than trivially identical.
-    assert domain_jobs.efficiency_extremes([]) == ([], [])
-    one = [{"jobid": "1", "mean_util": 50.0}]
-    assert domain_jobs.efficiency_extremes(one) == ([], [])
+def test_efficiency_histogram_all_buckets_zero_filled():
+    # No jobs at all: every bucket from 0-100 is still present, at zero —
+    # a caller must be able to tell "no data" from "no bar drawn here".
+    hist = domain_jobs.efficiency_histogram([])
+    assert len(hist) == 10
+    assert [b["bucket_start"] for b in hist] == list(range(0, 100, 10))
+    assert [b["bucket_end"] for b in hist] == list(range(10, 101, 10))
+    assert all(b["gpu_hours"] == 0.0 for b in hist)
 
 
-def test_jobs_efficiency_extremes(client):
+def test_efficiency_histogram_bins_and_sums_gpu_hours():
+    jobs = [
+        {"jobid": "1", "mean_util": 5.0, "gpu_hours_eff": 2.0},
+        {"jobid": "2", "mean_util": 8.0, "gpu_hours_eff": 1.0},
+        {"jobid": "3", "mean_util": 92.5, "gpu_hours_eff": 4.0},
+        # Exactly 100 (the theoretical max) must land in the last bucket,
+        # not spill past it into a nonexistent 100-110 bucket.
+        {"jobid": "4", "mean_util": 100.0, "gpu_hours_eff": 1.5},
+    ]
+    hist = domain_jobs.efficiency_histogram(jobs)
+    by_bucket = {(b["bucket_start"], b["bucket_end"]): b["gpu_hours"] for b in hist}
+    assert by_bucket[(0, 10)] == 3.0  # jobs 1 + 2
+    assert by_bucket[(90, 100)] == 5.5  # jobs 3 + 4
+    assert by_bucket[(10, 20)] == 0.0
+
+
+def test_jobs_efficiency_histogram(client):
     data = client.get("/api/jobs", params={"since_hours": 24}).json()
-    # 4 candidates -> capped at 4 // 2 = 2 each (T-27), so the two lists
-    # never share a job: job 4 (85.0) no longer appears in both.
-    assert [j["jobid"] for j in data["efficiency_high"]] == ["3", "4"]
-    assert [j["jobid"] for j in data["efficiency_low"]] == ["2", "1"]
+    hist = data["efficiency_histogram"]
+    by_bucket = {(b["bucket_start"], b["bucket_end"]): b["gpu_hours"] for b in hist}
+    assert len(hist) == 10
+    # Pre-enrich gpu_hours_eff, matching the fixture's four jobs: job 1
+    # (mean_util 50 -> 0.03), job 2 (mean_util 10 -> 0.0, contributes
+    # nothing), job 3 (mean_util 92.5 -> 0.06), job 4 (mean_util 85.0 ->
+    # 0.06).
+    assert by_bucket[(50, 60)] == 0.03
+    assert by_bucket[(80, 90)] == 0.06
+    assert by_bucket[(90, 100)] == 0.06
+    assert sum(v for k, v in by_bucket.items()
+               if k not in {(50, 60), (80, 90), (90, 100)}) == 0
 
 
-def test_jobs_extremes_bounded_by_search(client):
+def test_jobs_histogram_bounded_by_search(client):
     data = client.get("/api/jobs",
                       params={"since_hours": 24, "search": "train.sh"}).json()
-    # search matches only job 1's sacct name; charts must show the searched rows
+    # search matches only job 1's sacct name (mean_util=50). This second
+    # histogram is computed after enrich(), so it uses job 1's
+    # allocation-based gpu_hours_eff (1.0), not the pre-enrich estimate the
+    # first (unsearched) histogram uses — see the api/jobs.py comment on
+    # why the two histograms in one response can use different bases.
     assert [j["jobid"] for j in data["jobs"]] == ["1"]
-    # 1 candidate -> capped at 1 // 2 = 0: showing the sole match as both
-    # "highest" and "lowest" would be a trivial, meaningless overlap (T-27).
-    assert data["efficiency_high"] == []
-    assert data["efficiency_low"] == []
+    hist = data["efficiency_histogram"]
+    by_bucket = {(b["bucket_start"], b["bucket_end"]): b["gpu_hours"] for b in hist}
+    assert by_bucket[(50, 60)] == 1.0
+    assert sum(v for k, v in by_bucket.items() if k != (50, 60)) == 0
 
 
 def test_jobs_total_candidates_reflects_pre_limit_count(client):

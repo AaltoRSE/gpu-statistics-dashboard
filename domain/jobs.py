@@ -3,7 +3,7 @@
 The core Prometheus fetch every Jobs-tab-shaped view builds on (the
 Jobs tab itself, the Users tab's aggregation, and the VRAM
 distribution chart all call ``fetch_job_window``), plus the
-efficiency-extremes ranking used by the Jobs tab's charts.
+efficiency histogram used by the Jobs tab's chart.
 """
 
 from collections import defaultdict
@@ -99,26 +99,26 @@ def fetch_job_window(since_hours, include_vram=True, user=None):
     return out, start, now, step
 
 
-def efficiency_extremes(jobs, count=30):
-    """Top/bottom average-efficiency (mean_util) jobs with deterministic ties.
+def efficiency_histogram(jobs, bin_width=10):
+    """GPU-hours by mean-utilization bucket, all buckets zero-filled.
 
-    ``efficiency_high`` is the highest-efficiency jobs, descending;
-    ``efficiency_low`` is the lowest-efficiency jobs, ascending. Ties break by
-    job ID so both lists are stable across calls. "Efficiency" here names a
-    concept (average GPU utilization), not a separate field — it is
-    mean_util itself; there is no dedicated efficiency field on a job.
-
-    Each list is capped at ``min(count, len(jobs) // 2)`` rather than
-    ``count`` outright: with fewer than ``2 * count`` candidates, a plain
-    top-``count``/bottom-``count`` cut overlaps — the same job would appear
-    in both the "highest" and "lowest" charts, which is never a sensible
-    answer to either question. Halving instead keeps the two lists
-    disjoint at every candidate count, including zero and one.
+    Bins each job by ``mean_util`` ("efficiency" elsewhere in this API) into
+    ``bin_width``-wide buckets from 0 to 100, summing ``gpu_hours_eff`` per
+    bucket. Every bucket is always present in the result, in order, even
+    when no job falls in it — a bucket a caller silently omits reads as "no
+    capacity wasted here", identical to a bucket that legitimately has none,
+    when it actually means "no bar for this position at all". A job's
+    ``mean_util`` is clamped into ``[0, 100)`` before bucketing so an
+    out-of-range measurement still lands in the nearest boundary bucket
+    rather than dropping out of the total.
     """
-    n = min(count, len(jobs) // 2)
-    if n <= 0:
-        return [], []
-    ordered = sorted(jobs, key=lambda j: (j["mean_util"], j["jobid"]))
-    low = ordered[:n]
-    high = sorted(ordered[-n:], key=lambda j: (-j["mean_util"], j["jobid"]))
-    return high, low
+    n_buckets = 100 // bin_width
+    totals = [0.0] * n_buckets
+    for job in jobs:
+        idx = int(min(max(job["mean_util"], 0), 100 - 1e-9) // bin_width)
+        totals[idx] += job.get("gpu_hours_eff") or 0
+    return [
+        {"bucket_start": i * bin_width, "bucket_end": (i + 1) * bin_width,
+         "gpu_hours": round(totals[i], 2)}
+        for i in range(n_buckets)
+    ]
