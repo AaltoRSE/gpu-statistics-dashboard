@@ -47,6 +47,15 @@ main { padding: 16px 22px 40px; }
 .controls label.row { flex-direction:row; align-items:center; gap:6px; text-transform:none; }
 .controls button { background: var(--panel2); color: var(--text); border:1px solid var(--line);
   border-radius:6px; padding:6px 12px; font-size:12px; cursor:pointer; }
+.user-selected { display:none; align-items:center; gap:12px; margin:0 0 12px;
+  background:var(--panel2); border:1px solid var(--acc); border-radius:8px; padding:10px 14px; }
+.user-selected.on { display:flex; }
+.user-selected .us-label { font-size:11px; color:var(--dim); text-transform:uppercase; letter-spacing:.05em; }
+.user-selected .us-name { font-size:16px; font-weight:700; color:var(--text); }
+.user-selected .us-hint { font-size:12px; color:var(--dim); margin-left:4px; }
+.user-selected .us-clear { margin-left:auto; background:var(--panel); color:var(--text);
+  border:1px solid var(--line); border-radius:6px; padding:5px 12px; font-size:12px; cursor:pointer; }
+
 .table-scroll thead th { position: sticky; top: 0; z-index: 2; background: var(--panel); }
 /* theme-aware scrollbars for table overflow containers (defaults are
    white-on-white in dark mode) */
@@ -57,6 +66,26 @@ main { padding: 16px 22px 40px; }
   border: 2px solid var(--panel); }
 .table-scroll::-webkit-scrollbar-thumb:hover { background: var(--dim); }
 .table-scroll::-webkit-scrollbar-corner { background: transparent; }
+.table-scroll { position: relative; }
+/* Sticky first (entity) column so the row identity stays visible while the
+   table scrolls horizontally at narrow widths; header keeps priority. */
+table th:first-child, table td:first-child { position: sticky; left: 0; z-index: 1;
+  background: var(--panel); box-shadow: 1px 0 0 var(--line); }
+table th:first-child { z-index: 3; background: var(--panel); }
+tr.row:hover td:first-child { background: var(--panel2); }
+@media (max-width: 820px) {
+  main { padding: 12px 12px 32px; }
+  header { padding: 12px 14px; gap: 10px; }
+  nav.tabs { padding: 8px 12px 0; }
+  nav.tabs button { padding: 6px 10px; font-size: 13px; }
+  /* Two-row control toolbar: primary controls wrap, the refresh/refresh-area
+     control drops to its own row instead of competing in one tight line. */
+  .controls { gap: 10px; padding: 10px 12px; }
+  .controls label, .controls select, .controls input { min-width: 0; width: auto; }
+  .controls input, .controls select { min-width: 120px; }
+  .controls .controls-actions { width: 100%; justify-content:flex-start; }
+  .card { padding: 10px 12px; }
+}
 .grid { display:grid; gap:14px; }
 .grid.two { grid-template-columns: 1fr 1fr; }
 @media (max-width: 1100px) { .grid.two { grid-template-columns: 1fr; } }
@@ -65,7 +94,8 @@ main { padding: 16px 22px 40px; }
 .card .hint { font-size:11px; color:var(--dim); margin-top:6px; }
 table { width:100%; border-collapse: collapse; font-size: 12.5px; }
 th { text-align:left; color:var(--dim); font-weight:600; font-size:11px; text-transform:uppercase;
-     letter-spacing:.04em; padding:6px 8px; border-bottom:1px solid var(--line); cursor:pointer; user-select:none; white-space:nowrap; }
+     letter-spacing:.04em; padding:6px 8px; border-bottom:1px solid var(--line); user-select:none; white-space:nowrap; }
+th[data-k] { cursor:pointer; }
 th.num, td.num { text-align:right; font-family: "SFMono-Regular", Consolas, monospace; }
 td { padding:5px 8px; border-bottom:1px solid var(--line); white-space:nowrap; }
 tr.row { cursor:pointer; }
@@ -114,13 +144,18 @@ th.sorted-desc::after { content:" \25BC"; font-size:9px; color:var(--acc); }
 @media (max-width: 1100px) {
   .controls .controls-actions { margin-left:0; width:100%; justify-content:flex-end; }
 }
-/* visible loading state: blur/dim results while a request is in flight */
+/* Panel-local loading: a small status chip plus a light dim — content stays
+   readable (no blur) so a refresh never implies the shown data is gone. */
 .results-panel { position:relative; }
-.results-panel.loading > .results-content { filter:blur(2px); opacity:.4; pointer-events:none; }
+.results-panel.loading > .results-content { opacity:.55; pointer-events:none; }
 .results-loading { position:absolute; left:50%; top:38%; transform:translate(-50%,-50%);
-  font-size:14px; color:var(--text); background:var(--panel2); border:1px solid var(--line);
+  font-size:13px; color:var(--text); background:var(--panel2); border:1px solid var(--line);
   border-radius:8px; padding:8px 16px; z-index:3; display:none; }
 .results-panel.loading .results-loading { display:block; }
+/* A failed refresh keeps the last data visible but flags it as stale rather
+   than current; the panel-error box below offers the retry. */
+.stale-note { display:none; margin-top:8px; font-size:12px; color:var(--warn); }
+.results-panel.stale .stale-note { display:block; }
 .pct-cell { display:inline-flex; align-items:center; justify-content:flex-end; }
 .pct-value { flex:0 0 34px; text-align:right; font-variant-numeric: tabular-nums; }
 header .theme-btn { font-size:12px; color:var(--dim); background:var(--panel2);
@@ -143,6 +178,41 @@ header .theme-btn:hover { color:var(--text); }
 .range-values { display:flex; justify-content:space-between; width:240px; margin-top:4px;
   font-size:11px; color:var(--dim); }
 .range-values strong { color:var(--text); font-variant-numeric:tabular-nums; }
+
+/* detail-first job view */
+.detail-head { display:flex; align-items:baseline; gap:12px; flex-wrap:wrap; }
+.detail-head h2 { margin:0; }
+.detail-actions { margin-left:auto; display:flex; align-items:center; gap:10px; }
+.backlink { font-size:12px; text-decoration:none; }
+.backlink:hover { text-decoration:underline; }
+#jobDetailClose { background:none; border:1px solid var(--line); color:var(--dim);
+  border-radius:6px; cursor:pointer; font-size:11px; line-height:1; padding:3px 7px; }
+#jobDetailClose:hover { color:var(--text); border-color:var(--dim); }
+.explorer-head { display:flex; align-items:center; gap:12px; margin:14px 0 0; }
+#jobExplorerToggle { background:none; border:none; color:var(--acc); cursor:pointer;
+  font-size:14px; font-weight:600; padding:2px 0; }
+#jobExplorerToggle:hover { text-decoration:underline; }
+#jobExplorer.collapsed #jobExplorerBody { display:none; }
+#jobExplorerNote { color:var(--dim); font-size:12px; }
+.legend { display:flex; align-items:center; gap:6px; flex-wrap:wrap;
+  font-size:11px; color:var(--dim); margin-top:4px; }
+.legend-key { display:inline-block; width:11px; height:11px; border-radius:3px;
+  vertical-align:-1px; margin-left:8px; }
+.legend .legend-key:first-child { margin-left:0; }
+.empty-state { text-align:center; color:var(--dim); padding:22px 10px; font-size:13px; }
+.empty-state button { margin-left:8px; }
+.panel-error { margin-top:8px; font-size:12px; color:var(--bad);
+  display:flex; align-items:center; gap:10px; }
+.no-data { color:var(--dim); font-size:12px; padding:14px 0; text-align:center; }
+
+/* efficiency chart controls */
+.eff-controls { justify-content:space-between; gap:8px; margin:0 0 4px;
+  font-size:11px; color:var(--dim); }
+.eff-controls label { font-size:11px; cursor:pointer; }
+.eff-controls a { color:var(--acc); font-size:11px; text-decoration:none; white-space:nowrap; }
+.eff-controls a:hover { text-decoration:underline; }
+
+
 </style>
 </head>
 <body>
@@ -188,17 +258,49 @@ header .theme-btn:hover { color:var(--text); }
       </span>
       <button id="jRefresh" title="force a fresh Prometheus read"><span aria-hidden="true">&#8635;</span> refresh</button>
     </div>
+    <div id="jobDetailResults" class="results-panel" style="display:none">
+      <div class="results-content">
+        <div class="card" id="jobDetailCard" style="margin-top:14px">
+          <div class="detail-head">
+            <h2 id="jobDetailTitle">Job detail</h2>
+            <span class="detail-actions">
+              <a href="#" id="jobDetailBack" class="backlink" style="display:none"></a>
+              <button id="jobDetailClose" title="close the job detail">&#10005;</button>
+            </span>
+          </div>
+          <div class="hint" id="jobDetailMeta"></div>
+          <div id="jobDetailPlot" class="chart tall"></div>
+        </div>
+      </div>
+      <div class="results-loading">Data is loading&hellip;</div>
+    </div>
+    <div id="jobExplorer" class="collapsible">
+      <div class="explorer-head">
+        <button id="jobExplorerToggle" aria-expanded="true">&#9662; Browse jobs</button>
+        <span class="hint" id="jobExplorerNote"></span>
+      </div>
+      <div id="jobExplorerBody">
     <div id="jobEfficiencyResults" class="results-panel">
       <div class="results-content">
         <div class="grid two">
           <div class="card">
-            <h2>Highest average efficiency</h2>
+            <h2 id="jobHighTitle">Highest average efficiency</h2>
+            <div class="row eff-controls">
+              <label class="row"><input type="checkbox" id="effImpact"> rank by effective GPU&ndash;hours</label>
+              <a href="#" id="effShowAll">show all 30</a>
+            </div>
             <div class="chart" id="jobHighBarPlot"></div>
           </div>
           <div class="card">
-            <h2>Lowest average efficiency</h2>
+            <h2 id="jobLowTitle">Lowest average efficiency</h2>
+            <div class="row eff-controls"><span class="small" id="effLowNote"></span></div>
             <div class="chart" id="jobLowBarPlot"></div>
           </div>
+        </div>
+        <div class="legend">
+          <span class="legend-key" style="background:var(--bad)"></span> &lt;40%
+          <span class="legend-key" style="background:var(--warn)"></span> 40&ndash;75%
+          <span class="legend-key" style="background:var(--ok)"></span> &ge;75%
         </div>
       </div>
       <div class="results-loading">Data is loading&hellip;</div>
@@ -226,15 +328,7 @@ header .theme-btn:hover { color:var(--text); }
       </div>
       <div class="results-loading">Data is loading&hellip;</div>
     </div>
-    <div id="jobDetailResults" class="results-panel" style="display:none">
-      <div class="results-content">
-        <div class="card" id="jobDetailCard" style="margin-top:14px">
-          <h2 id="jobDetailTitle">Job detail</h2>
-          <div id="jobDetailPlot" class="chart tall"></div>
-          <div class="hint" id="jobDetailMeta"></div>
-        </div>
       </div>
-      <div class="results-loading">Data is loading&hellip;</div>
     </div>
   </section>
 
@@ -252,6 +346,7 @@ header .theme-btn:hover { color:var(--text); }
         <select id="pPartition"><option value="">all partitions</option></select>
       </label>
       <label class="row"><input id="pRunning" type="checkbox"> Running only</label>
+      <div class="hint" id="pScope" style="margin-left:8px;align-self:center"></div>
     </div>
     <div id="partitionsResults" class="results-panel">
       <div class="results-content">
@@ -259,10 +354,18 @@ header .theme-btn:hover { color:var(--text); }
         <div class="card">
           <h2>Mean utilization by partition</h2>
           <div class="chart" id="partBarPlot"></div>
+          <div class="legend">
+            <span class="legend-key" style="background:var(--bad)"></span> &lt;40%
+            <span class="legend-key" style="background:var(--warn)"></span> 40&ndash;75%
+            <span class="legend-key" style="background:var(--ok)"></span> &ge;75%
+          </div>
         </div>
         <div class="card">
           <h2>Mean occupancy by partition</h2>
           <div class="chart" id="partOccupancyPlot"></div>
+          <div class="legend neutral">
+            <span class="legend-key" style="background:var(--acc)"></span> share of capacity with an active job
+          </div>
         </div>
         <div class="card" style="grid-column:1 / -1">
           <h2>Utilization trend over time</h2>
@@ -294,6 +397,15 @@ header .theme-btn:hover { color:var(--text); }
         <h2>VRAM distribution by job</h2>
         <div class="controls bare">
           <label class="row"><input id="vNormalize" type="checkbox"> Normalize</label>
+          <label>GPU type
+            <select id="vGpuType"><option value="">all</option></select>
+          </label>
+          <label>Weight
+            <select id="vWeight">
+              <option value="alloc" selected>allocated GPU-hours</option>
+              <option value="eff">effective GPU-hours</option>
+            </select>
+          </label>
           <label>GPU utilization range
             <span class="range-slider">
               <span class="slider-track" id="vTrack"></span>
@@ -341,6 +453,12 @@ header .theme-btn:hover { color:var(--text); }
     <div id="usersResults" class="results-panel loading">
       <div class="results-content">
         <div class="card">
+        <div class="user-selected" id="userSelectedBanner">
+          <span class="us-label">selected user</span>
+          <span class="us-name" id="userSelectedName"></span>
+          <span class="us-hint">jobs below are scoped to this user</span>
+          <button class="us-clear" id="userSelectedClear" type="button">clear selection</button>
+        </div>
           <h2>User table <span class="small" id="uCount"></span></h2>
           <div class="table-scroll" style="overflow-x:auto; max-height:520px; overflow-y:auto">
             <table id="userTable">
@@ -435,6 +553,9 @@ header .theme-btn:hover { color:var(--text); }
               <option value="6">last 6 h</option>
               <option value="24">last 24 h</option>
             </select>
+          </label>
+          <label>Job
+            <select id="ndJob"><option value="">all jobs</option></select>
           </label>
         </div>
         <h3 class="small" style="margin:10px 0 4px">GPU utilization %</h3>

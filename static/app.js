@@ -50,6 +50,7 @@ function plotTheme() {
     ok: light ? "#2e7d32" : "#66bb6a",
     warn: light ? "#ef6c00" : "#ffa726",
     bad: light ? "#d32f2f" : "#ef5350",
+    acc: light ? "#0288d1" : "#4fc3f7",
     idle: light ? "#c9d3e3" : "#2a3552",
   };
 }
@@ -66,6 +67,68 @@ function errBox(show, msg) {
   const box = $("errBox");
   box.style.display = show ? "block" : "none";
   if (show) box.textContent = msg;
+}
+
+// Panel-local failure state: names the failed data source and offers a retry,
+// keeping the last data visible (flagged stale) without depending on the
+// global banner. The <div class="panel-error"> is appended to the panel's
+// results-content so it sits with the data it belongs to.
+const panelLoadedAt = {}; // resultsId -> ms timestamp of last successful load
+function fmtClock(ts) {
+  return new Date(ts).toLocaleTimeString("en-GB", { hour12: false });
+}
+function showPanelError(resultsId, err, reload, source) {
+  const panel = $(resultsId);
+  if (!panel) return;
+  clearPanelError(resultsId);
+  const box = document.createElement("div");
+  box.className = "panel-error";
+  box.innerHTML = "&#9888; " + escapeHtml(
+    "Could not load " + (source || "data") + ": " +
+    (err && err.message ? err.message : err));
+  if (typeof reload === "function") {
+    const btn = document.createElement("button");
+    btn.textContent = "retry";
+    btn.addEventListener("click", () => { clearPanelError(resultsId); reload(); });
+    box.appendChild(btn);
+  }
+  const content = panel.querySelector(".results-content") || panel;
+  content.appendChild(box);
+  markStale(resultsId, true);
+}
+
+function clearPanelError(resultsId) {
+  const panel = $(resultsId);
+  if (!panel) return;
+  panel.querySelectorAll(".panel-error").forEach((el) => el.remove());
+  markStale(resultsId, false);
+}
+
+// A successful load: remember when it happened (for the stale timestamp) and
+// drop any error/stale state. Call at each loader's success point.
+function panelOk(resultsId) {
+  panelLoadedAt[resultsId] = Date.now();
+  clearPanelError(resultsId);
+}
+
+// Flag (or clear) the panel's data as stale. Only meaningful once a load has
+// actually succeeded; a first-load failure shows just the error box (there is
+// no prior data to be "stale"). The note carries the last-load timestamp so
+// the operator knows how old the visible numbers are.
+function markStale(resultsId, stale) {
+  const panel = $(resultsId);
+  if (!panel) return;
+  panel.classList.toggle("stale", !!stale);
+  const at = panelLoadedAt[resultsId];
+  if (!stale || !at) return;
+  let note = panel.querySelector(".stale-note");
+  if (!note) {
+    note = document.createElement("div");
+    note.className = "stale-note";
+    (panel.querySelector(".results-content") || panel).appendChild(note);
+  }
+  note.textContent = "Out of date \u2014 last loaded " + fmtClock(at) +
+    ". The refresh failed, so this may not reflect the current state.";
 }
 
 async function api(path) {
@@ -135,6 +198,18 @@ function nodeStateBadges(n) {
 
 function tsToDate(ts) {
   return new Date(ts * 1000).toISOString().slice(0, 16).replace("T", " ");
+}
+
+// Trailing-edge debounce for high-frequency input events; the returned
+// wrapper exposes .cancel() so a load can be cancelled mid-flight.
+function debounce(fn, wait) {
+  let t = null;
+  const wrapped = (...args) => {
+    clearTimeout(t);
+    t = setTimeout(() => { t = null; fn(...args); }, wait);
+  };
+  wrapped.cancel = () => { clearTimeout(t); t = null; };
+  return wrapped;
 }
 
 /* ---------------- health ---------------- */
@@ -261,6 +336,8 @@ async function loadJobs(force = false) {
   try {
     const data = await api("/api/jobs?" + params);
     if (token !== jobsToken) return; // a newer request supersedes this one
+    panelOk("jobsResults");
+    panelOk("jobEfficiencyResults");
     jobRows = data.jobs;
     // The server computes highest/lowest efficiency from the searched rows.
     jobBaseHigh = data.efficiency_high || [];
@@ -277,10 +354,13 @@ async function loadJobs(force = false) {
     $("jMetaCount").textContent = data.count + " jobs";
     $("jMeta").textContent =
       tsToDate(w.start) + " → " + tsToDate(w.end) + " UTC";
-    renderJobEffChart("jobHighBarPlot", jobBaseHigh);
-    renderJobEffChart("jobLowBarPlot", jobBaseLow);
+    renderJobEfficiency();
     renderJobsView();
     loaded.jobs = true;
+  } catch (e) {
+    if (token === jobsToken)
+      showPanelError("jobsResults", e, () => loadJobs(), "the job list");
+    throw e;
   } finally {
     if (token === jobsToken) {
       if (btn) btn.disabled = false;
@@ -322,8 +402,29 @@ function renderJobsView() {
     : rows.length + " shown";
 }
 
+// A filtered table with zero rows says what was filtered out and offers a
+// reset, instead of a blank box that reads as "no data".
+function emptyRow(cols, msg, resetLabel) {
+  const btn = resetLabel ? ' <button data-empty-reset="1">' + escapeHtml(resetLabel) + '</button>' : '';
+  return '<tr class="empty-state-row"><td colspan="' + cols + '">' +
+    '<div class="empty-state">' + escapeHtml(msg) + btn + '</div></td></tr>';
+}
 function renderJobTable(rows) {
   const tb = $("jobTable").querySelector("tbody");
+  const hasFilters = $("jSearch").value.trim() !== "" || $("jPartition").value !== "";
+  if (!rows.length) {
+    const msg = hasFilters
+      ? "No jobs match the current search / partition filters."
+      : "No jobs in this window.";
+    tb.innerHTML = emptyRow(10, msg, hasFilters ? "reset filters" : null);
+    const reset = tb.querySelector("button[data-empty-reset]");
+    if (reset) reset.addEventListener("click", () => {
+      $("jSearch").value = "";
+      $("jPartition").value = "";
+      loadJobs();
+    });
+    return;
+  }
   tb.innerHTML = rows.map((j) => {
     const jobid = escapeHtml(j.jobid);
     const rawName = j.name || "";
@@ -349,67 +450,185 @@ function renderJobTable(rows) {
       if (nlink) { e.stopPropagation(); openNode(nlink.dataset.node); return; }
       const plink = e.target.closest("a.partitionlink");
       if (plink) { e.stopPropagation(); openPartition(plink.dataset.partition); return; }
-      loadJobDetail(tr.dataset.job);
+      loadJobDetail(tr.dataset.job, { table: true });
     }));
 }
 
-function renderJobEffChart(elId, jobs) {
-  const trace = {
-    type: "bar", orientation: "h",
-    y: jobs.map((j) => j.jobid + " · " + j.user),
-    x: jobs.map((j) => j.efficiency),
-    customdata: jobs.map((j) => j.jobid),
-    marker: {
-      color: jobs.map((j) => partBarColor(j.efficiency)),
-      line: { width: 0 },
-    },
-    hovertemplate: "<b>%{y}</b><br>average efficiency: %{x:.1f}%<extra></extra>",
-  };
+let effImpact = false;   // rank by effective GPU-hours instead of average efficiency
+let effShowAll = false;  // show the full top-30 set instead of the default 10
+
+// One horizontal efficiency bar chart. ``sortKey`` ranks the rows (and
+// ``dir`` chooses which end is "first"); ``barKey`` sets the bar length so
+// color and length encode the same quantity. Efficiency mode keeps them
+// equal (efficiency). Impact mode makes the high chart rank and measure by
+// effective GPU-hours, and reorders the low chart by GPU-hours while its
+// bars still show average efficiency — the cheap-to-fix-inefficiency list
+// then surfaces the jobs that burned the most capacity (no waste metric is
+// available, so we never claim one).
+function renderJobEffChart(elId, jobs, sortKey, barKey, dir) {
+  const val = (j) => j[sortKey] || 0;
+  let rows = jobs.slice().sort((a, b) => {
+    const va = val(a), vb = val(b);
+    return dir === "high" ? (vb - va) || compareStrings(a.jobid, b.jobid)
+                          : (va - vb) || compareStrings(a.jobid, b.jobid);
+  });
+  if (!effShowAll) rows = rows.slice(0, 10);
   const th = plotTheme();
+  const isGpuHours = barKey === "gpu_hours_eff";
   const layout = {
     margin: { l: 130, r: 20, t: 10, b: 30 },
     paper_bgcolor: "rgba(0,0,0,0)", plot_bgcolor: "rgba(0,0,0,0)",
     font: th.font,
-    xaxis: { title: "average efficiency %", range: [0, 105], gridcolor: th.grid },
+    xaxis: { title: isGpuHours ? "effective GPU-hours" : "average efficiency %",
+      range: isGpuHours ? undefined : [0, 105], gridcolor: th.grid },
     yaxis: { autorange: "reversed", gridcolor: th.grid },
   };
-  if (!jobs.length) {
+  if (!rows.length) {
+    layout.xaxis.showaxis = false;
+    layout.yaxis.showaxis = false;
     layout.annotations = [{
       text: "No jobs match the current filters", showarrow: false,
       xref: "paper", yref: "paper", x: 0.5, y: 0.5,
       font: { color: th.font.color, size: 12 },
     }];
-    renderPlot(elId, [trace], layout);
+    renderPlot(elId, [{ type: "bar" }], layout);
     return;
   }
+  const trace = {
+    type: "bar", orientation: "h",
+    y: rows.map((j) => j.jobid + " · " + j.user),
+    x: rows.map((j) => j[barKey] || 0),
+    customdata: rows.map((j) => [j.jobid, j.efficiency, j.gpu_hours_eff || 0,
+      j.gpu_group || j.partition || "", j.gpu_type || ""]),
+    marker: {
+      color: rows.map((j) => partBarColor(j.efficiency)),
+      line: { width: 0 },
+    },
+    hovertemplate: (isGpuHours
+      ? "<b>%{y}</b><br>effective GPU-hours: %{x:.1f}<br>average efficiency: %{customdata[1]:.1f}%"
+      : "<b>%{y}</b><br>average efficiency: %{x:.1f}%<br>effective GPU-hours: %{customdata[2]:.1f}") +
+      "<br>partition: %{customdata[3]} · %{customdata[4]}<extra></extra>",
+  };
   renderPlot(elId, [trace], layout).then((g) => {
     // Plotly.react keeps the graph div across renders: clear stale
     // handlers before rebinding or one click fires N detail loads.
     g.removeAllListeners("plotly_click");
     g.on("plotly_click", (ev) => {
-      const id = ev.points[0].customdata;
-      if (id) loadJobDetail(id);
+      const id = ev.points[0].customdata[0];
+      if (id) loadJobDetail(id, { table: true });
     });
   });
 }
 
+function renderJobEfficiency() {
+  // High chart: efficiency mode ranks+measures by average efficiency;
+  // impact mode ranks+measures by effective GPU-hours consumed.
+  const highSort = effImpact ? "gpu_hours_eff" : "efficiency";
+  const highBar = effImpact ? "gpu_hours_eff" : "efficiency";
+  // Low chart: bars always show average efficiency; impact mode only
+  // reorders it by effective GPU-hours (descending) so the top rows are the
+  // inefficient jobs that consumed the most capacity.
+  const lowSort = effImpact ? "gpu_hours_eff" : "efficiency";
+  const lowDir = effImpact ? "high" : "low";
+  renderJobEffChart("jobHighBarPlot", jobBaseHigh, highSort, highBar, "high");
+  renderJobEffChart("jobLowBarPlot", jobBaseLow, lowSort, "efficiency", lowDir);
+  $("jobHighTitle").textContent = effImpact
+    ? "Highest effective GPU-hours" : "Highest average efficiency";
+  $("jobLowTitle").textContent = effImpact
+    ? "Lowest efficiency · most GPU-hours consumed" : "Lowest average efficiency";
+  $("effShowAll").textContent = effShowAll
+    ? "show top 10" : "show all " + (jobBaseHigh.length || 30);
+  $("effLowNote").textContent = effImpact
+    ? "reordered by effective GPU-hours consumed (bars = average efficiency)" : "";
+}
+
+let jobDetailFrom = null; // { node } when the job was opened from a node's Active jobs
+let jobDetailOpenedFromTable = false;
+let jobDetailWasCollapsed = false; // explorer visibility before the detail opened
 let jobDetailToken = 0;
 let jobDetailData = null; // raw API payload; traces rebuild per theme
-async function loadJobDetail(jobid) {
+async function loadJobDetail(jobid, from) {
+  jobDetailFrom = from || null;
+  jobDetailOpenedFromTable = !!(from && from.table);
   const token = ++jobDetailToken;
-  $("jobDetailResults").style.display = "block";
-  $("jobDetailTitle").textContent = "Job " + jobid;
+  const detail = $("jobDetailResults");
+  const explorer = $("jobExplorer");
+  if (detail.style.display === "none") {
+    // Remember the explorer's visibility only on first open so a later
+    // job switch restores the operator's prior layout.
+    jobDetailWasCollapsed = explorer.classList.contains("collapsed");
+  }
+  setJobDetailHead(jobid);
+  detail.style.display = "block";
   setResultsLoading("jobDetailResults", true);
-  $("jobDetailResults").scrollIntoView({ behavior: "smooth", block: "nearest" });
+  clearJobTableHighlight();
+  // Detail-first: the requested job is the subject of this view, so tuck
+  // the broad explorer behind its "Browse jobs" control unless the click
+  // came from the table itself (where it is already the context).
+  if (!jobDetailOpenedFromTable) setJobExplorerCollapsed(true);
+  detail.scrollIntoView({ behavior: "smooth", block: "start" });
   try {
     const data = await api("/api/jobs/" + jobid + "?since_hours=" + $("jWindow").value);
     if (token !== jobDetailToken) return;
+    panelOk("jobDetailResults");
     setUrl("/job/" + jobid);
     jobDetailData = data;
     renderJobDetail(data);
+    if (jobDetailOpenedFromTable) highlightJobRow(jobid);
+  } catch (e) {
+    if (token === jobDetailToken)
+      showPanelError("jobDetailResults", e, () => loadJobDetail(jobid, jobDetailFrom), "job " + jobid);
   } finally {
     if (token === jobDetailToken) setResultsLoading("jobDetailResults", false);
   }
+}
+
+function setJobDetailHead(jobid) {
+  $("jobDetailTitle").textContent = "Job " + jobid;
+  $("jobDetailMeta").textContent = "";
+  const back = $("jobDetailBack");
+  if (jobDetailFrom && jobDetailFrom.node) {
+    back.style.display = "";
+    back.textContent = "\u2190 from node " + jobDetailFrom.node;
+    back.dataset.node = jobDetailFrom.node;
+  } else {
+    back.style.display = "none";
+  }
+}
+
+function closeJobDetail() {
+  jobDetailData = null;
+  jobDetailFrom = null;
+  $("jobDetailResults").style.display = "none";
+  clearJobTableHighlight();
+  // Return the explorer to exactly how it was before the detail opened.
+  setJobExplorerCollapsed(jobDetailWasCollapsed);
+  setUrl(loaded.jobs && location.pathname.startsWith("/job/") ? "/jobs" : location.pathname);
+}
+
+function setJobExplorerCollapsed(collapse) {
+  const ex = $("jobExplorer");
+  ex.classList.toggle("collapsed", collapse);
+  $("jobExplorerToggle").setAttribute("aria-expanded", String(!collapse));
+  $("jobExplorerToggle").innerHTML = (collapse ? "&#9656; " : "&#9662; ") + "Browse jobs";
+  $("jobExplorerNote").textContent = collapse
+    ? "hidden while a job detail is open \u2014 expand to search and sort all jobs"
+    : "";
+}
+
+function toggleJobExplorer() {
+  setJobExplorerCollapsed(!$("jobExplorer").classList.contains("collapsed"));
+}
+
+function highlightJobRow(jobid) {
+  clearJobTableHighlight();
+  const tr = $("jobTable").querySelector('tr.row[data-job="' + jobid + '"]');
+  if (tr) { tr.classList.add("sel"); tr.scrollIntoView({ block: "center" }); }
+}
+
+function clearJobTableHighlight() {
+  const tb = $("jobTable").querySelector("tbody");
+  if (tb) tb.querySelectorAll("tr.row.sel").forEach((t) => t.classList.remove("sel"));
 }
 
 function renderJobDetail(data) {
@@ -426,47 +645,78 @@ function renderJobDetail(data) {
   $("jobDetailMeta").textContent = metaBits.join(" · ");
   const th = plotTheme();
   const traces = [];
+  // util and VRAM are both percentages, so they share one 0-100 axis. Each
+  // GPU gets a solid util line and a dotted VRAM line in the same color, so
+  // the pairing reads directly; unified hover reports every series at the
+  // cursor's timestamp, and the legend toggles each line independently.
+  const nUtil = data.series.utilization.length;
+  const nVram = data.series.vram.length;
   data.series.utilization.forEach((s, i) => {
-    const dev = s.metric.gpu !== undefined ? "GPU " + s.metric.gpu : s.metric.instance;
+    const dev = s.metric.gpu !== undefined ? "GPU " + s.metric.gpu : "GPU " + (s.metric.instance || i);
     traces.push({
-      type: "scatter", mode: "lines", name: dev + " util %",
+      type: "scatter", mode: "lines", name: dev + " util",
       x: s.values.map((v) => v[0] * 1000), y: s.values.map((v) => v[1]),
       line: { width: 2, color: th.colors[i % th.colors.length] },
     });
   });
   data.series.vram.forEach((s, i) => {
-    const dev = s.metric.gpu !== undefined ? "GPU " + s.metric.gpu + " VRAM" : "VRAM";
+    const dev = s.metric.gpu !== undefined ? "GPU " + s.metric.gpu : "GPU " + (s.metric.instance || i);
     traces.push({
-      type: "scatter", mode: "lines", name: dev + " %",
+      type: "scatter", mode: "lines", name: dev + " vram",
       x: s.values.map((v) => v[0] * 1000), y: s.values.map((v) => v[1]),
-      line: { width: 2, dash: "dot", color: th.colors[(i + 4) % th.colors.length] },
-      yaxis: "y2",
+      line: { width: 2, dash: "dot", color: th.colors[i % th.colors.length] },
     });
   });
   const detailLayout = {
-    margin: { l: 46, r: 46, t: 10, b: 34 },
+    margin: { l: 46, r: 20, t: 10, b: 34 },
     paper_bgcolor: "rgba(0,0,0,0)", plot_bgcolor: "rgba(0,0,0,0)",
     font: th.font,
-    showlegend: true, legend: { orientation: "h", y: -0.15 },
-    yaxis: { title: "util %", range: [0, 105], gridcolor: th.grid },
-    yaxis2: { title: "VRAM %", overlaying: "y", side: "right", range: [0, 105], gridcolor: th.grid },
+    showlegend: nUtil + nVram > 0,
+    legend: { orientation: "h", y: -0.15 },
+    hovermode: "x unified",
+    yaxis: { title: "%", range: [0, 105], gridcolor: th.grid },
     xaxis: { type: "date", gridcolor: th.grid },
   };
   renderPlot("jobDetailPlot", traces, detailLayout);
 }
 
-$("jWindow").addEventListener("change", () => { loadJobs(); });
+$("jWindow").addEventListener("change", () => {
+  loadJobs();
+  // A window change re-bases the detail's series; re-fetch an open job so it
+  // never shows a stale window.
+  if (jobDetailData && $("jobDetailResults").style.display !== "none") {
+    loadJobDetail(jobDetailData.jobid, jobDetailFrom);
+  }
+});
 $("jRunning").addEventListener("change", (e) => {
   $("jWindow").disabled = e.target.checked;
   $("jLimit").disabled = e.target.checked;
   loadJobs();
 });
 $("jLimit").addEventListener("change", loadJobs);
-// Search refreshes the server-calculated highest-efficiency chart. Partition
-// filtering is local because it only changes the table.
-$("jSearch").addEventListener("input", loadJobs);
+// Search refreshes the server-calculated highest-efficiency chart. Debounced
+// so typing doesn't fire a request per keystroke; partition filtering is
+// local because it only changes the table.
+$("jSearch").addEventListener("input", debounce(loadJobs, 250));
 $("jRefresh").addEventListener("click", () => { loadJobs(true); });
 $("jPartition").addEventListener("change", renderJobsView);
+$("jobDetailClose").addEventListener("click", closeJobDetail);
+$("jobDetailBack").addEventListener("click", (e) => {
+  e.preventDefault();
+  const node = e.currentTarget.dataset.node;
+  closeJobDetail();
+  if (node) openNode(node);
+});
+$("jobExplorerToggle").addEventListener("click", () => toggleJobExplorer());
+$("effImpact").addEventListener("change", (e) => {
+  effImpact = e.target.checked;
+  renderJobEfficiency();
+});
+$("effShowAll").addEventListener("click", (e) => {
+  e.preventDefault();
+  effShowAll = !effShowAll;
+  renderJobEfficiency();
+});
 $("jobTable").querySelectorAll("th[data-k]").forEach((th) =>
   th.addEventListener("click", () => {
     const k = th.dataset.k;
@@ -497,6 +747,7 @@ async function loadUsers() {
   try {
     const data = await api("/api/users?since_hours=" + $("uWindow").value);
     if (token !== usersToken) return;
+    panelOk("usersResults");
     userRows = data.users;
     const w = data.window;
     $("uMetaCount").textContent = data.count + " users";
@@ -504,6 +755,10 @@ async function loadUsers() {
       tsToDate(w.start) + " → " + tsToDate(w.end) + " UTC";
     renderUserTable();
     loaded.users = true;
+  } catch (e) {
+    if (token === usersToken)
+      showPanelError("usersResults", e, loadUsers, "the user list");
+    throw e;
   } finally {
     if (token === usersToken) setResultsLoading("usersResults", false);
   }
@@ -531,6 +786,16 @@ function sortUserRows(rows) {
 function renderUserTable() {
   const tb = $("userTable").querySelector("tbody");
   const rows = sortUserRows(filteredUsers());
+  if (!rows.length) {
+    const searched = $("uSearch").value.trim();
+    tb.innerHTML = emptyRow(7, searched
+      ? "No users match that search." : "No users with GPU activity in this window.",
+      searched ? "clear search" : null);
+    const reset = tb.querySelector("button[data-empty-reset]");
+    if (reset) reset.addEventListener("click", () => { $("uSearch").value = ""; renderUserTable(); });
+    $("uCount").textContent = "0 shown";
+    return;
+  }
   tb.innerHTML = rows.map((u) => {
     const user = escapeHtml(u.user);
     return `
@@ -553,6 +818,15 @@ function renderUserTable() {
   markSort($("userTable"), userSort.key, userSort.dir);
 }
 
+// Make the finalized selection unmissable: a banner names the selected user
+// and clears it, so "which user's jobs are below" never depends on row tint.
+function renderUserSelectedBanner() {
+  const banner = $("userSelectedBanner");
+  if (!banner) return;
+  banner.classList.toggle("on", !!userSelected);
+  if (userSelected) $("userSelectedName").textContent = userSelected;
+}
+
 /* Finalize a selection: only this path fetches the user's jobs. An
  * empty finalized value deselects (hides the jobs panel). */
 function finalizeUser(name) {
@@ -560,6 +834,7 @@ function finalizeUser(name) {
   if (!name) {
     userSelected = null;
     $("userJobsResults").style.display = "none";
+    renderUserSelectedBanner();
     renderUserTable();
     setUrl("/users");
     return;
@@ -570,6 +845,7 @@ function finalizeUser(name) {
   const finalName = hit ? hit.user : name;
   userSelected = finalName;
   $("uSearch").value = finalName;
+  renderUserSelectedBanner();
   renderUserTable();
   loadUserJobs(finalName);
   setUrl("/user/" + encodeURIComponent(finalName));
@@ -589,8 +865,12 @@ async function loadUserJobs(user) {
   try {
     const data = await api("/api/jobs?" + params);
     if (token !== userJobsToken) return;
+    panelOk("userJobsResults");
     userJobs = data.jobs;
     renderUserJobsTable();
+  } catch (e) {
+    if (token === userJobsToken)
+      showPanelError("userJobsResults", e, () => loadUserJobs(user), "the job list");
   } finally {
     if (token === userJobsToken) setResultsLoading("userJobsResults", false);
   }
@@ -598,6 +878,13 @@ async function loadUserJobs(user) {
 
 function renderUserJobsTable() {
   const tb = $("userJobsTable").querySelector("tbody");
+  if (!userJobs.length) {
+    tb.innerHTML = emptyRow(10,
+      $("uRunning").checked
+        ? "No running jobs for " + userSelected + " in this window."
+        : "No jobs for " + userSelected + " in this window.", null);
+    return;
+  }
   tb.innerHTML = userJobs.map((j) => {
     const jobid = escapeHtml(j.jobid);
     const rawName = j.name || "";
@@ -609,8 +896,7 @@ function renderUserJobsTable() {
       <td title="${escapeHtml(rawName)}">${escapeHtml(rawName.slice(0, 40))}</td>
       <td>${partitionLink(j.gpu_group || j.partition)}</td>
       <td>${nodeLinks(j.nodes)}</td>
-      <td>${stateBadge(j.state)}</td>
-      <td>${start}</td>
+      <td>${stateBadge(j.state)}</td><td>${start}</td>
       <td class="num">${gpus}</td>
       <td class="num">${pctBar(j.mean_util)}</td>
       <td class="num">${escapeHtml(j.efficiency !== undefined ? fmt(j.efficiency) : "—")}</td>
@@ -639,6 +925,7 @@ $("uRunning").addEventListener("change", () => {
   if (userSelected) loadUserJobs(userSelected);
 });
 $("uRefresh").addEventListener("click", loadUsers);
+$("userSelectedClear").addEventListener("click", () => finalizeUser(""));
 $("uSearch").addEventListener("input", renderUserTable);
 $("uSearch").addEventListener("keydown", (e) => {
   if (e.key === "Enter") {
@@ -683,8 +970,22 @@ function applyPartitionSelection(name) {
   sel.innerHTML = options.join("");
   sel.value = selectedPartition;
   if (!sel.value) selectedPartition = "";
+  updatePartitionScope();
   renderPartTrend(partTrendData);
   setUrl(sel.value ? "/partition/" + encodeURIComponent(sel.value) : "/partitions");
+}
+
+// The partition selector scopes the trend and the VRAM distribution; say so
+// in place so a scoped view is never mistaken for the whole cluster.
+function updatePartitionScope() {
+  const el = $("pScope");
+  if (!el) return;
+  el.innerHTML = selectedPartition
+    ? "Scoped to \u201C" + escapeHtml(selectedPartition) + "\u201D: the trend and VRAM distribution below show only this partition (the table still lists all). " +
+      '<button type="button" id="pScopeClear">clear scope</button>'
+    : "";
+  const b = el.querySelector("#pScopeClear");
+  if (b) b.addEventListener("click", clearPartitionSelection);
 }
 
 async function loadPartitions() {
@@ -697,10 +998,14 @@ async function loadPartitions() {
     if ($("pRunning").checked) params.set("running_only", "true");
     data = await api("/api/partitions?" + params);
   } catch (e) {
-    if (token === partitionsToken) setResultsLoading("partitionsResults", false);
+    if (token === partitionsToken) {
+      setResultsLoading("partitionsResults", false);
+      showPanelError("partitionsResults", e, loadPartitions, "the partition data");
+    }
     throw e;
   }
   if (token !== partitionsToken) return; // a newer request supersedes this one
+  panelOk("partitionsResults");
   partRows = data.partitions;
   const w = data.window;
   $("pCount").textContent = data.partitions.length + " partitions · " +
@@ -746,19 +1051,20 @@ function renderPartBar() {
 }
 
 function renderPartOccupancy() {
-  // Same threshold palette as Mean utilization by group: every GPU type
-  // shows exactly the color it has in the utilization chart (including
-  // zero-height / no-occupancy bars).
+  // Occupancy is a single neutral series: the bar HEIGHT is the signal, so
+  // color must not double-encode a different metric (utilization). The
+  // utilization value is surfaced in the tooltip instead.
   const th = plotTheme();
   const rows = partRows.slice().sort((a, b) => compareStrings(a.name, b.name));
   renderPlot("partOccupancyPlot", [{
     type: "bar",
     x: rows.map((p) => p.name),
     y: rows.map((p) => (p.mean_occupancy === null ? 0 : p.mean_occupancy)),
-    marker: { color: rows.map((p) => partBarColor(p.mean_util)) },
+    marker: { color: th.acc },
+    customdata: rows.map((p) => p.mean_util),
     hovertemplate: rows.map((p) => p.mean_occupancy === null
-      ? "<b>%{x}</b><br>no occupancy data<extra></extra>"
-      : "<b>%{x}</b><br>mean occupancy %{y:.1f}%<extra></extra>"),
+      ? "<b>%{x}</b><br>no occupancy data<br>mean util %{customdata:.1f}%<extra></extra>"
+      : "<b>%{x}</b><br>mean occupancy %{y:.1f}%<br>mean util %{customdata:.1f}%<extra></extra>"),
   }], {
     margin: { l: 46, r: 20, t: 10, b: 60 },
     paper_bgcolor: "rgba(0,0,0,0)", plot_bgcolor: "rgba(0,0,0,0)",
@@ -774,19 +1080,40 @@ function renderPartTrend(trend) {
   const entries = selectedPartition
     ? Object.entries(trend).filter(([name]) => name === selectedPartition)
     : Object.entries(trend);
-  const traces = entries.map(([name, values], i) => ({
-    type: "scatter", mode: "lines", name,
-    x: values.map((v) => v[0] * 1000), y: values.map((v) => v[1]),
+  const withData = entries.filter(([, values]) => values && values.length);
+  // Rank by each partition's mean utilization (computed from the series
+  // actually plotted) so the busiest partitions sit first and get the
+  // stable leading colors; a plain insertion order would be arbitrary.
+  const ranked = withData
+    .map(([name, values]) => ({ name, values,
+      mean: values.reduce((a, v) => a + v[1], 0) / values.length }))
+    .sort((a, b) => b.mean - a.mean || compareStrings(a.name, b.name));
+  const traces = ranked.map((r, i) => ({
+    type: "scatter", mode: "lines", name: r.name,
+    x: r.values.map((v) => v[0] * 1000), y: r.values.map((v) => v[1]),
     line: { width: 1.5, color: th.colors[i % th.colors.length] },
   }));
-  renderPlot("partTrendPlot", traces, {
+  const layout = {
     margin: { l: 40, r: 20, t: 10, b: 30 },
     paper_bgcolor: "rgba(0,0,0,0)", plot_bgcolor: "rgba(0,0,0,0)",
     font: th.font,
-    showlegend: true, legend: { orientation: "h", y: -0.18 },
+    showlegend: traces.length > 1,
+    legend: { orientation: "h", y: -0.18 },
     yaxis: { title: "avg util %", range: [0, 105], gridcolor: th.grid },
     xaxis: { type: "date", gridcolor: th.grid },
-  });
+  };
+  if (!traces.length) {
+    layout.xaxis.showaxis = false;
+    layout.yaxis.showaxis = false;
+    layout.annotations = [{
+      text: selectedPartition
+        ? "No trend data for " + selectedPartition + " in this window"
+        : "No partition trend data in this window",
+      showarrow: false, xref: "paper", yref: "paper", x: 0.5, y: 0.5,
+      font: { color: th.font.color, size: 12 },
+    }];
+  }
+  renderPlot("partTrendPlot", traces, layout);
 }
 
 function renderPartTable() {
@@ -836,12 +1163,23 @@ $("partTable").querySelectorAll("th[data-k]").forEach((th) =>
 let vramJobs = [];
 let vramTotal = 0; // candidates in the window, before the backend cap
 let vramToken = 0;
+let vramGpuType = "";
+
+function vramWeight() {
+  return $("vWeight").value === "eff" ? "eff" : "alloc";
+}
+function vramHours(j) {
+  // Allocated GPU-hours come from sacct and are null for jobs without an
+  // allocation row; effective GPU-hours are utilization-weighted and always
+  // present. The toggle picks which axis the distribution is measured on.
+  return vramWeight() === "eff" ? (j.gpu_hours_eff || 0) : (j.gpu_hours || 0);
+}
 
 async function loadVram() {
   const token = ++vramToken;
   // The VRAM fetch blurs only the VRAM panel (vramResults), never the whole
-  // partitions tab: window / running-only / partition changes here must not
-  // freeze the other graphs.
+  // partitions tab: window / running-only / partition / weight changes here
+  // must not freeze the other graphs.
   const origin = partitionsToken;
   setResultsLoading("vramResults", true);
   status("loading VRAM distribution…");
@@ -849,51 +1187,76 @@ async function loadVram() {
     const params = new URLSearchParams({ since_hours: $("pWindow").value });
     if ($("pRunning").checked) params.set("running_only", "true");
     if (selectedPartition) params.set("partition", selectedPartition);
+    params.set("weight", vramWeight());
     const data = await api("/api/partitions/vram?" + params);
     if (token !== vramToken) return; // a newer VRAM request supersedes this one
+    panelOk("vramResults");
     vramJobs = data.jobs;
     vramTotal = data.total || data.jobs.length;
+    fillVramGpuTypes();
     renderVram();
+  } catch (e) {
+    if (token === vramToken && origin === partitionsToken)
+      showPanelError("vramResults", e, loadVram, "the VRAM distribution");
+    throw e;
   } finally {
     if (token === vramToken && origin === partitionsToken)
       setResultsLoading("vramResults", false);
   }
 }
+
+function fillVramGpuTypes() {
+  const sel = $("vGpuType");
+  const prev = sel.value;
+  const types = [...new Set(vramJobs.map((j) => j.gpu_type).filter(Boolean))]
+    .sort(compareStrings);
+  sel.innerHTML = '<option value="">all</option>' +
+    types.map((t) => '<option value="' + escapeHtml(t) + '">' + escapeHtml(t) + '</option>').join("");
+  if (types.includes(prev)) sel.value = prev;
+  vramGpuType = sel.value;
+}
+
 function renderVram() {
   const lo = Math.min(+$("vUtilMin").value, +$("vUtilMax").value);
   const hi = Math.max(+$("vUtilMin").value, +$("vUtilMax").value);
-  const matched = vramJobs.filter((j) => j.mean_util >= lo && j.mean_util <= hi);
-  const allHours = vramJobs.reduce((s, j) => s + (j.gpu_hours || 0), 0);
+  const eff = vramWeight() === "eff";
+  const matched = vramJobs.filter((j) =>
+    j.mean_util >= lo && j.mean_util <= hi &&
+    (!vramGpuType || j.gpu_type === vramGpuType));
+  const scopeHours = vramJobs.filter((j) => !vramGpuType || j.gpu_type === vramGpuType)
+    .reduce((s, j) => s + vramHours(j), 0);
   const binW = 16;
   const maxG = matched.length
     ? Math.max(...matched.map((j) => j.vram_gb)) : binW;
   const nBins = Math.max(1, Math.ceil(maxG / binW) || 1);
   const bins = new Array(nBins).fill(0);
   const perBin = new Array(nBins).fill(0);
-  const matchedHours = matched.reduce((s, j) => s + (j.gpu_hours || 0), 0);
+  const matchedHours = matched.reduce((s, j) => s + vramHours(j), 0);
   matched.forEach((j) => {
     const i = Math.min(Math.floor(j.vram_gb / binW), nBins - 1);
-    bins[i] += j.gpu_hours || 0;
+    bins[i] += vramHours(j);
     perBin[i] += 1;
   });
-  const normalize = $("vNormalize").checked && allHours > 0;
-  const weighted = vramJobs.filter((j) => j.gpu_hours != null).length;
+  const normalize = $("vNormalize").checked && scopeHours > 0;
+  const missing = matched.filter((j) => vramWeight() === "alloc" && j.gpu_hours == null).length;
   const truncated = vramTotal > vramJobs.length;
   const scopeBits = [
     truncated
       ? matched.length + " / " + vramJobs.length + " (top of " + vramTotal + ")"
       : matched.length + " jobs",
     selectedPartition,
+    vramGpuType,
   ].filter(Boolean);
-  const y = normalize ? bins.map((h) => (h / allHours) * 100) : bins;
+  const y = normalize ? bins.map((h) => (h / scopeHours) * 100) : bins;
   const labels = Array.from({ length: nBins }, (_, i) =>
     i * binW + "–" + (i + 1) * binW + " GB");
+  const hourLabel = eff ? "effective GPU hours" : "GPU hours";
   const th = plotTheme();
   const trace = {
     type: "bar", x: labels, y,
     marker: { color: th.colors[0] },
     customdata: perBin,
-    hovertemplate: "%{x}<br>%{y:.1f}" + (normalize ? "%" : " GPU hours") +
+    hovertemplate: "%{x}<br>%{y:.1f}" + (normalize ? "%" : " " + hourLabel) +
       "<br>%{customdata} jobs<extra></extra>",
   };
   const layout = {
@@ -904,11 +1267,13 @@ function renderVram() {
     // (same treatment as the partition bar charts).
     xaxis: { title: "VRAM usage (GB per GPU, peak over window)",
              gridcolor: th.grid, fixedrange: true },
-    yaxis: { title: normalize ? "% of shown GPU hours" : "GPU hours",
+    yaxis: { title: normalize ? "% of shown " + hourLabel : hourLabel,
              gridcolor: th.grid, fixedrange: true },
     dragmode: false,
   };
   if (!matched.length) {
+    layout.xaxis.showaxis = false;
+    layout.yaxis.showaxis = false;
     layout.annotations = [{
       text: "No jobs match the current filters", showarrow: false,
       xref: "paper", yref: "paper", x: 0.5, y: 0.5,
@@ -918,11 +1283,11 @@ function renderVram() {
   renderPlot("partVramPlot", [trace], layout);
   $("vramMeta").textContent =
     scopeBits.join(" · ") + " · " +
-    matchedHours.toFixed(0) + " GPU hours" +
-    (normalize ? " · " + allHours.toFixed(0) +
-      (truncated ? " in shown set" : " in window") : "") +
-    (weighted < vramJobs.length
-      ? " · " + (vramJobs.length - weighted) + " without allocation data"
+    matchedHours.toFixed(0) + " " + hourLabel +
+    (normalize ? " · " + scopeHours.toFixed(0) +
+      (truncated ? " in shown set" : " in scope") : "") +
+    (missing
+      ? " · " + missing + " without allocation data"
       : "") +
     " · utilization " + lo + "–" + hi + "%";
 }
@@ -940,6 +1305,11 @@ function vramSliderInput() {
 }
 
 $("vNormalize").addEventListener("change", renderVram);
+$("vGpuType").addEventListener("change", (e) => {
+  vramGpuType = e.target.value;
+  renderVram();
+});
+$("vWeight").addEventListener("change", () => { loadVram(); });
 $("vUtilMin").addEventListener("input", vramSliderInput);
 $("vUtilMax").addEventListener("input", vramSliderInput);
 
@@ -957,6 +1327,7 @@ async function loadNodes(force = false) {
   status("loading nodes…");
   try {
     const data = await api("/api/nodes?" + params);
+    panelOk("nodesResults");
     nodeRows = data.nodes;
     const t = new Intl.DateTimeFormat("en-GB", {
       timeZone: "Europe/Helsinki", hour: "2-digit", minute: "2-digit",
@@ -966,6 +1337,9 @@ async function loadNodes(force = false) {
     fill("nGpuType", [...new Set(nodeRows.map((n) => n.gpu_type).filter(Boolean))].sort());
     renderNodeTable();
     loaded.nodes = true;
+  } catch (e) {
+    showPanelError("nodesResults", e, () => loadNodes(), "the node list");
+    throw e;
   } finally {
     btn.disabled = false;
     setResultsLoading("nodesResults", false);
@@ -991,6 +1365,19 @@ function filteredNodes() {
 function renderNodeTable() {
   const rows = filteredNodes();
   const tb = $("nodeTable").querySelector("tbody");
+  const nodeFiltered = nodeFilters.search || nodeFilters.gputype || nodeFilters.busy;
+  if (!rows.length) {
+    tb.innerHTML = emptyRow(8, nodeFiltered
+      ? "No nodes match the current filters." : "No GPU nodes in this snapshot.",
+      nodeFiltered ? "reset filters" : null);
+    const reset = tb.querySelector("button[data-empty-reset]");
+    if (reset) reset.addEventListener("click", () => {
+      $("nSearch").value = ""; $("nGpuType").value = ""; $("nBusy").checked = false;
+      nodeFilters.search = ""; nodeFilters.gputype = ""; nodeFilters.busy = false;
+      renderNodeTable();
+    });
+    return;
+  }
   tb.innerHTML = rows.map((n) => {
     const u = n.current_util;
     const busy = u !== null && u > 0;
@@ -1021,7 +1408,7 @@ function renderNodeTable() {
   tb.querySelectorAll("tr.row").forEach((tr) =>
     tr.addEventListener("click", (e) => {
       const link = e.target.closest("a.joblink");
-      if (link) { e.stopPropagation(); openJob(link.dataset.job); return; }
+      if (link) { e.stopPropagation(); openJob(link.dataset.job, { node: tr.dataset.node }); return; }
       const nlink = e.target.closest("a.nodelink");
       if (nlink) { e.stopPropagation(); openNode(nlink.dataset.node); return; }
       const plink = e.target.closest("a.partitionlink");
@@ -1034,6 +1421,7 @@ function renderNodeTable() {
 let nodeDetailToken = 0;
 let nodeDetailName = null;
 let nodeDetailData = null; // raw API payload; traces rebuild per theme
+let nodeDetailJob = "";     // filter traces to one job's GPUs
 async function loadNodeDetail(name) {
   nodeDetailName = name;
   const token = ++nodeDetailToken;
@@ -1044,37 +1432,62 @@ async function loadNodeDetail(name) {
   try {
     const data = await api("/api/nodes/" + encodeURIComponent(name) + "?view=" + $("ndWindow").value);
     if (token !== nodeDetailToken) return;
+    panelOk("nodeDetailResults");
     setUrl("/node/" + encodeURIComponent(name));
     nodeDetailData = data;
+    nodeDetailJob = ""; // a window/node change invalidates the job choice
+    fillNodeJobSelect(data);
     renderNodeDetail(data, name);
+  } catch (e) {
+    if (token === nodeDetailToken)
+      showPanelError("nodeDetailResults", e, () => loadNodeDetail(name), "the node detail");
+    throw e;
   } finally {
     if (token === nodeDetailToken) setResultsLoading("nodeDetailResults", false);
   }
 }
 
+function fillNodeJobSelect(data) {
+  const sel = $("ndJob");
+  const prev = sel.value;
+  const ids = [...new Set(data.series.utilization.map((s) => s.metric.slurmjobid)
+    .filter(Boolean))].sort(compareStrings);
+  sel.innerHTML = '<option value="">all jobs</option>' +
+    ids.map((id) => '<option value="' + escapeHtml(id) + '">' + escapeHtml(id) + '</option>').join("");
+  if (ids.includes(prev)) sel.value = prev;
+}
+
 function renderNodeDetail(data, name) {
-  $("nodeDetailTitle").textContent = "Node " + name;
+  $("nodeDetailTitle").textContent =
+    "Node " + name + (nodeDetailJob ? " · job " + nodeDetailJob : "");
   const th = plotTheme();
+  const keep = (s) => !nodeDetailJob || s.metric.slurmjobid === nodeDetailJob;
   const utilTraces = [];
-  data.series.utilization.forEach((s, i) => {
+  let ci = 0;
+  data.series.utilization.forEach((s) => {
+    if (!keep(s)) return;
     const dev = "GPU " + (s.metric.gpu !== undefined ? s.metric.gpu : "?");
     const job = s.metric.slurmjobid || "";
     utilTraces.push({
       type: "scatter", mode: "lines", name: dev + (job ? " (job " + job + ")" : ""),
       x: s.values.map((v) => v[0] * 1000), y: s.values.map((v) => v[1]),
-      line: { width: 2, color: th.colors[i % th.colors.length] },
+      line: { width: 2, color: th.colors[ci % th.colors.length] },
     });
+    ci++;
   });
   const vramTraces = [];
-  data.series.vram.forEach((s, i) => {
+  let vi = 0;
+  data.series.vram.forEach((s) => {
+    if (!keep(s)) return;
     const dev = "GPU " + (s.metric.gpu !== undefined ? s.metric.gpu : "?");
     const job = s.metric.slurmjobid || "";
     vramTraces.push({
       type: "scatter", mode: "lines",
       name: dev + (job ? " (job " + job + ")" : ""),
       x: s.values.map((v) => v[0] * 1000), y: s.values.map((v) => v[1]),
-      line: { width: 2, dash: "dot", color: th.colors[i % th.colors.length] },
+      line: { width: 2, dash: "dot", color: th.colors[vi % th.colors.length] },
     });
+    vi++;
   });
   const base = {
     margin: { l: 46, r: 20, t: 10, b: 34 },
@@ -1110,6 +1523,10 @@ $("nRefresh").addEventListener("click", () => { loadNodes(true); });
 $("ndWindow").addEventListener("change", () => {
   if (nodeDetailName) loadNodeDetail(nodeDetailName);
 });
+$("ndJob").addEventListener("change", (e) => {
+  nodeDetailJob = e.target.value;
+  if (nodeDetailData) renderNodeDetail(nodeDetailData, nodeDetailName);
+});
 $("nodeTable").querySelectorAll("th[data-k]").forEach((th) =>
   th.addEventListener("click", () => {
     const k = th.dataset.k;
@@ -1143,8 +1560,8 @@ function setUrl(path) {
   }
 }
 
-function openJob(jobid) {
-  showTab("jobs").then(() => loadJobDetail(jobid)).catch(() => {});
+function openJob(jobid, from) {
+  showTab("jobs").then(() => loadJobDetail(jobid, from)).catch(() => {});
 }
 
 function escapeHtml(value) {
@@ -1220,6 +1637,7 @@ function clearPartitionSelection() {
   if (!selectedPartition) return;
   selectedPartition = "";
   $("pPartition").value = "";
+  updatePartitionScope();
   renderPartTrend(partTrendData);
   if (loaded.partitions) loadVram().catch(() => {});
 }
@@ -1264,8 +1682,7 @@ document.querySelectorAll("nav.tabs button").forEach((b) =>
 
 function rerenderAllPlots() {
   if (loaded.jobs) {
-    renderJobEffChart("jobHighBarPlot", jobBaseHigh);
-    renderJobEffChart("jobLowBarPlot", jobBaseLow);
+    renderJobEfficiency();
     renderJobsView();
   }
   if (jobDetailData && $("jobDetailResults").style.display !== "none") {

@@ -868,7 +868,7 @@ _VRAM_RECORD_CAP = 2000
 
 
 def _vram_job_records(since_hours, running_only=False, partition="",
-                      node_gpu_types=None):
+                      node_gpu_types=None, weight="alloc"):
     """Per-job VRAM records for the utilization-filtered distribution chart.
 
     Each record carries the job's canonical GPU group (the Slurm partition,
@@ -929,6 +929,10 @@ def _vram_job_records(since_hours, running_only=False, partition="",
             "gpu_hours": None,
             "gpu_hours_eff": j.get("gpu_hours_eff") or 0.0,
         })
+    # Pre-cap selection stays effective-GPU-hours driven: it is the only
+    # allocation-derived figure available before the sacct enrichment below,
+    # and it correlates with real allocation hours. The chosen weight then
+    # orders the capped, enriched set for the client.
     records.sort(key=lambda r: r["gpu_hours_eff"], reverse=True)
     total = len(records)
     records = records[:_VRAM_RECORD_CAP]
@@ -939,18 +943,18 @@ def _vram_job_records(since_hours, running_only=False, partition="",
             row = meta.get(r["jobid"]) or {}
             if row.get("gpus") and row.get("elapsed_s"):
                 r["gpu_hours"] = round(row["gpus"] * row["elapsed_s"] / 3600.0, 2)
-    for r in records:
-        r.pop("gpu_hours_eff", None)
-    records.sort(key=lambda r: (r["gpu_hours"] or 0.0), reverse=True)
+    wkey = "gpu_hours" if weight == "alloc" else "gpu_hours_eff"
+    records.sort(key=lambda r: (r.get(wkey) or 0.0), reverse=True)
     return records, total, start, now, step
 
 
 @app.get("/api/partitions/vram")
 def api_part_vram(since_hours: float = Query(24, gt=0, le=168),
                   running_only: bool = Query(False),
-                  partition: str = ""):
+                  partition: str = "",
+                  weight: str = Query("alloc", pattern="^(alloc|eff)$")):
     node_types = _gpu_type_by_node(_cached("scontrol_nodes", 30, show_nodes))
-    records, total, start, now, step = _vram_job_records(since_hours, running_only, partition, node_types)
+    records, total, start, now, step = _vram_job_records(since_hours, running_only, partition, node_types, weight)
     return {
         "window": {"start": start, "end": now},
         "step": step,
