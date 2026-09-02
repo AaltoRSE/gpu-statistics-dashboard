@@ -220,85 +220,45 @@ function fillNodeJobSelect(data) {
   if (ids.includes(prev)) sel.value = prev;
 }
 
-// One trace per physical GPU, not per (GPU, job) pair (PLAN-1 3.7): a
-// node's own metric series has one entry per job that touched a GPU
-// during the window, so a busy GPU that changed jobs several times
-// produced that many separate "GPU 0 (job …)" legend entries — 21 on the
-// node this was found on, up to 45 on busier ones.
-//
-// The catch (api/nodes.py's own comment on the sibling VRAM query says it
-// plainly): the "gpu" label is job-local, not a physical device id — every
-// job's own cgroup sees its first GPU as "gpu 0" regardless of which
-// physical card it actually landed on. So two segments sharing a "gpu"
-// label that overlap in TIME are, in practice, two different physical
-// GPUs that both happened to enumerate themselves as 0 — confirmed live
-// against a real node (dgx1, 58 job-segments all labeled gpu="0", 43 of
-// 57 adjacent-by-start-time pairs overlapping). Only sequential
-// (non-overlapping) segments under the same label are safe to merge onto
-// one trace.
-//
-// Greedy interval partitioning handles this: process a gpu-label's
-// segments in start-time order, place each on the first existing "slot"
-// whose last segment already ended by this one's start, opening a new
-// slot (== a new trace, a second occupant of that job-local index)
-// otherwise. This is the standard minimum-rooms-needed algorithm; it
-// yields the fewest traces that still never draw two truly-concurrent
-// segments as one line, without ever needing a real physical identity.
-//
-// The trace label carries the slot's job id(s) — a single "(job N)" or a
-// "(jobs N, M, …)" list for a slot that sequenced several jobs — so the
-// legend still says which job sat on which card. 3.7's slot-index labels
-// ("GPU 0 (1)") hid the job number (hover-only) and were asked back.
+// One trace per (GPU, job) series, each its own color: the "gpu" label is
+// job-local, not a physical device id (api/nodes.py's comment on the
+// sibling VRAM query says it plainly — every job's own cgroup sees its
+// first GPU as "gpu 0" regardless of which physical card it actually
+// landed on), so several different jobs can share a "GPU 0" label over
+// the course of a window. Giving every (gpu, job) segment its own line
+// and color — rather than merging same-label segments into one shared
+// line — is what makes that distinction visible: a job with several GPUs
+// shows several differently-colored lines, and a "gpu" label reused by
+// different jobs over time shows one line per job instead of one
+// misleadingly continuous line spanning unrelated jobs.
+// A MIG slice's "gpu" label is its full device UUID ("MIG-2879d28e-ee0c-
+// 5e14-95fe-4cd17b0f7566"), not a small index — shorten it to "MIG-" plus
+// its first 8 hex chars for the legend/axis label, which is already
+// unique across the handful of MIG slices one node can have; the full
+// value stays in the hover text.
+function shortGpuId(gpu) {
+  return typeof gpu === "string" && gpu.startsWith("MIG-") && gpu.length > 12
+    ? gpu.slice(0, 12)
+    : gpu;
+}
+
 function buildDeviceTraces(seriesList, keep, colors, lineExtra) {
-  const byGpu = new Map();
-  seriesList.forEach((s) => {
-    if (!keep(s)) return;
+  const kept = seriesList.filter((s) => keep(s) && s.values && s.values.length);
+  const sorted = [...kept].sort((a, b) => {
+    const g = compareStrings(String(a.metric.gpu ?? "?"), String(b.metric.gpu ?? "?"));
+    return g !== 0 ? g : compareStrings(a.metric.slurmjobid || "", b.metric.slurmjobid || "");
+  });
+  return sorted.map((s, i) => {
     const gpu = s.metric.gpu !== undefined ? s.metric.gpu : "?";
     const job = s.metric.slurmjobid || "";
-    if (!byGpu.has(gpu)) byGpu.set(gpu, []);
-    byGpu.get(gpu).push({ job, values: s.values });
+    const label = "GPU " + shortGpuId(gpu) + (job ? " · job " + job : "");
+    return {
+      type: "scatter", mode: "lines", name: label,
+      x: s.values.map((v) => v[0] * 1000), y: s.values.map((v) => v[1]),
+      line: Object.assign({ width: 2, color: colors[i % colors.length] }, lineExtra),
+      hovertemplate: "<b>" + label + "</b><br>%{y:.1f}<extra></extra>",
+    };
   });
-  const traces = [];
-  let ci = 0;
-  [...byGpu.entries()].sort((a, b) => compareStrings(a[0], b[0])).forEach(([gpu, segments]) => {
-    segments.sort((a, b) => (a.values[0]?.[0] || 0) - (b.values[0]?.[0] || 0));
-    const slots = []; // each: { end, x, y, job }
-    segments.forEach((seg) => {
-      const start = seg.values[0]?.[0] || 0;
-      const end = seg.values.at(-1)?.[0] || start;
-      let slot = slots.find((sl) => sl.end <= start);
-      if (!slot) {
-        slot = { end: -Infinity, x: [], y: [], job: [] };
-        slots.push(slot);
-      } else {
-        // A null point between this slot's previous segment and this one
-        // stops Plotly from drawing a line across the (often idle) gap
-        // between two different jobs' segments.
-        const gapX = (slot.end + start) / 2 * 1000;
-        slot.x.push(gapX); slot.y.push(null); slot.job.push("");
-      }
-      seg.values.forEach((v) => { slot.x.push(v[0] * 1000); slot.y.push(v[1]); slot.job.push(seg.job); });
-      slot.end = end;
-    });
-    slots.forEach((slot, si) => {
-      const jobs = [...new Set(slot.job.filter((j) => j))];
-      const jobSuffix = jobs.length === 1 ? " (job " + jobs[0] + ")"
-        : jobs.length > 1 ? " (jobs " + jobs.join(", ") + ")"
-        // No job id at all (degenerate series): fall back to the old
-        // slot index so two jobless traces on one gpu label don't
-        // collide in the legend.
-        : (slots.length > 1 ? " (" + (si + 1) + ")" : "");
-      const label = "GPU " + gpu + jobSuffix;
-      traces.push({
-        type: "scatter", mode: "lines", name: label,
-        x: slot.x, y: slot.y, customdata: slot.job,
-        line: Object.assign({ width: 2, color: colors[ci % colors.length] }, lineExtra),
-        hovertemplate: "<b>" + label + "</b><br>%{y:.1f}<br>job %{customdata}<extra></extra>",
-      });
-      ci++;
-    });
-  });
-  return traces;
 }
 
 export function renderNodeDetail(data, name) {
