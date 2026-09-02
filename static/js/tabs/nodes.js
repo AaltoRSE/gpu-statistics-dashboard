@@ -244,6 +244,11 @@ function fillNodeJobSelect(data) {
 // otherwise. This is the standard minimum-rooms-needed algorithm; it
 // yields the fewest traces that still never draw two truly-concurrent
 // segments as one line, without ever needing a real physical identity.
+//
+// The trace label carries the slot's job id(s) — a single "(job N)" or a
+// "(jobs N, M, …)" list for a slot that sequenced several jobs — so the
+// legend still says which job sat on which card. 3.7's slot-index labels
+// ("GPU 0 (1)") hid the job number (hover-only) and were asked back.
 function buildDeviceTraces(seriesList, keep, colors, lineExtra) {
   const byGpu = new Map();
   seriesList.forEach((s) => {
@@ -276,7 +281,14 @@ function buildDeviceTraces(seriesList, keep, colors, lineExtra) {
       slot.end = end;
     });
     slots.forEach((slot, si) => {
-      const label = "GPU " + gpu + (slots.length > 1 ? " (" + (si + 1) + ")" : "");
+      const jobs = [...new Set(slot.job.filter((j) => j))];
+      const jobSuffix = jobs.length === 1 ? " (job " + jobs[0] + ")"
+        : jobs.length > 1 ? " (jobs " + jobs.join(", ") + ")"
+        // No job id at all (degenerate series): fall back to the old
+        // slot index so two jobless traces on one gpu label don't
+        // collide in the legend.
+        : (slots.length > 1 ? " (" + (si + 1) + ")" : "");
+      const label = "GPU " + gpu + jobSuffix;
       traces.push({
         type: "scatter", mode: "lines", name: label,
         x: slot.x, y: slot.y, customdata: slot.job,
