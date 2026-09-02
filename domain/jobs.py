@@ -12,7 +12,6 @@ import cache
 import deps
 from domain.common import job_window, series_values, step_for_range
 from promql import label_eq, selector
-from slurm import SlurmError, expand_node_list
 
 
 def fetch_job_window(since_hours, include_vram=True, user=None):
@@ -91,7 +90,6 @@ def fetch_job_window(since_hours, include_vram=True, user=None):
             "max_util": round(job["max_util"], 2),
             "gpu_hours_eff": round(job["eff_hours"], 2),
             "vram_avg": round(sum(vv) / len(vv), 1) if vv else None,
-            "monitored": True,
             # Internal aggregands used only by api_users to calculate the
             # true sample-weighted utilization across a user's jobs.
             "_util_sum": job["eff_sum"],
@@ -99,71 +97,6 @@ def fetch_job_window(since_hours, include_vram=True, user=None):
         })
     out.sort(key=lambda j: j["gpu_hours_eff"], reverse=True)
     return out, start, now, step
-
-
-def unmonitored_running_jobs(known_ids, user=None):
-    """Running GPU jobs the controller knows but Prometheus never reported.
-
-    Job discovery is otherwise Prometheus-only (bare ``sacct`` is
-    ACL-restricted), so a node whose exporter stops publishing takes every
-    job on it out of the dashboard entirely — the node reads idle while
-    Slurm has it fully allocated. ``scontrol show job`` is not tied to any
-    node's exporter, so it still sees that work.
-
-    Returns job dicts shaped like ``fetch_job_window``'s, but with every
-    utilization-derived figure left as ``None`` rather than 0: these jobs
-    have no measurements at all, and a 0 would read as "ran at 0%
-    efficiency", polluting the efficiency histogram and the
-    lowest-efficiency chart with jobs that were never measured. They carry
-    ``monitored: False`` so callers can label them and keep them out of
-    utilization aggregates.
-
-    A job already known to Prometheus under its Slurm array *parent* ID is
-    not re-added under its physical task ID.
-    """
-    try:
-        active = deps.route_cache.get_or_set(
-            cache.scontrol_jobs_key(), 30, deps.show_jobs)
-    except SlurmError:
-        return []
-    out = []
-    for row in active.values():
-        if row.get("state") != "RUNNING" or not row.get("gpus"):
-            continue
-        if row["jobid"] in known_ids or (row.get("array_jobid") or "") in known_ids:
-            continue
-        if user and (row.get("user") or "").casefold() != user.casefold():
-            continue
-        # scontrol reports every partition a job may run in; the first is
-        # the one the Partitions tab keys on.
-        partition = (row.get("partition") or "").split(",")[0].strip()
-        out.append({
-            "jobid": row["jobid"],
-            "user": row.get("user") or "",
-            "partition": partition,
-            "gpu_type": row.get("gpu_type") or "",
-            "nodes": sorted(expand_node_list(row.get("node_list"))),
-            "mean_util": None,
-            "max_util": None,
-            "gpu_hours_eff": None,
-            "vram_avg": None,
-            "monitored": False,
-            "_util_sum": 0.0,
-            "_util_samples": 0,
-        })
-    return out
-
-
-def sort_by_effective_hours(jobs):
-    """Rank by effective GPU-hours, unmeasured jobs last.
-
-    ``gpu_hours_eff`` is ``None`` for a job Prometheus never saw, which
-    cannot be compared against a float; those sort to the end rather than
-    to the bottom of the ranking as if they were zero.
-    """
-    jobs.sort(key=lambda j: (j.get("gpu_hours_eff") is None,
-                             -(j.get("gpu_hours_eff") or 0.0)))
-    return jobs
 
 
 def efficiency_histogram(jobs, bin_width=10):
@@ -182,10 +115,6 @@ def efficiency_histogram(jobs, bin_width=10):
     n_buckets = 100 // bin_width
     totals = [0.0] * n_buckets
     for job in jobs:
-        # A job Prometheus never measured has no efficiency to bucket; it
-        # must not land in the 0-10% bar as if it had run idle.
-        if job.get("mean_util") is None:
-            continue
         idx = int(min(max(job["mean_util"], 0), 100 - 1e-9) // bin_width)
         totals[idx] += job.get("gpu_hours_eff") or 0
     return [

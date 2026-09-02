@@ -142,7 +142,7 @@ Cluster access is **strictly read-only**: the app only issues `sacct -j`,
 | Endpoint | Purpose |
 |---|---|
 | `GET /api/health` | backend + Prometheus connectivity |
-| `GET /api/jobs?since_hours=&user=&partition=&search=&limit=&running_only=&refresh=` | job table (Prometheus discovery + scontrol fallback for running jobs on non-reporting nodes, flagged `monitored=false` with null utilization figures, + sacct enrichment; `running_only=true` keeps only jobs with a live GPU series; `refresh=true` bypasses the 60 s window cache) plus `efficiency_histogram` (GPU-hours by 10%-wide mean-utilization bucket, 0-100) |
+| `GET /api/jobs?since_hours=&user=&partition=&search=&limit=&running_only=&refresh=` | job table (Prometheus discovery + sacct enrichment; `running_only=true` keeps only jobs with a live GPU series; `refresh=true` bypasses the 60 s window cache) plus `efficiency_histogram` (GPU-hours by 10%-wide mean-utilization bucket, 0-100) |
 | `GET /api/jobs/{jobid}?since_hours=` | per-GPU utilization/VRAM series + metadata (human-readable `start`/`end` preserved as-is) |
 | `GET /api/partitions?since_hours=&running_only=` | utilization per GPU group + trend + `mean_occupancy` (window-average allocated share) + allocated/total GPU capacity. A group is the Slurm partition, except MIG GPUs, which form their own group per node MIG GRES profile (`h200_3g.71gb`), so a MIG node never counts against its whole-GPU pool. Capacity is summed over all nodes of the group (idle included); a node shared by several partitions counts toward each |
 | `GET /api/partitions/vram?since_hours=&running_only=&partition=` | per-job VRAM records for the distribution chart (average per-GPU peak VRAM in GB, mean utilization, allocated GPU-hours); `partition` keeps only one GPU group (a Slurm partition or a MIG GRES profile). Binning and the utilization-range filter happen client-side. `total` counts all candidates in the window; `jobs` holds only the top 2000 by effective GPU-hours, since a `sacct -j` over the whole window would time out |
@@ -161,17 +161,6 @@ layers) avoid re-hitting the same query while the admin drags filters around.
 - `sacct` without `-j` is ACL-restricted to the caller's own jobs, so job
   discovery comes from Prometheus labels and `sacct -j <id>` is used for
   metadata.
-- Because of that, a node whose exporter stops publishing would take every
-  job on it out of the dashboard. `scontrol show job` is not tied to any
-  node's exporter, so **running** GPU jobs it reports that Prometheus never
-  saw are merged in with `monitored: false` and **null** `mean_util` /
-  `max_util` / `gpu_hours_eff` / `vram_avg` — allocation is known, the
-  measurements are not. They are excluded from `efficiency_histogram` and
-  from the Users tab's utilization means (a 0 would read as "ran idle"),
-  are exempt from the `limit` cap (nothing to rank them by, so any cap
-  would hide them all), and the UI shows "no data" rather than an empty
-  cell. Node `gpus_alloc` likewise comes from scontrol's `AllocTRES`, not
-  from a live series count.
 
 ## Tests
 
