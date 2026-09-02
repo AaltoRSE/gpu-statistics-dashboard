@@ -53,18 +53,30 @@ class Job(BaseModel):
                     "own profile so a MIG node's capacity never counts "
                     "against the whole-GPU pool.")
     nodes: List[str]
-    mean_util: float = Field(
+    monitored: bool = Field(
+        default=True,
+        description="False for a running job discovered from scontrol that "
+                    "Prometheus never reported (its node's exporter is not "
+                    "publishing). Such a job is real and allocated, but has "
+                    "no measurements: mean_util, max_util, gpu_hours_eff and "
+                    "vram_avg are all null, and it is excluded from "
+                    "efficiency_histogram. Do not render a null as 0%.")
+    mean_util: Optional[float] = Field(
+        default=None,
         description="Time-weighted mean GPU utilization over the window "
                     "(%). Also referred to as a job's \"efficiency\" "
                     "elsewhere in this API (efficiency_histogram below) "
                     "and in the UI — that is this same field, not a "
-                    "separate one.")
-    max_util: float
-    gpu_hours_eff: float = Field(
+                    "separate one. Null when monitored is false.")
+    max_util: Optional[float] = None
+    gpu_hours_eff: Optional[float] = Field(
+        default=None,
         description="Effective GPU-hours: allocated GPU-hours x mean "
                     "utilization once sacct/scontrol metadata resolves "
                     "(see gpu_hours_alloc); the Prometheus-only estimate "
-                    "before that.")
+                    "before that. Null when monitored is false — allocation "
+                    "is known but utilization is not, so the product is not "
+                    "defined.")
     vram_avg: Optional[float] = None
     name: Optional[str] = None
     state: Optional[str] = None
@@ -151,9 +163,12 @@ class UserRow(BaseModel):
     user: str
     jobs: int
     running_jobs: int
-    mean_util: float = Field(
+    mean_util: Optional[float] = Field(
+        default=None,
         description="Sample-weighted mean utilization across the user's "
-                    "GPU series over the window.")
+                    "GPU series over the window. Null when none of the "
+                    "user's jobs were measured (their nodes report no GPU "
+                    "metrics) — distinct from a measured 0%.")
     util_gpu_hours: float = Field(
         description="Utilization-weighted GPU-hours (mean util x GPU "
                     "time) — not the same figure as a job's "

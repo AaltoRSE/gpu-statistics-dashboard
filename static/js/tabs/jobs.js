@@ -133,11 +133,20 @@ export function renderJobsView() {
     : rows.length + " shown";
 }
 
+// A job the exporter never reported has no utilization or VRAM figure at
+// all. Showing an empty cell would read as 0% — the very reading the null
+// is there to avoid — so say "no data" explicitly, and explain where it
+// comes from on hover.
+const NO_METRICS = raw(html`<span class="muted-cell" title="This job is\
+ running (Slurm), but its node is not reporting GPU metrics, so no\
+ utilization or VRAM was measured.">no data</span>`);
+
 function jobRowHtml(j) {
   const jobid = j.jobid;
   const rawName = j.name || "";
   const start = fmtSacctTime(j.start);
   const gpus = j.gpus !== undefined ? j.gpus : "—";
+  const unmeasured = j.monitored === false;
   return html`
     <tr class="row" data-job="${jobid}">
       <td>${jobid}</td><td class="name-cell" title="${rawName}">${rawName}</td>
@@ -145,8 +154,8 @@ function jobRowHtml(j) {
       <td>${raw(nodeLinks(j.nodes))}</td>
       <td>${raw(stateBadge(j.state))}</td><td>${start}</td>
       <td class="num">${gpus}</td>
-      <td class="num">${raw(pctBar(j.mean_util))}</td>
-      <td class="num">${fmt(j.vram_avg)}</td>
+      <td class="num">${unmeasured ? NO_METRICS : raw(pctBar(j.mean_util))}</td>
+      <td class="num">${unmeasured ? NO_METRICS : fmt(j.vram_avg)}</td>
     </tr>`;
 }
 

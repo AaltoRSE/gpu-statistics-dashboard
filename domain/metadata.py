@@ -115,9 +115,14 @@ def apply_metadata(job, row):
         (row.get("elapsed_s") or 0) * (row.get("gpus") or 0)
     if seconds and row.get("gpus"):
         alloc = seconds / 3600.0
-        util = job.get("mean_util") or 0.0
+        util = job.get("mean_util")
         job["gpu_hours_alloc"] = round(alloc, 2)
-        job["gpu_hours_eff"] = round(alloc * util / 100.0, 2)
+        # Allocation is known from Slurm alone, but effective GPU-hours are
+        # allocation x measured utilization: with no measurement there is no
+        # effective figure, and folding in a 0 would report the job as having
+        # wasted its whole allocation rather than as unmeasured.
+        if util is not None:
+            job["gpu_hours_eff"] = round(alloc * util / 100.0, 2)
 
 
 def enrich(jobs):
