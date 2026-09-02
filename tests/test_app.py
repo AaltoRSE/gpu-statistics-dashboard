@@ -56,30 +56,30 @@ SACCT = {
 NODES = [
     {"name": "gpu1", "state": "MIXED", "state_full": "MIXED", "reason": "",
      "partitions": "gpu-h100", "cpus": 64, "gpus": 8, "gpu_type": "h100",
-     "cpus_alloc": 16, "free_mem": 1000, "real_mem": 5000},
+     "gpus_alloc": 2, "cpus_alloc": 16, "free_mem": 1000, "real_mem": 5000},
     {"name": "gpu2", "state": "ALLOCATED", "state_full": "ALLOCATED*",
      "reason": "",
      "partitions": "gpu-h200", "cpus": 64, "gpus": 8, "gpu_type": "h200",
-     "cpus_alloc": 32, "free_mem": 900, "real_mem": 5000},
+     "gpus_alloc": 3, "cpus_alloc": 32, "free_mem": 900, "real_mem": 5000},
     # idle h100 node: must be included in the h100 group's capacity total
     {"name": "gpu3", "state": "IDLE", "state_full": "IDLE", "reason": "",
      "partitions": "gpu-h100", "cpus": 64, "gpus": 8, "gpu_type": "h100",
-     "cpus_alloc": 0, "free_mem": 4000, "real_mem": 5000},
+     "gpus_alloc": 0, "cpus_alloc": 0, "free_mem": 4000, "real_mem": 5000},
     # MIG node: its GRES is a MIG profile, so its capacity belongs to the
     # profile group, never to the whole-GPU h200 pool.
     {"name": "gpu49", "state": "ALLOCATED", "state_full": "ALLOCATED",
      "reason": "",
      "partitions": "gpu-h200", "cpus": 128, "gpus": 8,
      "gpu_type": "h200_3g.71gb",
-     "cpus_alloc": 32, "free_mem": 900, "real_mem": 5000},
+     "gpus_alloc": 1, "cpus_alloc": 32, "free_mem": 900, "real_mem": 5000},
     # drained node: qualifiers and reason must survive parsing
     {"name": "gpu51", "state": "IDLE", "state_full": "IDLE+DRAIN",
      "reason": "maintenance: firmware update scheduled",
      "partitions": "gpu-h200", "cpus": 64, "gpus": 8, "gpu_type": "h200",
-     "cpus_alloc": 0, "free_mem": 100, "real_mem": 5000},
+     "gpus_alloc": 0, "cpus_alloc": 0, "free_mem": 100, "real_mem": 5000},
     {"name": "csl1", "state": "IDLE", "state_full": "IDLE", "reason": "",
      "partitions": "batch", "cpus": 40, "gpus": 0, "gpu_type": "",
-     "cpus_alloc": 0, "free_mem": 100, "real_mem": 200},
+     "gpus_alloc": 0, "cpus_alloc": 0, "free_mem": 100, "real_mem": 200},
 ]
 
 
@@ -862,8 +862,25 @@ def test_nodes_gpu_group(client):
 
 def test_nodes_gpus_alloc(client):
     by_name = {n["name"]: n for n in client.get("/api/nodes").json()["nodes"]}
-    assert by_name["gpu1"]["gpus_alloc"] == 2  # from count by (instance, job, gpu_type)
+    assert by_name["gpu1"]["gpus_alloc"] == 2  # from scontrol AllocTRES
     assert by_name["gpu1"]["cpus_alloc"] == 16  # from scontrol CPUAlloc
+
+
+def test_nodes_gpus_alloc_ignores_silent_exporter(client, fake_prom, monkeypatch):
+    # A node scontrol reports as fully allocated, but whose monitoring
+    # exporter has stopped publishing any per-GPU series at all (gpu49 in
+    # reality, after its today's mixed-GRES reconfiguration): the live
+    # Prometheus "count by (instance, job, gpu_type)" query has nothing
+    # for this instance, yet gpus_alloc must still read scontrol's true
+    # allocation, not silently drop to 0.
+    monkeypatch.setattr(deps, "show_nodes", lambda: [
+        {"name": "gpu99", "state": "MIXED", "state_full": "MIXED",
+         "reason": "", "partitions": "gpu-h200-71g-ia", "cpus": 128,
+         "gpus": 12, "gpu_type": "h200", "gpus_alloc": 12,
+         "cpus_alloc": 56, "free_mem": 1000, "real_mem": 5000},
+    ])
+    by_name = {n["name"]: n for n in client.get("/api/nodes").json()["nodes"]}
+    assert by_name["gpu99"]["gpus_alloc"] == 12
 
 
 def test_nodes_detail_vram_keeps_coresident_jobs(client):
