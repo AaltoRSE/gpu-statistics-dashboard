@@ -105,6 +105,25 @@ NodeName=csl1 Arch=x86_64 CoresPerSocket=20
     assert csl1["gpu_type"] == ""
 
 
+def test_parse_scontrol_nodes_mixed_gres():
+    # A node can carve part of its GPUs into MIG slices while leaving the
+    # rest as whole GPUs (gpu49: 4 whole H200 + 8 MIG h200_3g.71gb
+    # slices) — "gpus" must total every gres entry, not just the first,
+    # and "gres" must keep the per-type breakdown.
+    sample = (
+        "NodeName=gpu49 Arch=x86_64 CoresPerSocket=32\n"
+        "   CPUAlloc=48 CPUTot=128\n"
+        "   Gres=gpu:h200:4(S:1),gpu:h200_3g.71gb:8(S:0),"
+        "min-vram:no_consume:71G\n"
+        "   State=MIXED ThreadsPerCore=2\n"
+        "   Partitions=gpu-h200-71g-ia-ellis,gpu-h200-71g-ia\n"
+    )
+    node = parse_scontrol_nodes(sample)[0]
+    assert node["gpus"] == 12
+    assert node["gpu_type"] == "h200"
+    assert node["gres"] == [("h200", 4), ("h200_3g.71gb", 8)]
+
+
 def test_parse_scontrol_nodes_free_mem_na():
     sample = "NodeName=fn3\n   State=IDLE\n   FreeMem=N/A RealMemory=N/A\n"
     nodes = parse_scontrol_nodes(sample)

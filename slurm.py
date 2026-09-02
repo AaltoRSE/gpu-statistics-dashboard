@@ -222,8 +222,14 @@ def parse_scontrol_nodes(output):
                 "reason": reason,
                 "partitions": (node.get("Partitions") or "").strip(),
                 "cpus": _int(node.get("CPUTot")),
-                "gpus": gpus[0][1] if gpus else 0,
+                # A node's Gres line may list more than one GPU type (e.g. a
+                # node with both whole GPUs and a MIG-sliced profile
+                # carved from the rest); "gpus" is the total across every
+                # type, and "gres" keeps the per-type breakdown so callers
+                # that need to attribute capacity to the right group can.
+                "gpus": sum(count for _, count in gpus),
                 "gpu_type": gpus[0][0] if gpus else "",
+                "gres": gpus,
                 "cpus_alloc": _int(node.get("CPUAlloc")),
                 "free_mem": _int(node.get("FreeMem")),
                 "real_mem": _int(node.get("RealMemory")),
