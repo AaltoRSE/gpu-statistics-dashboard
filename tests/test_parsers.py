@@ -124,6 +124,29 @@ def test_parse_scontrol_nodes_mixed_gres():
     assert node["gres"] == [("h200", 4), ("h200_3g.71gb", 8)]
 
 
+def test_parse_scontrol_nodes_gpus_alloc_from_alloc_tres():
+    # scontrol's own AllocTRES is authoritative for "currently allocated"
+    # even when the node's monitoring exporter reports nothing at all
+    # (gpu49 in reality: all 12 GPUs allocated across both GRES types).
+    sample = (
+        "NodeName=gpu49 Arch=x86_64\n"
+        "   CPUAlloc=56 CPUTot=128\n"
+        "   Gres=gpu:h200:4(S:1),gpu:h200_3g.71gb:8(S:0)\n"
+        "   State=MIXED\n"
+        "   AllocTRES=cpu=56,mem=431184M,gres/gpu=12,gres/gpu:h200=4,"
+        "gres/gpu:h200_3g.71gb=8\n"
+        "   Partitions=gpu-h200-71g-ia\n"
+    )
+    node = parse_scontrol_nodes(sample)[0]
+    assert node["gpus_alloc"] == 12
+
+
+def test_parse_scontrol_nodes_gpus_alloc_defaults_to_zero():
+    sample = "NodeName=gpu3\n   State=IDLE\n   Gres=gpu:v100:4\n"
+    node = parse_scontrol_nodes(sample)[0]
+    assert node["gpus_alloc"] == 0
+
+
 def test_parse_scontrol_nodes_free_mem_na():
     sample = "NodeName=fn3\n   State=IDLE\n   FreeMem=N/A RealMemory=N/A\n"
     nodes = parse_scontrol_nodes(sample)

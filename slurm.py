@@ -202,6 +202,7 @@ def parse_scontrol_nodes(output):
     parsed = []
     for node in nodes:
         gpus = parse_gres(node.get("Gres"))
+        gpus_alloc, _ = parse_alloc_tres(node.get("AllocTRES"))
         state = node.get("State", "UNKNOWN")
         # ``scontrol show node -o`` appends the drain reason to the state
         # (``DOWN+DRAINED:reason``); ``scontrol show nodes`` reports it in
@@ -230,6 +231,11 @@ def parse_scontrol_nodes(output):
                 "gpus": sum(count for _, count in gpus),
                 "gpu_type": gpus[0][0] if gpus else "",
                 "gres": gpus,
+                # scontrol's own live allocation count, straight from
+                # AllocTRES's aggregate "gres/gpu=N" entry — authoritative
+                # even when the node's monitoring exporter is down and
+                # reports no per-GPU utilization series at all.
+                "gpus_alloc": gpus_alloc,
                 "cpus_alloc": _int(node.get("CPUAlloc")),
                 "free_mem": _int(node.get("FreeMem")),
                 "real_mem": _int(node.get("RealMemory")),

@@ -27,15 +27,19 @@ def api_nodes(gpu_only: bool = True, refresh: bool = Query(False)):
     if gpu_only:
         nodes = [n for n in nodes if n["gpus"]]
     try:
-        cur, jobs_by_node, allocs, _ = node_current()
+        cur, jobs_by_node, _, _ = node_current()
     except PrometheusError:
-        cur, jobs_by_node, allocs, _ = {}, {}, {}, {}
+        cur, jobs_by_node = {}, {}
     for n in nodes:
         n["gpu_group"] = gpu_groups.node_gpu_group(n)
         c = cur.get(n["name"], {})
         n["current_util"] = c.get("util")
         n["current_vram"] = c.get("vram")
-        n["gpus_alloc"] = min(allocs.get(n["name"], 0), n["gpus"])
+        # scontrol's own AllocTRES (parsed into gpus_alloc by
+        # parse_scontrol_nodes), not the live Prometheus series count: a
+        # node's monitoring exporter going silent must not make a fully
+        # allocated node read as idle.
+        n["gpus_alloc"] = min(n.get("gpus_alloc", 0), n["gpus"])
         n["active_jobs"] = sorted(
             jobs_by_node.get(n["name"], []),
             key=lambda j: j["util"], reverse=True,
