@@ -21,9 +21,39 @@ def is_mig_gres(name):
 
 
 def build_node_index(nodes):
-    """``{node name: scontrol gpu_type}`` — the lookup every resolver here
-    needs to tell a MIG node from a whole-GPU node."""
-    return {n["name"]: n.get("gpu_type") or "" for n in nodes}
+    """``{node name: [scontrol GRES type, ...]}`` — every GPU/MIG type on
+    the node, the lookup every resolver here needs to tell a MIG series
+    from a whole-GPU one. A node may carry more than one type at once
+    (e.g. part of its GPUs left whole, the rest carved into a MIG
+    profile), so this is a list, not a single value."""
+    out = {}
+    for n in nodes:
+        gres = n.get("gres")
+        types = [t for t, _ in gres] if gres else (
+            [n["gpu_type"]] if n.get("gpu_type") else [])
+        out[n["name"]] = types
+    return out
+
+
+def _resolve_mig_type(gtype, ntypes):
+    """The node's MIG type this series belongs to, or ``None``.
+
+    ``ntypes`` is every GRES type scontrol reports for the series'
+    node. When the node is entirely MIG, its (sole) profile is
+    authoritative regardless of the series' own ``gpu_type`` label
+    (some MIG series are observed with a generic/bare label). When the
+    node also carries a whole-GPU type, that trust would misclassify a
+    whole-GPU job sharing the node, so it only applies when this
+    series' own label is itself MIG-shaped — matching a same-named
+    node profile first, else the node's (sole) MIG profile.
+    """
+    mig_types = [t for t in ntypes if is_mig_gres(t)]
+    if not mig_types:
+        return None
+    has_whole = any(not is_mig_gres(t) for t in ntypes)
+    if has_whole and not is_mig_gres(gtype):
+        return None
+    return next((t for t in mig_types if t == gtype), mig_types[0])
 
 
 def gpu_group_name(metric, node_gpu_types, aliases=None):
@@ -44,9 +74,9 @@ def gpu_group_name(metric, node_gpu_types, aliases=None):
             return alias
     inst = metric.get("instance", "")
     if inst:
-        ntype = node_gpu_types.get(inst)
-        if ntype and is_mig_gres(ntype):
-            return ntype
+        mig = _resolve_mig_type(gtype, node_gpu_types.get(inst) or [])
+        if mig:
+            return mig
     if is_mig_gres(gtype):
         return job + "_" + gtype if job else gtype
     return job or "unknown"
@@ -54,13 +84,14 @@ def gpu_group_name(metric, node_gpu_types, aliases=None):
 
 def job_gpu_group(job, node_gpu_types):
     """Canonical partition-view group for a job from its observed nodes."""
+    job_gtype = job.get("gpu_type") or ""
     mig = set()
     for name in job.get("nodes") or []:
-        ntype = node_gpu_types.get(name)
-        if ntype and is_mig_gres(ntype):
-            mig.add(ntype)
-    if not mig and is_mig_gres(job.get("gpu_type") or ""):
-        mig.add(job["gpu_type"])
+        found = _resolve_mig_type(job_gtype, node_gpu_types.get(name) or [])
+        if found:
+            mig.add(found)
+    if not mig and is_mig_gres(job_gtype):
+        mig.add(job_gtype)
     if not mig:
         return job.get("partition") or "unknown"
     if len(mig) == 1:
@@ -104,10 +135,12 @@ def pair_aliases(stats, node_gpu_types):
     for s in stats:
         m = s["metric"]
         inst = m.get("instance", "")
-        ntype = node_gpu_types.get(inst) if inst else None
-        if ntype and is_mig_gres(ntype):
-            key = (m.get("job", ""), m.get("gpu_type", ""))
-            pair_mig.setdefault(key, set()).add(ntype)
+        gtype = m.get("gpu_type", "") or ""
+        mig = _resolve_mig_type(gtype, node_gpu_types.get(inst) or []) \
+            if inst else None
+        if mig:
+            key = (m.get("job", ""), gtype)
+            pair_mig.setdefault(key, set()).add(mig)
     aliases = {}
     for pair in pairs:
         mig = pair_mig.get(pair)
