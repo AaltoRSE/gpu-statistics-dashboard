@@ -1065,3 +1065,24 @@ def test_partitions_mean_occupancy_running_only(client, fake_prom):
     ranges = [q for t, q in fake_prom.calls if t == "range"]
     assert any('slurmjobid=~"^(?:1|2|4)$"' in q and "count by (job, gpu_type)" in q
                for q in ranges), ranges
+
+
+def test_gpu_capacity_mixed_whole_and_mig_node():
+    # gpu49 in reality: 4 whole H200 GPUs + 8 MIG h200_3g.71gb slices on
+    # one node. Each group must get only its own type's count, not the
+    # node's combined total (12) and not the other group's slice/whole
+    # count either.
+    nodes = [
+        {"name": "gpu49", "partitions": "gpu-h200-71g-ia",
+         "gres": [("h200", 4), ("h200_3g.71gb", 8)]},
+        {"name": "gpu50", "partitions": "gpu-h200-141g",
+         "gres": [("h200", 8)]},
+    ]
+    groups = [{"name": "h200"}, {"name": "h200_3g.71gb"}]
+    allocs = {"h200": 5, "h200_3g.71gb": 3}
+    out = domain_partitions.gpu_capacity(groups, {}, nodes, allocs)
+    by_name = {g["name"]: g for g in out}
+    assert by_name["h200"]["gpus_total"] == 12  # gpu49's 4 + gpu50's 8
+    assert by_name["h200"]["gpus_alloc"] == 5
+    assert by_name["h200_3g.71gb"]["gpus_total"] == 8  # gpu49's MIG slices only
+    assert by_name["h200_3g.71gb"]["gpus_alloc"] == 3

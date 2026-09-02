@@ -127,41 +127,63 @@ def aggregate_partition_stats(stats, node_gpu_types=None, aliases=None):
     return out
 
 
+def _node_gres(node):
+    """``[(type, count), ...]`` for a node, falling back to its scalar
+    ``gpu_type``/``gpus`` when ``gres`` is absent (a single-type node from
+    a caller that predates the per-type breakdown)."""
+    gres = node.get("gres")
+    if gres is not None:
+        return gres
+    if node.get("gpu_type") and node.get("gpus"):
+        return [(node["gpu_type"], node["gpus"])]
+    return []
+
+
+def _node_type_count(node, gtype):
+    """This node's GPU count of exactly ``gtype`` (0 if it has none)."""
+    return sum(c for t, c in _node_gres(node) if t == gtype)
+
+
+def _node_whole_gpu_count(node):
+    """This node's total whole-GPU count, MIG-sliced types excluded."""
+    return sum(c for t, c in _node_gres(node) if not gpu_groups.is_mig_gres(t))
+
+
 def gpu_capacity(groups, instances, nodes, allocs):
     """Join metric groups to scontrol GPU capacity.
 
     ``instances`` maps group -> observed instance names (built in
     ``partition_window``). Capacity is summed over **all** scontrol nodes
-    whose ``gpu_type`` exactly equals the group name (MIG profiles), then
-    over all **whole-GPU** nodes whose ``partitions`` list contains the
-    group name (idle capacity included; MIG-gres nodes are excluded from
-    the partition fallback because their GPUs belong to profile groups); a
-    node shared by several partitions therefore counts toward each of
-    them, matching how Slurm admits jobs to each. Groups with no scontrol
-    membership fall back to their observed instances. Allocated
-    uses the exact per-group live GPU count from ``allocs`` (a shared node's
-    GPUs are counted only under the groups their jobs actually run in) and
-    is capped at total.
+    carrying a GRES entry whose type exactly equals the group name (MIG
+    profiles), then over all **whole-GPU** nodes whose ``partitions`` list
+    contains the group name (idle capacity included; a node's MIG-sliced
+    GRES entries are excluded from the partition fallback because they
+    belong to profile groups, even on a node that also has a whole-GPU
+    entry) — a node shared by several partitions therefore counts toward
+    each of them, matching how Slurm admits jobs to each. A node with more
+    than one GRES type (part whole, part MIG-sliced) contributes only the
+    matching type's own count to each group, never its other type's.
+    Groups with no scontrol membership fall back to their observed
+    instances. Allocated uses the exact per-group live GPU count from
+    ``allocs`` (a shared node's GPUs are counted only under the groups
+    their jobs actually run in) and is capped at total.
     """
     nodes_by_name = {n["name"]: n for n in nodes}
     for g in groups:
-        by_type = [
-            n for n in nodes
-            if n["gpus"] and n.get("gpu_type") and n["gpu_type"] == g["name"]
-        ]
+        by_type = [n for n in nodes if _node_type_count(n, g["name"])]
         by_partition = [
             n for n in nodes
-            if (n["gpus"] and not gpu_groups.is_mig_gres(n.get("gpu_type"))
+            if (_node_whole_gpu_count(n)
                 and g["name"] in (n["partitions"] or "").split(","))
         ]
         if by_type:
-            scope = by_type
+            total = sum(_node_type_count(n, g["name"]) for n in by_type)
         elif by_partition:
-            scope = by_partition
+            total = sum(_node_whole_gpu_count(n) for n in by_partition)
         else:
             scope = [nodes_by_name[i] for i in instances.get(g["name"], ())
                      if i in nodes_by_name]
-        total = sum(n["gpus"] for n in scope)
+            total = sum(n["gpus"] for n in scope)
         g["gpus_alloc"] = int(min(allocs.get(g["name"], 0), total))
         g["gpus_total"] = int(total)
     return groups
