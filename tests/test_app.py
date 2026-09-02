@@ -1103,3 +1103,125 @@ def test_gpu_capacity_mixed_whole_and_mig_node():
     assert by_name["h200"]["gpus_alloc"] == 5
     assert by_name["h200_3g.71gb"]["gpus_total"] == 8  # gpu49's MIG slices only
     assert by_name["h200_3g.71gb"]["gpus_alloc"] == 3
+
+
+# ---- running jobs on a node whose exporter is silent -------------------
+#
+# gpu49's exporter stopped publishing while Slurm kept scheduling onto it:
+# job discovery is Prometheus-only, so every job there vanished from the
+# dashboard while scontrol still reported them RUNNING.
+
+def _unmonitored_row(jobid, user, node="gpu49", gpus=1,
+                  gpu_type="h200_3g.71gb", state="RUNNING", **over):
+    row = {
+        "jobid": jobid, "array_jobid": "", "array_task_id": "",
+        "name": "bash", "user": user, "account": "acc",
+        "partition": "gpu-h200-71g-ia-ellis,gpu-h200-71g-ia", "state": state,
+        "start": JOB1_START, "end": "", "elapsed_s": 3600, "gpus": gpus,
+        "gpu_type": gpu_type, "node_list": node, "ncpus": 4,
+    }
+    row.update(over)
+    return row
+
+
+def test_jobs_includes_running_job_with_no_prometheus_series(client, monkeypatch):
+    monkeypatch.setattr(deps, "show_jobs",
+                        lambda: {"9001": _unmonitored_row("9001", "pfaut1")})
+    data = client.get("/api/jobs", params={"since_hours": 24}).json()
+    by_id = {j["jobid"]: j for j in data["jobs"]}
+    assert "9001" in by_id, "a RUNNING GPU job scontrol knows must not vanish"
+    j = by_id["9001"]
+    assert j["monitored"] is False
+    assert j["user"] == "pfaut1"
+    # Unmeasured, not measured-as-zero: a 0 would read as a job that ran
+    # its whole allocation idle.
+    assert j["mean_util"] is None
+    assert j["gpu_hours_eff"] is None
+    assert j["vram_avg"] is None
+    # Allocation is known from Slurm even with no measurements at all.
+    assert j["gpu_hours_alloc"] == 1.0
+    assert j["gpus"] == 1
+    assert j["nodes"] == ["gpu49"]
+    # Prometheus-derived rows stay flagged as measured.
+    assert by_id["1"]["monitored"] is True
+
+
+def test_unmonitored_job_stays_out_of_efficiency_histogram(client, monkeypatch):
+    monkeypatch.setattr(deps, "show_jobs",
+                        lambda: {"9001": _unmonitored_row("9001", "pfaut1")})
+    with_job = client.get("/api/jobs", params={"since_hours": 24}).json()
+    assert any(j["jobid"] == "9001" for j in with_job["jobs"])
+    # Same window with the controller reporting nothing, so the only
+    # difference is the unmeasured job. refresh drops the 30 s controller
+    # snapshot as well as the window cache.
+    monkeypatch.setattr(deps, "show_jobs", lambda: {})
+    without = client.get("/api/jobs", params={"since_hours": 24,
+                                              "refresh": "true"}).json()
+    assert not any(j["jobid"] == "9001" for j in without["jobs"])
+    # The unmeasured job adds no GPU-hours to any efficiency bucket — in
+    # particular not to 0-10%, where a 0 mean_util would have landed it.
+    assert with_job["efficiency_histogram"] == without["efficiency_histogram"]
+
+
+def test_running_only_keeps_unmonitored_job(client, monkeypatch):
+    monkeypatch.setattr(deps, "show_jobs",
+                        lambda: {"9001": _unmonitored_row("9001", "pfaut1")})
+    data = client.get("/api/jobs", params={"since_hours": 24,
+                                           "running_only": "true"}).json()
+    # It has no live Prometheus series, but scontrol reports it RUNNING.
+    assert "9001" in {j["jobid"] for j in data["jobs"]}
+
+
+def test_running_only_without_live_ids_still_finds_scontrol_jobs(
+        client, fake_prom, monkeypatch):
+    # The empty-live-set fast path must not skip a node whose exporter is
+    # silent while Slurm still has running work on it.
+    fake_prom.live_ids = set()
+    monkeypatch.setattr(deps, "show_jobs",
+                        lambda: {"9001": _unmonitored_row("9001", "pfaut1")})
+    data = client.get("/api/jobs", params={"since_hours": 24,
+                                           "running_only": "true"}).json()
+    assert [j["jobid"] for j in data["jobs"]] == ["9001"]
+
+
+def test_non_running_or_cpu_only_scontrol_jobs_are_not_added(client, monkeypatch):
+    monkeypatch.setattr(deps, "show_jobs", lambda: {
+        "9002": _unmonitored_row("9002", "someone", state="PENDING"),
+        "9003": _unmonitored_row("9003", "someone", gpus=0),  # CPU-only job
+    })
+    ids = {j["jobid"] for j in
+           client.get("/api/jobs", params={"since_hours": 24}).json()["jobs"]}
+    assert "9002" not in ids and "9003" not in ids
+
+
+def test_array_task_not_re_added_when_parent_already_measured(client, monkeypatch):
+    # Prometheus labels an array parent's work with the bare parent ID
+    # ("1" here); the physical task must not reappear as a second,
+    # unmeasured row for the same work.
+    monkeypatch.setattr(deps, "show_jobs", lambda: {
+        "9004": _unmonitored_row("9004", "alice", array_jobid="1"),
+    })
+    ids = [j["jobid"] for j in
+           client.get("/api/jobs", params={"since_hours": 24}).json()["jobs"]]
+    assert "9004" not in ids
+
+
+def test_users_lists_a_user_whose_only_job_is_unmonitored(client, monkeypatch):
+    monkeypatch.setattr(deps, "show_jobs",
+                        lambda: {"9001": _unmonitored_row("9001", "pfaut1")})
+    data = client.get("/api/users", params={"since_hours": 24}).json()
+    by_user = {u["user"]: u for u in data["users"]}
+    assert "pfaut1" in by_user
+    u = by_user["pfaut1"]
+    assert u["jobs"] == 1
+    assert u["running_jobs"] == 1
+    # No samples, so the user contributes no utilization and no GPU-hours.
+    assert u["util_gpu_hours"] == 0.0
+
+
+def test_apply_metadata_keeps_effective_hours_null_when_unmeasured():
+    job = {"jobid": "9001", "mean_util": None, "gpu_hours_eff": None}
+    domain_metadata.apply_metadata(job, {"gpus": 2, "elapsed_s": 3600,
+                                          "name": "bash"})
+    assert job["gpu_hours_alloc"] == 2.0
+    assert job["gpu_hours_eff"] is None

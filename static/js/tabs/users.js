@@ -24,6 +24,12 @@ import { api } from "../core/api.js";
 import { loaded, setUrl, openJob, openNode, openPartition } from "../core/router.js";
 import { createTable } from "../core/table.js";
 
+// A user or job whose node reports no GPU metrics has nothing measured.
+// An empty utilization cell would read as a measured 0%, so say so.
+const NO_METRICS = raw(html`<span class="muted-cell" title="Running per\
+ Slurm, but the node is not reporting GPU metrics, so no utilization was\
+ measured.">no data</span>`);
+
 let userRows = [];
 let userSelected = null;   // finalized user name or null
 let userJobs = [];
@@ -69,7 +75,7 @@ function userRowHtml(u) {
       <td><b>${user}</b></td>
       <td class="num">${fmtInt(u.jobs)}</td>
       <td class="num">${fmtInt(u.running_jobs)}</td>
-      <td class="num">${raw(pctBar(u.mean_util))}</td>
+      <td class="num">${u.mean_util === null ? NO_METRICS : raw(pctBar(u.mean_util))}</td>
       <td class="num">${fmtInt(u.util_gpu_hours)}</td>
       <td class="num">${fmt(u.vram_avg)}</td>
       <td class="small chip-cell">${raw(chipList((u.gpu_types || []).map(escapeHtml)))}</td>
@@ -172,6 +178,7 @@ function userJobRowHtml(j) {
   const rawName = j.name || "";
   const start = fmtSacctTime(j.start);
   const gpus = j.gpus !== undefined ? j.gpus : "—";
+  const unmeasured = j.monitored === false;
   return html`
     <tr class="row" data-job="${jobid}">
       <td>${raw(jobLink(j.jobid))}</td>
@@ -180,8 +187,8 @@ function userJobRowHtml(j) {
       <td>${raw(nodeLinks(j.nodes))}</td>
       <td>${raw(stateBadge(j.state))}</td><td>${start}</td>
       <td class="num">${gpus}</td>
-      <td class="num">${raw(pctBar(j.mean_util))}</td>
-      <td class="num">${fmtInt(j.gpu_hours_eff)}</td>
+      <td class="num">${unmeasured ? NO_METRICS : raw(pctBar(j.mean_util))}</td>
+      <td class="num">${unmeasured ? NO_METRICS : fmtInt(j.gpu_hours_eff)}</td>
     </tr>`;
 }
 

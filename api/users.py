@@ -4,7 +4,7 @@ from fastapi import APIRouter, Query
 
 from api.schemas import UsersResponse
 from domain.common import running_gpu_job_ids, window
-from domain.jobs import fetch_job_window
+from domain.jobs import fetch_job_window, unmonitored_running_jobs
 
 router = APIRouter()
 
@@ -23,6 +23,11 @@ def api_users(since_hours: float = Query(24, gt=0, le=168)):
     """
     jobs, start, now, _ = fetch_job_window(since_hours)
     live = running_gpu_job_ids()
+    # A user whose only running work sits on a node with a silent exporter
+    # would otherwise be absent from this list entirely. Those jobs carry
+    # no utilization samples, so they raise the user's job counts without
+    # touching the utilization means below.
+    jobs = jobs + unmonitored_running_jobs({j["jobid"] for j in jobs})
     agg = {}
     for j in jobs:
         u = j["user"]
@@ -34,7 +39,7 @@ def api_users(since_hours: float = Query(24, gt=0, le=168)):
             "vram_sum": 0.0, "vram_n": 0, "gpu_types": set(),
         })
         a["jobs"] += 1
-        if j["jobid"] in live:
+        if j["jobid"] in live or not j.get("monitored", True):
             a["running_jobs"] += 1
         a["util_sum"] += j.get("_util_sum", 0.0)
         a["util_samples"] += j.get("_util_samples", 0)
@@ -52,9 +57,11 @@ def api_users(since_hours: float = Query(24, gt=0, le=168)):
             "running_jobs": a["running_jobs"],
             # Sample-weighted mean utilization across the user's GPU series;
             # effective GPU-hours already include utilization and cannot be
-            # used as this weight without squaring it.
+            # used as this weight without squaring it. A user whose jobs all
+            # ran on non-reporting nodes has no samples at all — null, not
+            # 0.0, which would read as "measured, and idle".
             "mean_util": round(a["util_sum"] / a["util_samples"], 2)
-            if a["util_samples"] else 0.0,
+            if a["util_samples"] else None,
             "util_gpu_hours": round(a["util_gpu_hours"], 2),
             "vram_avg": round(a["vram_sum"] / a["vram_n"], 1)
             if a["vram_n"] else None,
