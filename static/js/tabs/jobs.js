@@ -309,7 +309,6 @@ export async function loadJobDetail(jobid, from) {
   // the broad explorer behind its "Browse jobs" control unless the click
   // came from the table itself (where it is already the context).
   if (!jobDetailOpenedFromTable) setJobExplorerCollapsed(true);
-  detail.scrollIntoView({ behavior: "smooth", block: "start" });
   try {
     const data = await api("/api/jobs/" + jobid + "?since_hours=" + $("jWindow").value);
     if (token !== jobDetailToken) return;
@@ -318,6 +317,13 @@ export async function loadJobDetail(jobid, from) {
     jobDetailData = data;
     renderJobDetail(data);
     if (jobDetailOpenedFromTable) highlightJobRow(jobid);
+    // Land on the detail only once its real content (stats row, chart)
+    // has rendered: scrolling before the fetch targets the loading
+    // skeleton's height, and the panel's own size change on render then
+    // pushes the view back down to the jobs table (PLAN-1 2.2's fix for
+    // the Nodes tab, applied here). The row highlight is a plain marker
+    // now — the single scroll is the panel's.
+    detail.scrollIntoView({ behavior: "smooth", block: "start" });
   } catch (e) {
     if (token === jobDetailToken)
       showPanelError("jobDetailResults", e, () => loadJobDetail(jobid, jobDetailFrom), "job " + jobid);
@@ -388,7 +394,11 @@ function toggleJobExplorer() {
 function highlightJobRow(jobid) {
   clearJobTableHighlight();
   const tr = $("jobTable").querySelector('tr.row[data-job="' + jobid + '"]');
-  if (tr) { tr.classList.add("sel"); tr.scrollIntoView({ block: "center" }); }
+  // No scrollIntoView here: the detail panel's own scroll (in
+  // loadJobDetail, after its content renders) is the navigation target —
+  // this is just a visual marker for whoever scrolls back up to the
+  // table, not a second place to land (same as highlightNodeRow).
+  if (tr) tr.classList.add("sel");
 }
 
 function clearJobTableHighlight() {

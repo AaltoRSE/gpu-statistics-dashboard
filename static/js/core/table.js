@@ -93,7 +93,10 @@ export function createTable({ el, columns, defaultSort, renderRow, onRowClick, e
 
   // Sortable headers become real <button>s (keyboard- and
   // screen-reader-reachable), wired once; every later render only
-  // rewrites the tbody.
+  // rewrites the tbody. The button is in-flow — it is what gives an
+  // all-sortable table's thead row its height (see components.css) — and
+  // it alone handles sorting; there is no separate click layer on the
+  // <th> to route around.
   el.querySelectorAll("th[data-k]").forEach((th) => {
     // A header can carry a glossary trigger (core/glossary.js) alongside
     // its label; detach it before reading textContent (else its own "?"

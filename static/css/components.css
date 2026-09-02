@@ -77,14 +77,21 @@ tr.row:hover td:first-child { background: var(--panel2); }
 table { width:100%; border-collapse: collapse; font-size: 12.5px; }
 th { text-align:left; color:var(--dim); font-weight:600; font-size:11px; text-transform:uppercase;
      letter-spacing:.04em; padding:6px 8px; border-bottom:1px solid var(--line); user-select:none; white-space:nowrap; }
-/* The header's <button> (added by core/table.js) is absolutely positioned
-   to fill the whole <th> — a table cell's height comes from row-wide
-   layout, not its own content, so a plain width/height:100% button can
-   end up shorter than the cell and leave an unclickable strip above or
-   below it depending on how tall the row's other headers are. */
+/* The header's <button> (added by core/table.js) is in-flow, so a
+   table whose every header is sortable still sizes its <thead> row from
+   its own labels: with the old position:absolute fill, an all-sortable
+   row (Jobs, Users) contributed no height at all — the thead collapsed
+   to a hairline and the labels rendered on top of the first data row,
+   while any table with one unsorted column (Nodes) only looked right by
+   accident. In-flow, the row gets its natural height.
+
+   The button carries the cell's own padding (the <th> keeps padding:0
+   so the pair isn't doubled) and fills the full cell, so clicking
+   anywhere in the header sorts. position:relative keeps the
+   absolutely positioned .glossary-btn anchored to the cell's corner. */
 th[data-k] { cursor:pointer; padding:0; position:relative; }
 th[data-k] > button:not(.glossary-btn) { all:unset; box-sizing:border-box; cursor:pointer;
-  position:absolute; inset:0; padding:6px 8px; font:inherit; color:inherit;
+  display:block; width:100%; padding:6px 8px; font:inherit; color:inherit;
   text-align:inherit; white-space:inherit; }
 th[data-k] > button:not(.glossary-btn):focus-visible { outline: 2px solid var(--acc);
   outline-offset: -2px; }
@@ -110,8 +117,10 @@ tr.row:hover td { background: var(--panel2); }
 tr.row.sel td { background: #233052; }
 tr.row.selected-user td { background: var(--panel2); }
 th.sorted-asc, th.sorted-desc { color: var(--text); font-weight: 700; }
-th.sorted-asc::after { content:" \25B2"; font-size:9px; color:var(--acc); }
-th.sorted-desc::after { content:" \25BC"; font-size:9px; color:var(--acc); }
+/* The sort arrow lives on the in-flow sort button (a <th>::after would
+   be its own in-flow line after the button and grow the header row). */
+th[data-k].sorted-asc > button:not(.glossary-btn)::after { content:" \25B2"; font-size:9px; color:var(--acc); }
+th[data-k].sorted-desc > button:not(.glossary-btn)::after { content:" \25BC"; font-size:9px; color:var(--acc); }
 
 .badge { display:inline-block; padding:1px 8px; border-radius:10px; font-size:11px; font-weight:600; }
 .badge.RUNNING { background:#1b3a2a; color:var(--ok); }
