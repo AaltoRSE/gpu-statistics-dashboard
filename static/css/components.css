@@ -85,16 +85,14 @@ th { text-align:left; color:var(--dim); font-weight:600; font-size:11px; text-tr
    while any table with one unsorted column (Nodes) only looked right by
    accident. In-flow, the row gets its natural height.
 
-   The trade-off: an in-flow button only fills the cell's content box,
-   so when a sibling's taller content stretches the row the button stops
-   short of the cell's bottom and a click in that strip would do nothing.
-   th::before covers the whole cell instead and core/table.js forwards
-   its clicks to the sort button, keeping the full header clickable. */
+   The button carries the cell's own padding (the <th> keeps padding:0
+   so the pair isn't doubled) and fills the full cell, so clicking
+   anywhere in the header sorts. position:relative keeps the
+   absolutely positioned .glossary-btn anchored to the cell's corner. */
 th[data-k] { cursor:pointer; padding:0; position:relative; }
 th[data-k] > button:not(.glossary-btn) { all:unset; box-sizing:border-box; cursor:pointer;
   display:block; width:100%; padding:6px 8px; font:inherit; color:inherit;
   text-align:inherit; white-space:inherit; }
-th[data-k]::before { content:""; position:absolute; inset:0; }
 th[data-k] > button:not(.glossary-btn):focus-visible { outline: 2px solid var(--acc);
   outline-offset: -2px; }
 /* Sits in the corner, above the sort button beneath it (later in DOM
