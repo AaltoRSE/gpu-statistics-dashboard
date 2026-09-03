@@ -12,7 +12,7 @@
 import { $, debounce, isPlainClick } from "../core/dom.js";
 import {
   fmt, fmtInt, pctBar, escapeHtml, html, raw, tsToDate, fmtSacctTime, fmtDuration,
-  stateBadge, userLink, nodeLinks, partitionLink,
+  stateBadge, jobDetailTitle, nodeLinks, partitionLink,
 } from "../core/format.js";
 import { setResultsLoading, showPanelError, panelOk } from "../core/panel.js";
 import { renderPlot, plotTheme, partBarColor } from "../core/plot.js";
@@ -409,8 +409,12 @@ function clearJobTableHighlight() {
 export function renderJobDetail(data) {
   const m = data.metadata || {};
   const jobid = data.jobid;
-  $("jobDetailTitle").textContent =
-    "Job " + jobid + " — " + (m.name || "?") + " (" + (m.user || "?") + ") · " + (m.state || "?");
+  // The user is the title's one linkable entity (jobDetailTitle wraps it
+  // in the same /user/<name> deep link as the table's user column). The
+  // builder's output is already-safe markup — every Slurm-supplied field
+  // is either a plain-text interpolation or an escaped builder inside it
+  // — so the only thing standing between it and innerHTML is that.
+  $("jobDetailTitle").innerHTML = jobDetailTitle(jobid, m);
   const metaBits = [];
   if (m.partition) metaBits.push("partition " + m.partition);
   if (m.node_list) metaBits.push("nodes " + m.node_list);

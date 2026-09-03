@@ -9,7 +9,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { JSDOM } from "jsdom";
 
-import { html, raw, escapeHtml, jobLink, pctBar, stateBadge } from "../static/js/core/format.js";
+import { html, raw, escapeHtml, jobLink, userLink, jobDetailTitle, pctBar, stateBadge } from "../static/js/core/format.js";
 
 test("html`` escapes a plain interpolation", () => {
   const out = html`<td>${"<script>alert(1)</script>"}</td>`;
@@ -62,6 +62,75 @@ test("jobLink escapes a job id used in both an href and a data attribute", () =>
   const doc = dom.window.document;
   assert.equal(doc.querySelectorAll("script").length, 0);
   assert.equal(doc.querySelectorAll("a").length, 1);
+});
+// Issue #2: the job detail title ("Job <id> — <name> (<user>) · <state>")
+// renders the user through this same builder, so the title's user link is
+// whatever userLink produces — the /user/<name> deep link the Users tab
+// resolves.
+test("userLink targets the /user/<name> deep link and keeps the name visible", () => {
+  const dom = new JSDOM(`<div>${userLink("alice")}</div>`);
+  const a = dom.window.document.querySelector("a");
+  assert.equal(a.getAttribute("href"), "/user/alice");
+  assert.equal(a.getAttribute("data-user"), "alice");
+  assert.equal(a.textContent, "alice");
+});
+
+test("userLink escapes a username in href, data attribute and label", () => {
+  const payload = 'bob"><script>alert(1)</script>';
+  const dom = new JSDOM(`<div>${userLink(payload)}</div>`);
+  const doc = dom.window.document;
+  assert.equal(doc.querySelectorAll("script").length, 0);
+  const links = doc.querySelectorAll("a");
+  assert.equal(links.length, 1,
+    "the payload must stay inside the one <a> tag, not break out");
+  const a = links[0];
+  assert.equal(a.textContent, payload,
+    "the username must still be visible verbatim as the link label");
+  assert.equal(a.getAttribute("href"),
+    "/user/" + encodeURIComponent(payload),
+    "the href must carry the encoded username");
+});
+// Issue #2, rendered through the job detail title itself: the user is the
+// title's link and must carry the same /user/<name> deep link the table's
+// user column uses.
+test("jobDetailTitle renders the user as the /user/<name> link", () => {
+  const out = jobDetailTitle("123", { name: "train.sh", user: "alice",
+                                     state: "RUNNING" });
+  const dom = new JSDOM(`<div>${out}</div>`);
+  const doc = dom.window.document;
+  const a = doc.querySelector("a");
+  assert.equal(a.getAttribute("href"), "/user/alice");
+  assert.equal(doc.querySelector("div").textContent,
+    "Job 123 — train.sh (alice) · RUNNING");
+});
+
+test("jobDetailTitle keeps the pre-link \"?\" placeholders for missing fields", () => {
+  // The textContent title rendered "(?)" for a job whose metadata never
+  // resolved; the builder must reproduce that exactly (never the table's
+  // "—" dash, which means something different in this title) and keep the
+  // remaining fields' own fallbacks.
+  assert.equal(jobDetailTitle("123", {}), "Job 123 — ? (?) · ?");
+  // With only a user resolved, the user renders as the link while name
+  // and state keep their "?" fallbacks.
+  const dom = new JSDOM(`<div>${jobDetailTitle("123", { user: "alice" })}</div>`);
+  assert.equal(dom.window.document.querySelector("div").textContent,
+    "Job 123 — ? (alice) · ?");
+  assert.equal(dom.window.document.querySelector("a").getAttribute("href"),
+    "/user/alice");
+});
+
+test("jobDetailTitle escapes name and state, not the user label", () => {
+  const out = jobDetailTitle('9"onload="x', { name: "<img onerror=1>",
+                                              user: "alice",
+                                              state: "<b>RUN</b>" });
+  const dom = new JSDOM(`<div>${out}</div>`);
+  const doc = dom.window.document;
+  assert.equal(doc.querySelectorAll("img").length, 0);
+  assert.equal(doc.querySelectorAll("b").length, 0);
+  // The jobid is a numeric Slurm field, but even if it carried markup it
+  // interpolates as plain text.
+  assert.equal(doc.querySelector("div").textContent,
+    'Job 9"onload="x — <img onerror=1> (alice) · <b>RUN</b>');
 });
 
 test("pctBar and stateBadge never need a caller-side escapeHtml call", () => {
