@@ -192,3 +192,13 @@ export function partitionLink(partition, label = partition) {
   const href = "/partition/" + encodeURIComponent(partition);
   return html`<a class="entity-link partitionlink" href="${href}" data-partition="${partition}" title="open ${partition} in the Partitions tab">${label}</a>`;
 }
+// The job detail title ("Job <id> — <name> (<user>) · <state>"): the one
+// place the title's exact shape is defined. The user is the title's
+// single link (userLink's /user/<name> deep link); name and state stay
+// plain text, and every field falls back to the same "?" placeholder the
+// pre-link textContent title used, so metadata that never resolves reads
+// "(?)" exactly as it did before this builder existed.
+export function jobDetailTitle(jobid, m = {}) {
+  const user = m.user ? raw(userLink(m.user)) : "?";
+  return html`Job ${jobid} — ${m.name || "?"} (${user}) · ${m.state || "?"}`;
+}
