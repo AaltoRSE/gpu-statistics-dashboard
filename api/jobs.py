@@ -137,10 +137,10 @@ def api_job_detail(
         return util, vram
 
     if refresh:
-        # A forced request must not join a non-forced in-flight cache miss:
-        # it needs a new Prometheus query even if that earlier request is
-        # still completing with an older snapshot.
-        util, vram = fetch()
+        # Cache refresh is generation-aware, so an older in-flight detail
+        # request cannot overwrite this fresh Prometheus snapshot afterward.
+        util, vram = deps.route_cache.refresh(
+            cache.job_detail_key(jobid, since_hours), 60, fetch)
     else:
         util, vram = deps.route_cache.get_or_set(
             cache.job_detail_key(jobid, since_hours), 60, fetch)

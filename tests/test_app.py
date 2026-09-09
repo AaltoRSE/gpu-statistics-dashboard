@@ -505,7 +505,9 @@ def test_job_detail_refresh_bypasses_cache(client, fake_prom):
 
     client.get("/api/jobs/1", params={"since_hours": 24, "refresh": True})
 
-    assert len([call for call in fake_prom.calls if call[0] == "range"]) == range_calls + 2
+    range_calls_after_refresh = len(
+        [call for call in fake_prom.calls if call[0] == "range"])
+    assert range_calls_after_refresh == range_calls + 2
     assert fake_prom.clear_cache_calls == 1
 
 def test_job_detail_end_human_readable(client):

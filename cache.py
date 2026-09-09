@@ -39,6 +39,8 @@ class TtlCache:
     def __init__(self, max_size=256):
         self._store = {}
         self._inflight = {}
+        self._generations = {}
+        self._epoch = 0
         self._lock = threading.Lock()
         self._max_size = max_size
 
@@ -53,6 +55,7 @@ class TtlCache:
             else:
                 future = Future()
                 self._inflight[key] = future
+                generation = (self._epoch, self._generations.get(key, 0))
                 is_leader = True
         if not is_leader:
             return future.result()
@@ -67,22 +70,40 @@ class TtlCache:
             future.set_exception(exc)
             raise
         with self._lock:
-            if len(self._store) > self._max_size:
-                self._store.clear()
-            self._store[key] = (time.monotonic() + ttl, value)
+            self._cache_if_current(key, ttl, value, generation)
             self._inflight.pop(key, None)
         future.set_result(value)
         return value
 
+    def refresh(self, key, ttl, fn):
+        """Fetch a fresh value without letting an older flight repopulate it."""
+        with self._lock:
+            self._generations[key] = self._generations.get(key, 0) + 1
+            generation = (self._epoch, self._generations[key])
+            self._store.pop(key, None)
+        value = fn()
+        with self._lock:
+            self._cache_if_current(key, ttl, value, generation)
+        return value
+
+    def _cache_if_current(self, key, ttl, value, generation):
+        if generation != (self._epoch, self._generations.get(key, 0)):
+            return
+        if len(self._store) > self._max_size:
+            self._store.clear()
+        self._store[key] = (time.monotonic() + ttl, value)
+
     def invalidate(self, *keys):
-        """Drop specific entries; used by the forced-refresh path."""
+        """Drop specific entries and prevent older flights from restoring them."""
         with self._lock:
             for key in keys:
                 self._store.pop(key, None)
+                self._generations[key] = self._generations.get(key, 0) + 1
 
     def clear(self):
         with self._lock:
             self._store.clear()
+            self._epoch += 1
 
 
 # ---- key builders --------------------------------------------------
