@@ -290,7 +290,7 @@ let jobDetailWasCollapsed = false; // explorer visibility before the detail open
 let jobDetailToken = 0;
 export let jobDetailData = null; // raw API payload; traces rebuild per theme
 
-export async function loadJobDetail(jobid, from) {
+export async function loadJobDetail(jobid, from, force = false) {
   jobDetailFrom = from || null;
   jobDetailOpenedFromTable = !!(from && from.kind === "jobs");
   const token = ++jobDetailToken;
@@ -310,7 +310,9 @@ export async function loadJobDetail(jobid, from) {
   // came from the table itself (where it is already the context).
   if (!jobDetailOpenedFromTable) setJobExplorerCollapsed(true);
   try {
-    const data = await api("/api/jobs/" + jobid + "?since_hours=" + $("jWindow").value);
+    const params = new URLSearchParams({ since_hours: $("jWindow").value });
+    if (force) params.set("refresh", "true");
+    const data = await api("/api/jobs/" + jobid + "?" + params);
     if (token !== jobDetailToken) return;
     panelOk("jobDetailResults");
     setUrl("/job/" + jobid);
@@ -502,7 +504,12 @@ $("jLimit").addEventListener("input", updateLimitBadge);
 // so typing doesn't fire a request per keystroke; partition filtering is
 // local because it only changes the table.
 $("jSearch").addEventListener("input", debounce(loadJobs, 250));
-$("jRefresh").addEventListener("click", () => { loadJobs(true); });
+$("jRefresh").addEventListener("click", () => {
+  loadJobs(true);
+  if (jobDetailData && $("jobDetailResults").style.display !== "none") {
+    loadJobDetail(jobDetailData.jobid, jobDetailFrom, true);
+  }
+});
 $("jPartition").addEventListener("change", renderJobsView);
 $("jobDetailClose").addEventListener("click", closeJobDetail);
 $("jobDetailBack").addEventListener("click", (e) => {

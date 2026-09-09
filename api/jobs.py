@@ -110,7 +110,14 @@ def api_jobs(
 
 
 @router.get("/api/jobs/{jobid}", response_model=JobDetailResponse)
-def api_job_detail(jobid: str, since_hours: float = Query(24, gt=0, le=168)):
+def api_job_detail(
+    jobid: str,
+    since_hours: float = Query(24, gt=0, le=168),
+    refresh: bool = Query(False),
+):
+    if refresh:
+        deps.get_prom().clear_cache()
+        deps.route_cache.invalidate(cache.job_detail_key(jobid, since_hours))
     start, now = job_window(since_hours)
     step = step_for_range(now - start)
     prom = deps.get_prom()
