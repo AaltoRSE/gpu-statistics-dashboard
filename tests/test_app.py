@@ -498,6 +498,16 @@ def test_job_detail_summary_fields_null_without_metadata(
     assert data["elapsed_s"] is None
 
 
+
+def test_job_detail_refresh_bypasses_cache(client, fake_prom):
+    client.get("/api/jobs/1", params={"since_hours": 24})
+    range_calls = len([call for call in fake_prom.calls if call[0] == "range"])
+
+    client.get("/api/jobs/1", params={"since_hours": 24, "refresh": True})
+
+    assert len([call for call in fake_prom.calls if call[0] == "range"]) == range_calls + 2
+    assert fake_prom.clear_cache_calls == 1
+
 def test_job_detail_end_human_readable(client):
     meta = client.get("/api/jobs/2", params={"since_hours": 24}).json()["metadata"]
     assert meta["end"] == JOB2_END

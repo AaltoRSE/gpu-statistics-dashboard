@@ -117,7 +117,6 @@ def api_job_detail(
 ):
     if refresh:
         deps.get_prom().clear_cache()
-        deps.route_cache.invalidate(cache.job_detail_key(jobid, since_hours))
     start, now = job_window(since_hours)
     step = step_for_range(now - start)
     prom = deps.get_prom()
@@ -137,8 +136,14 @@ def api_job_detail(
         )
         return util, vram
 
-    util, vram = deps.route_cache.get_or_set(
-        cache.job_detail_key(jobid, since_hours), 60, fetch)
+    if refresh:
+        # A forced request must not join a non-forced in-flight cache miss:
+        # it needs a new Prometheus query even if that earlier request is
+        # still completing with an older snapshot.
+        util, vram = fetch()
+    else:
+        util, vram = deps.route_cache.get_or_set(
+            cache.job_detail_key(jobid, since_hours), 60, fetch)
     series = {
         "utilization": series_payload(util),
         "vram": series_payload(vram),
