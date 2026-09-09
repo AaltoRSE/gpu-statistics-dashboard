@@ -25,11 +25,9 @@
 }
 .controls button { background: var(--panel2); color: var(--text); border:1px solid var(--line);
   border-radius:6px; padding:6px 12px; font-size:12px; cursor:pointer; }
-.controls .control-meta { align-self:flex-end; margin-left:0;
-  display:flex; align-items:center; gap:12px; padding-bottom:9px; }
-.controls .control-meta .meta-count { font-size:13px; color:var(--text); font-weight:600; }
 .controls .controls-actions { margin-left:auto; align-self:flex-end;
   display:flex; align-items:center; gap:10px; padding-bottom:6px; }
+.controls .controls-actions .meta-count { font-size:13px; color:var(--text); font-weight:600; }
 .controls.bare { background:none; border:none; padding:0 0 6px; margin-bottom:8px; }
 
 .user-selected { display:none; align-items:center; gap:12px; margin:0 0 12px;
