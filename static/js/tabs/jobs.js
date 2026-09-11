@@ -409,8 +409,9 @@ function clearJobTableHighlight() {
 export function renderJobDetail(data) {
   const m = data.metadata || {};
   const jobid = data.jobid;
-  $("jobDetailTitle").textContent =
-    "Job " + jobid + " — " + (m.name || "?") + " (" + (m.user || "?") + ") · " + (m.state || "?");
+  // The user name is a link to the Users tab (issue #2): a plain string in
+  // the title was the only place the owner wasn't clickable.
+  $("jobDetailTitle").innerHTML = html`Job ${jobid} — ${m.name || "?"} (${raw(userLink(m.user))}) · ${m.state || "?"}`;
   const metaBits = [];
   if (m.partition) metaBits.push("partition " + m.partition);
   if (m.node_list) metaBits.push("nodes " + m.node_list);
@@ -505,6 +506,17 @@ $("jSearch").addEventListener("input", debounce(loadJobs, 250));
 $("jRefresh").addEventListener("click", () => { loadJobs(true); });
 $("jPartition").addEventListener("change", renderJobsView);
 $("jobDetailClose").addEventListener("click", closeJobDetail);
+// The job detail title's user link follows the entity-link convention of
+// every table row: intercept a plain click and take the in-page SPA
+// route; modifier-click still navigates to the real /user/<name> URL.
+$("jobDetailTitle").addEventListener("click", (e) => {
+  const link = e.target.closest("a.userlink");
+  if (!link) return;
+  e.stopPropagation();
+  if (!isPlainClick(e)) return;
+  e.preventDefault();
+  openUser(link.dataset.user);
+});
 $("jobDetailBack").addEventListener("click", (e) => {
   e.preventDefault();
   const btn = e.currentTarget;
