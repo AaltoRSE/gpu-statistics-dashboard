@@ -12,7 +12,7 @@
 import { $, debounce, isPlainClick } from "../core/dom.js";
 import {
   fmt, fmtInt, pctBar, escapeHtml, html, raw, tsToDate, fmtSacctTime, fmtDuration,
-  stateBadge, userLink, nodeLinks, partitionLink,
+  stateBadge, userLink, jobDetailTitle, nodeLinks, partitionLink,
 } from "../core/format.js";
 import { setResultsLoading, showPanelError, panelOk } from "../core/panel.js";
 import { renderPlot, plotTheme, partBarColor } from "../core/plot.js";
@@ -409,8 +409,12 @@ function clearJobTableHighlight() {
 export function renderJobDetail(data) {
   const m = data.metadata || {};
   const jobid = data.jobid;
-  $("jobDetailTitle").textContent =
-    "Job " + jobid + " — " + (m.name || "?") + " (" + (m.user || "?") + ") · " + (m.state || "?");
+  // The user is the title's one linkable entity (issue #2): jobDetailTitle
+  // wraps it in the same /user/<name> deep link as the table's user
+  // column. The builder's output is already-safe markup — every
+  // Slurm-supplied field is either a plain-text interpolation or an
+  // escaped builder inside it — so innerHTML is safe by that contract.
+  $("jobDetailTitle").innerHTML = jobDetailTitle(jobid, m);
   const metaBits = [];
   if (m.partition) metaBits.push("partition " + m.partition);
   if (m.node_list) metaBits.push("nodes " + m.node_list);
@@ -501,6 +505,17 @@ $("jLimit").addEventListener("input", updateLimitBadge);
 // Search refreshes the server-calculated highest-efficiency chart. Debounced
 // so typing doesn't fire a request per keystroke; partition filtering is
 // local because it only changes the table.
+// The job detail title's user link follows the entity-link convention of
+// every table row: intercept a plain click and take the in-page SPA
+// route; a modifier-click still navigates to the real /user/<name> URL.
+$("jobDetailTitle").addEventListener("click", (e) => {
+  const link = e.target.closest("a.userlink");
+  if (!link) return;
+  e.stopPropagation();
+  if (!isPlainClick(e)) return;
+  e.preventDefault();
+  openUser(link.dataset.user);
+});
 $("jSearch").addEventListener("input", debounce(loadJobs, 250));
 $("jRefresh").addEventListener("click", () => { loadJobs(true); });
 $("jPartition").addEventListener("change", renderJobsView);
