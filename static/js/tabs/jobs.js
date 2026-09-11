@@ -411,7 +411,7 @@ export function renderJobDetail(data) {
   const jobid = data.jobid;
   // The user name is a link to the Users tab (issue #2): a plain string in
   // the title was the only place the owner wasn't clickable.
-  $("jobDetailTitle").innerHTML = html`Job ${jobid} — ${m.name || "?"} (${raw(userLink(m.user))}) · ${m.state || "?"}`;
+  $("jobDetailTitle").innerHTML = html`Job ${jobid} — ${m.name || "?"} (${m.user ? raw(userLink(m.user)) : "?"}) · ${m.state || "?"}`;
   const metaBits = [];
   if (m.partition) metaBits.push("partition " + m.partition);
   if (m.node_list) metaBits.push("nodes " + m.node_list);
