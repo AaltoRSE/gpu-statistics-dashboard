@@ -8,7 +8,7 @@
 "use strict";
 
 import { $ } from "../core/dom.js";
-import { escapeHtml, fmtInt, pctBar, html, raw, compareStrings, tsToDate, partitionLink } from "../core/format.js";
+import { escapeHtml, fmtInt, pctBar, html, raw, compareStrings, tsToDate, partitionLink, fmtDuration } from "../core/format.js";
 import { setResultsLoading, showPanelError, panelOk } from "../core/panel.js";
 import { renderPlot, plotTheme, partBarColor } from "../core/plot.js";
 import { api } from "../core/api.js";
@@ -16,6 +16,7 @@ import { loaded, setUrl, openPartition } from "../core/router.js";
 import { createTable } from "../core/table.js";
 
 let partRows = [];
+let queueRows = []; // current pending-GPU snapshot; rendered client-side on partition change
 export let partTrendData = {};
 let partTrendStep = 300; // seconds; set from the API response, used to size the smoothing window
 export let selectedPartition = ""; // deep-linked or chosen partition; "" = all
@@ -28,7 +29,10 @@ export function setSelectedPartition(name) {
 export function applyPartitionSelection(name) {
   selectedPartition = name || "";
   const sel = $("pPartition");
-  const names = [...new Set(partRows.map((p) => p.name).filter(Boolean))].sort();
+  const names = [...new Set(
+    partRows.map((p) => p.name)
+      .concat(queueRows.map((q) => q.gpu_group))
+      .filter(Boolean))].sort(compareStrings);
   const options = ['<option value="">all partitions</option>'];
   const listed = names.includes(selectedPartition);
   names.forEach((n) =>
@@ -48,6 +52,7 @@ export function applyPartitionSelection(name) {
   // partition was scoped.
   renderPartBar();
   renderPartOccupancy();
+  renderQueue(); // the queue is client-side filtered: no refetch on change
   setUrl(sel.value ? "/partition/" + encodeURIComponent(sel.value) : "/partitions");
 }
 
@@ -69,6 +74,7 @@ export async function loadPartitions() {
   if (token !== partitionsToken) return; // a newer request supersedes this one
   panelOk("partitionsResults");
   partRows = data.partitions;
+  queueRows = data.queue || [];
   const w = data.window;
   $("pCount").textContent = data.partitions.length + " partitions · " +
     ($("pRunning").checked
@@ -218,11 +224,14 @@ function renderPartTrend(trend) {
 }
 
 function partRowHtml(p) {
+  const sample = p.wait_sample_count || 0;
+  const candidate = p.wait_candidate_count || 0;
   return html`
     <tr class="row" data-partition="${p.name}">
       <td>${raw(partitionLink(p.name))}</td>
       <td class="num" title="allocated / total GPUs">${p.gpus_alloc}/${p.gpus_total}</td>
-      <td class="num">${fmtInt(p.job_count)}</td>
+      <td class="num" title="unique GPU jobs Prometheus observed in this window">${fmtInt(p.job_count)}</td>
+      <td class="num" title="Based on ${sample} of ${candidate} jobs observed in this window">${p.average_wait_seconds === null || p.average_wait_seconds === undefined ? "—" : fmtDuration(p.average_wait_seconds)}</td>
       <td class="num">${raw(pctBar(p.mean_util))}</td>
     </tr>`;
 }
@@ -239,7 +248,9 @@ const partTable = createTable({
   el: $("partTable"),
   columns: [
     { key: "name", type: "text" }, { key: "gpus_total", type: "number" },
-    { key: "job_count", type: "number" }, { key: "mean_util", type: "number" },
+    { key: "job_count", type: "number" },
+    { key: "average_wait_seconds", type: "number" },
+    { key: "mean_util", type: "number" },
   ],
   defaultSort: { key: "mean_util", dir: "desc" },
   renderRow: partRowHtml,
@@ -249,6 +260,78 @@ const partTable = createTable({
 
 function renderPartTable() {
   partTable.setRows(partRows);
+}
+
+/* ---------------- Current waiting queue ----------------
+ * A live scontrol snapshot (not window-scoped): the same fetch feeds it,
+ * and partition changes only refilter it client-side — never a refetch.
+ * Rows are informational: a pending job need not have any Prometheus
+ * detail data, so rows do not navigate to a job detail. */
+
+function queueRowHtml(q) {
+  return html`
+    <tr>
+      <td class="name-cell" title="${q.jobid}">${q.jobid}</td>
+      <td class="name-cell" title="${q.name}">${q.name}</td>
+      <td title="${q.user}">${q.user}</td>
+      <td title="${q.partition}">${q.partition}</td>
+      <td class="num" title="GPUs the job requests${q.requested_gpu_type ? " (" + q.requested_gpu_type + ")" : ""}">${fmtInt(q.requested_gpus)}</td>
+      <td class="num">${q.wait_seconds === null || q.wait_seconds === undefined ? "—" : fmtDuration(q.wait_seconds)}</td>
+      <td class="name-cell" title="${q.reason}">${q.reason}</td>
+    </tr>`;
+}
+
+const queueTable = createTable({
+  el: $("queueTable"),
+  columns: [
+    { key: "jobid", type: "text" }, { key: "name", type: "text" },
+    { key: "user", type: "text" }, { key: "partition", type: "text" },
+    { key: "requested_gpus", type: "number" },
+    { key: "wait_seconds", type: "number" },
+    { key: "reason", type: "text" },
+  ],
+  // Longest known wait first; null waits (Slurm has no SubmitTime yet)
+  // sort last regardless of direction — core/table.js's null rule.
+  defaultSort: { key: "wait_seconds", dir: "desc" },
+  renderRow: queueRowHtml,
+  emptyMessage() {
+    return {
+      text: selectedPartition
+        ? "No jobs currently queued for this partition."
+        : "No jobs currently queued.",
+      resetLabel: null,
+    };
+  },
+});
+
+function renderQueue() {
+  const rows = selectedPartition
+    ? queueRows.filter((q) => q.gpu_group === selectedPartition)
+    : queueRows;
+  queueTable.setRows(rows);
+  $("pQueueCount").textContent = rows.length
+    ? rows.length + (rows.length === 1 ? " job waiting" : " jobs waiting")
+    : "";
+  // Summary of the SAME filtered rows the table shows: record count,
+  // requested-GPU sum, mean and max of the known (non-null) waits.
+  // Unknown aggregate waits render as "—", never as zero.
+  const known = rows.filter((q) => q.wait_seconds !== null && q.wait_seconds !== undefined);
+  const gpus = rows.reduce((s, q) => s + (q.requested_gpus || 0), 0);
+  const mean = known.length
+    ? Math.round(known.reduce((s, q) => s + q.wait_seconds, 0) / known.length)
+    : null;
+  const max = known.length
+    ? Math.max(...known.map((q) => q.wait_seconds))
+    : null;
+  const stats = [
+    { label: "queued jobs", value: String(rows.length) },
+    { label: "requested GPUs", value: fmtInt(gpus) },
+    { label: "mean wait", value: mean === null ? "—" : fmtDuration(mean) },
+    { label: "max wait", value: max === null ? "—" : fmtDuration(max) },
+  ];
+  $("pQueueStats").innerHTML = stats.map((s) =>
+    html`<div class="stat"><div class="stat-label">${s.label}</div><div class="stat-value">${s.value}</div></div>`
+  ).join("");
 }
 
 function partControlsChanged() { loadPartitions(); }
@@ -445,6 +528,7 @@ export function clearPartitionSelection() {
   renderPartTrend(partTrendData);
   renderPartBar();
   renderPartOccupancy();
+  renderQueue();
   if (loaded.partitions) loadVram();
 }
 

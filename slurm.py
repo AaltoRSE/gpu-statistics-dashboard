@@ -20,6 +20,7 @@ SACCT_FIELDS = [
     "State",
     "Start",
     "End",
+    "Submit",
     "Elapsed",
     "AllocTRES",
     "NodeList",
@@ -31,6 +32,7 @@ _PART_BLOCK = re.compile(r"^PartitionName=(\S+)")
 _KV = re.compile(r"^(\w+)=([^\s]*)")
 _GPU_RES = re.compile(r"gpu:([\w.-]+):(\d+)|(?:^|,)gpu:(\d+)(?:,|$)")
 _TRES_GPU = re.compile(r"gres/gpu(?::([\w.-]+))?=(\d+)")
+_TRES_REQ_GPU = re.compile(r"gres/gpu(?::([\w.-]+))?[=:](\d+)")
 
 
 class SlurmError(Exception):
@@ -83,6 +85,27 @@ def parse_alloc_tres(text):
     for m in _TRES_GPU.finditer(text or ""):
         gpus = max(gpus, int(m.group(2)))
         if m.group(1):
+            gpu_type = m.group(1)
+    return gpus, gpu_type
+
+
+def parse_gpu_request(text):
+    """A job's requested GPU count and type from a TRES string.
+
+    Accepts both Slurm request encodings — ``gres/gpu[:type]=count``
+    (ReqTRES/AllocTRES) and ``gres/gpu[:type]:count`` (TRESPerNode) —
+    and returns the *maximum* count across matches: a TRES string
+    carrying both the bare ``gres/gpu`` total and a per-type
+    ``gres/gpu:<type>`` entry must yield the total, not whichever
+    happens to match first. Type is the most specific (non-empty) type
+    seen; ``Unknown`` is not a type. ``(0, "")`` when absent/malformed.
+    """
+    gpus, gpu_type = 0, ""
+    for m in _TRES_REQ_GPU.finditer(text or ""):
+        count = _int(m.group(2), 0)
+        if count > gpus:
+            gpus = count
+        if m.group(1) and m.group(1) != "Unknown":
             gpu_type = m.group(1)
     return gpus, gpu_type
 
@@ -297,7 +320,17 @@ def parse_scontrol_jobs(output):
         user = f.get("UserId", "")
         user = re.sub(r"\(\d+\)$", "", user)
         gpus, gpu_type = parse_alloc_tres(f.get("AllocTRES"))
+        requested_gpus, requested_gpu_type = 0, ""
+        # The fallback runs until a source actually carries a GPU entry:
+        # a GPU-less ReqTRES (cpu-only pending request) must not shadow a
+        # TRESPerNode/AllocTRES that does carry one.
+        for source in (f.get("ReqTRES"), f.get("TRESPerNode"),
+                       f.get("AllocTRES")):
+            requested_gpus, requested_gpu_type = parse_gpu_request(source)
+            if requested_gpus:
+                break
         start = f.get("StartTime", "")
+        submit = f.get("SubmitTime", "") or ""
         jobs[jobid] = {
             "jobid": jobid,
             "array_jobid": f.get("ArrayJobId", "") or "",
@@ -308,10 +341,16 @@ def parse_scontrol_jobs(output):
             "partition": f.get("Partition", "") or "",
             "state": state,
             "start": start if start != "Unknown" else "",
+            "submit": "" if submit == "Unknown" else submit,
+            "reason": f.get("Reason", "") or "",
+            "qos": f.get("QOS", "") or "",
+            "priority": _int(f.get("Priority")),
             "end": end,
             "elapsed_s": parse_elapsed(f.get("RunTime", "")),
             "gpus": gpus,
             "gpu_type": gpu_type,
+            "requested_gpus": requested_gpus,
+            "requested_gpu_type": requested_gpu_type,
             "node_list": f.get("NodeList", "") or "",
             "ncpus": _int(f.get("NumCPUs")),
         }
@@ -409,6 +448,7 @@ def sacct_jobs(job_ids, start_iso=None, workers=8):
             "partition": row.get("Partition") or "",
             "state": row.get("State") or "",
             "start": row.get("Start") or "",
+            "submit": row.get("Submit") or "",
             "end": row.get("End") if row.get("End") != "Unknown" else "",
             "elapsed_s": parse_elapsed(row.get("Elapsed")),
             "gpus": gpus,

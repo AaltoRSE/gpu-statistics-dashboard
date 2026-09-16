@@ -1,7 +1,18 @@
+import os
+import time
+
 import pytest
 
 import slurm
 
+# The suite fixtures naive sacct timestamps ("2026-08-28T00:00:00") whose
+# epoch values depend on the local zone (_sacct_epoch resolves them with
+# datetime.fromisoformat().timestamp(), and sacct itself prints cluster-
+# local time in production). Golden files bake the UTC interpretation to
+# match CI; pinning the whole suite to UTC keeps them host-independent
+# instead of requiring TZ=UTC on every dev machine.
+os.environ["TZ"] = "UTC"
+time.tzset()
 
 def pytest_addoption(parser):
     parser.addoption(

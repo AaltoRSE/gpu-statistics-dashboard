@@ -13,6 +13,7 @@ from slurm import (  # noqa: E402
     expand_node_list,
     parse_alloc_tres,
     parse_elapsed,
+    parse_gpu_request,
     parse_gres,
     parse_scontrol_jobs,
     parse_scontrol_nodes,
@@ -226,14 +227,40 @@ PartitionName=interactive
 def test_parse_sacct_row():
     row = _parse_sacct_row(
         "19807768|19807768|train.sh|gomeze1|aalto_users|gpu-v100-32g|RUNNING"
-        "|2026-08-25T14:32:59|Unknown|3-03:59:44"
+        "|2026-08-25T14:32:59|Unknown|2026-08-25T14:30:02|3-03:59:44"
         "|billing=64,cpu=8,gres/gpu:v100=2|gpu3|8".split("|")
     )
     assert row["JobID"] == "19807768"
     assert row["JobIDRaw"] == "19807768"
     assert row["User"] == "gomeze1"
+    assert row["Submit"] == "2026-08-25T14:30:02"
     assert row["AllocTRES"] == "billing=64,cpu=8,gres/gpu:v100=2"
-    assert len(SACCT_FIELDS) == 13
+    assert len(SACCT_FIELDS) == 14
+
+
+def test_parse_gpu_request_encodings():
+    # ReqTRES/AllocTRES use "="; TRESPerNode uses ":". Both must parse,
+    # with and without a GPU type.
+    assert parse_gpu_request("billing=16,cpu=16,gres/gpu:h100=4") == (4, "h100")
+    assert parse_gpu_request("gres/gpu=2") == (2, "")
+    assert parse_gpu_request("cpu=4,gres/gpu:v100:1") == (1, "v100")
+    assert parse_gpu_request("gres/gpu:4") == (4, "")
+    assert parse_gpu_request("gres/gpu:a100_80gb=8") == (8, "a100_80gb")
+
+
+def test_parse_gpu_request_absent_or_malformed():
+    assert parse_gpu_request("") == (0, "")
+    assert parse_gpu_request("cpu=8,mem=10G") == (0, "")
+    assert parse_gpu_request("gres/gpu:h100=abc") == (0, "")
+    assert parse_gpu_request("gres/gpu:h100=") == (0, "")
+    assert parse_gpu_request(None) == (0, "")
+
+
+def test_parse_gpu_request_bare_total_wins_over_per_type():
+    # A TRES string can carry both the bare total and a per-type entry
+    # (real AllocTRES above); the total must win, whichever comes first.
+    assert parse_gpu_request("gres/gpu:h100=2,gres/gpu=4") == (4, "h100")
+    assert parse_gpu_request("gres/gpu=4,gres/gpu:h100=2") == (4, "h100")
 
 
 def test_read_jobgraph_conf_bare(tmp_path):
@@ -293,10 +320,10 @@ def test_sacct_batch_indexes_array_task_by_raw_id_too(monkeypatch):
         return "\n".join([
             "20001465_47|20008872|job_loop.sh|olkkonj1|aalto_users|"
             "gpu-v100-32g|COMPLETED|2026-08-31T11:43:55|2026-09-01T02:50:54|"
-            "15:06:59|gres/gpu:v100=1|gpu5|2",
+            "2026-08-31T11:40:00|15:06:59|gres/gpu:v100=1|gpu5|2",
             # Step rows carry the same JobIDRaw split with a dot suffix —
             # must still be filtered out, not indexed under a bogus key.
-            "20001465_47.batch|20008872.batch|batch|||||||||1",
+            "20001465_47.batch|20008872.batch|batch||||||||||1",
         ])
 
     monkeypatch.setattr(slurm, "_run", fake_run)
@@ -311,7 +338,8 @@ def test_sacct_batch_non_array_job_id_equals_raw_no_duplicate_key(monkeypatch):
 
     def fake_run(cmd, timeout=30):
         return ("20015894|20015894|train.sh|alice|acc|gpu-h100|RUNNING|"
-                "2026-08-30T10:00:00|Unknown|01:00:00|gres/gpu:h100=1|gpu1|8")
+                "2026-08-30T10:00:00|Unknown|2026-08-30T09:55:00|01:00:00|"
+                "gres/gpu:h100=1|gpu1|8")
 
     monkeypatch.setattr(slurm, "_run", fake_run)
     jobs = slurm._sacct_batch(["20015894"])
@@ -331,20 +359,22 @@ def test_sacct_jobs_default_no_date(monkeypatch):
     slurm.sacct_jobs(["7"])
     assert seen["start_iso"] is None
 
-
 SCTRL_JOB_SAMPLE = (
     "JobId=100 JobName=train UserId=alice(1001) GroupId=alice(1001) Account=acc "
-    "QOS=normal JobState=RUNNING NodeList=gpu1-2 NumNodes=2 NumCPUs=16 "
-    "RunTime=01:02:03 StartTime=2026-08-30T10:00:00 EndTime=2026-08-31T10:00:00 "
-    "Partition=gpu-h100 AllocTRES=cpu=16,gres/gpu:h100=4\n"
+    "QOS=normal Priority=4294901760 JobState=RUNNING NodeList=gpu1-2 NumNodes=2 "
+    "NumCPUs=16 RunTime=01:02:03 StartTime=2026-08-30T10:00:00 "
+    "EndTime=2026-08-31T10:00:00 SubmitTime=2026-08-30T09:00:00 "
+    "Partition=gpu-h100 ReqTRES=billing=16,cpu=16,gres/gpu:h100=4 "
+    "AllocTRES=cpu=16,gres/gpu:h100=4\n"
     "JobId=201 JobName=arr UserId=bob(1002) GroupId=bob(1002) Account=acc "
-    "QOS=normal JobState=PENDING NodeList= NumNodes=1 NumCPUs=4 "
-    "RunTime=00:00:00 StartTime=Unknown EndTime=Unknown Partition=batch "
-    "AllocTRES=cpu=4\n"
+    "QOS=normal Priority=1000 JobState=PENDING NodeList= NumNodes=1 NumCPUs=4 "
+    "Reason=Resources RunTime=00:00:00 StartTime=Unknown EndTime=Unknown "
+    "SubmitTime=2026-08-30T11:00:00 Partition=batch "
+    "TRESPerNode=cpu=4,gres/gpu:v100:2 AllocTRES=cpu=4\n"
     "JobId=202 ArrayJobId=201 ArrayTaskId=0-224 JobName=arr UserId=bob(1002) "
     "GroupId=bob(1002) Account=acc QOS=normal JobState=PENDING NodeList= "
-    "NumNodes=1 NumCPUs=4 RunTime=00:00:00 StartTime=Unknown EndTime=Unknown "
-    "Partition=batch AllocTRES=cpu=4\n"
+    "NumNodes=1 NumCPUs=4 Reason=Priority RunTime=00:00:00 StartTime=Unknown "
+    "EndTime=Unknown SubmitTime=Unknown Partition=batch AllocTRES=cpu=4\n"
 )
 
 
@@ -360,11 +390,55 @@ def test_parse_scontrol_jobs_normal_job():
     assert j["partition"] == "gpu-h100"
     assert j["state"] == "RUNNING"
     assert j["start"] == "2026-08-30T10:00:00"
+    assert j["submit"] == "2026-08-30T09:00:00"
+    assert j["reason"] == ""  # no Reason= field on the running job
+    assert j["qos"] == "normal"
+    assert j["priority"] == 4294901760
     assert j["end"] == ""  # projected end hidden for RUNNING
     assert j["elapsed_s"] == 3723
-    assert j["gpus"] == 4 and j["gpu_type"] == "h100"
+    assert j["gpus"] == 4 and j["gpu_type"] == "h100"  # allocated, unchanged
+    assert j["requested_gpus"] == 4 and j["requested_gpu_type"] == "h100"
     assert j["node_list"] == "gpu1-2"
     assert j["ncpus"] == 16
+
+
+def test_parse_scontrol_jobs_pending_fields_and_tres_per_node():
+    # A PENDING job with TRESPerNode (the ":" encoding) must expose the
+    # request, the wait reason, QOS, and priority — and normalize the
+    # missing/Unknown timestamps to "" without dropping the row.
+    jobs = parse_scontrol_jobs(SCTRL_JOB_SAMPLE)
+    p = jobs["201"]
+    assert p["state"] == "PENDING"
+    assert p["submit"] == "2026-08-30T11:00:00"
+    assert p["reason"] == "Resources"
+    assert p["qos"] == "normal"
+    assert p["priority"] == 1000
+    assert p["requested_gpus"] == 2 and p["requested_gpu_type"] == "v100"
+    assert p["gpus"] == 0  # nothing allocated yet; allocated values separate
+    t = jobs["202"]
+    assert t["submit"] == ""  # SubmitTime=Unknown normalized to ""
+    assert t["reason"] == "Priority"
+    assert t["requested_gpus"] == 0  # no request fields -> (0, "")
+    assert t["requested_gpu_type"] == ""
+
+
+def test_parse_scontrol_jobs_request_fallback_skips_gpuless_sources():
+    # A GPU-less ReqTRES (cpu-only pending request) must not shadow a
+    # TRESPerNode that does carry a GPU entry: the fallback continues
+    # until a source actually contains a GPU.
+    sample = (
+        "JobId=400 JobName=x UserId=u(1) Account=a JobState=PENDING "
+        "ReqTRES=cpu=4 TRESPerNode=cpu=4,gres/gpu:v100:2 AllocTRES=\n"
+    )
+    j = parse_scontrol_jobs(sample)["400"]
+    assert j["requested_gpus"] == 2 and j["requested_gpu_type"] == "v100"
+    # ...and a request with no GPU anywhere still parses to zero
+    sample2 = (
+        "JobId=401 JobName=x UserId=u(1) Account=a JobState=PENDING "
+        "ReqTRES=cpu=4 AllocTRES=\n"
+    )
+    j2 = parse_scontrol_jobs(sample2)["401"]
+    assert j2["requested_gpus"] == 0 and j2["requested_gpu_type"] == ""
 
 
 def test_parse_scontrol_jobs_array_tasks_share_parent():

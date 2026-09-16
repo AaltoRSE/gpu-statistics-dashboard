@@ -32,6 +32,14 @@ route_cache = TtlCache()
 # can disclose the truncation.
 VRAM_RECORD_CAP = 2000
 
+# The Partitions tab's historical submit-to-start average enriches at most
+# this many unique jobs (the most recently observed across the window)
+# through explicit ``sacct -j`` batches; the response reports both the full
+# candidate count and how many rows actually resolved with valid
+# timestamps, so truncation stays visible instead of silently skewing the
+# average.
+PARTITION_WAIT_SAMPLE_CAP = 2000
+
 _prom = None
 
 

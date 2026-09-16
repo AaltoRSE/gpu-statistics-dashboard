@@ -246,6 +246,17 @@ header .auto-refresh select { background:var(--panel2); color:var(--text); borde
 .legend .legend-key:first-child { margin-left:0; }
 .empty-state { text-align:center; color:var(--dim); padding:22px 10px; font-size:13px; }
 .empty-state button { margin-left:8px; }
+
+/* Partitions tab's waiting-queue table: seven columns of long free-text
+   (job id, name, user, partition, reason). The .name-cell ellipsis above
+   bounds each cell, but at narrow widths the table still overflows its
+   card — give the scroll container the same horizontal-scroll fallback
+   the compact tables use, and let the name/reason cells wrap instead of
+   forcing width. */
+@media (max-width: 820px) {
+  #queueTable { min-width: 560px; }
+  #queueTable td.name-cell { white-space: normal; overflow-wrap: anywhere; }
+}
 .panel-error { margin-top:8px; font-size:12px; color:var(--bad);
   display:flex; align-items:center; gap:10px; }
 .no-data { color:var(--dim); font-size:12px; padding:14px 0; text-align:center; }

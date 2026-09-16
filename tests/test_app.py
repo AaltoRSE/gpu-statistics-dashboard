@@ -19,6 +19,7 @@ import deps  # noqa: E402
 import domain.jobs as domain_jobs  # noqa: E402
 import domain.metadata as domain_metadata  # noqa: E402
 import domain.partitions as domain_partitions  # noqa: E402
+import gpu_groups  # noqa: E402
 from api import users as api_users  # noqa: E402
 
 # Deterministic "now" (2026-08-30T18:26:40Z): job 1's sacct start
@@ -1103,3 +1104,298 @@ def test_gpu_capacity_mixed_whole_and_mig_node():
     assert by_name["h200"]["gpus_alloc"] == 5
     assert by_name["h200_3g.71gb"]["gpus_total"] == 8  # gpu49's MIG slices only
     assert by_name["h200_3g.71gb"]["gpus_alloc"] == 3
+
+
+# ---- partition wait statistics ------------------------------------------
+
+def test_partitions_wait_stats_valid_and_invalid(client, fake_prom, monkeypatch):
+    # Frozen clock NOW = 1788100000 (local 2026-08-30 17:26:40). The fake
+    # window's series carry jobs 1-4. Give each a sacct submit/start: job 1
+    # waited 1 h (submit 09:26:40 -> start 10:26:40 local), job 2 waited
+    # 30 m, job 3 has no timestamps (candidate but no sample), job 4 has a
+    # start BEFORE submit (negative delta must clamp to 0).
+    SACCT_WAIT = {
+        "1": dict(SACCT["1"], submit="2026-08-30T09:26:40",
+                  start="2026-08-30T10:26:40"),
+        "2": dict(SACCT["2"], submit="2026-08-29T20:56:40",
+                  start="2026-08-29T21:26:40"),
+        "3": dict(SACCT["3"], submit="", start=""),
+        "4": dict(SACCT["4"], submit="2026-08-29T21:26:40",
+                  start="2026-08-29T21:00:00"),
+    }
+    monkeypatch.setattr(
+        deps, "sacct_jobs",
+        lambda ids, start_iso=None, **kw: {j: SACCT_WAIT[j] for j in ids
+                                           if j in SACCT_WAIT})
+    data = client.get("/api/partitions", params={"since_hours": 24}).json()
+    by_name = {p["name"]: p for p in data["partitions"]}
+    # gpu-h100: jobs 1 (3600 s) and 2 (1800 s) -> mean 2700, 2 of 2 sampled.
+    assert by_name["gpu-h100"]["average_wait_seconds"] == 2700
+    assert by_name["gpu-h100"]["wait_sample_count"] == 2
+    assert by_name["gpu-h100"]["wait_candidate_count"] == 2
+    # h200_3g.71gb: job 4's negative delta clamps to 0 (1 sample of 1).
+    assert by_name["h200_3g.71gb"]["average_wait_seconds"] == 0
+    assert by_name["h200_3g.71gb"]["wait_sample_count"] == 1
+    assert by_name["h200_3g.71gb"]["wait_candidate_count"] == 1
+    # whole-GPU gpu-h200: job 3 observed but unresolvable — all candidates,
+    # no samples, average stays null (never zero).
+    assert by_name["gpu-h200"]["average_wait_seconds"] is None
+    assert by_name["gpu-h200"]["wait_sample_count"] == 0
+    assert by_name["gpu-h200"]["wait_candidate_count"] == 1
+
+
+def test_partitions_wait_stats_newest_first_cap(client, fake_prom, monkeypatch):
+    # A cap of 1 keeps only the single most recently observed job. Give
+    # job 4 (MIG group) a strictly later final sample than jobs 1-3 by
+    # appending one at ts=1200; the cap then keeps job 4 and every other
+    # observed job stays a capped-out candidate — never a zero sample.
+    monkeypatch.setattr(deps, "PARTITION_WAIT_SAMPLE_CAP", 1)
+    # _PART_SUMMARY is class-level and shared across FakeProm instances:
+    # snapshot and restore around the append so nothing leaks into other
+    # tests or the golden fixtures.
+    saved_summary = list(FakeProm._PART_SUMMARY)
+    fake_prom._PART_SUMMARY.append(
+        {"metric": {"slurmjobid": "4", "instance": "gpu49", "job": "gpu-h200",
+                    "gpu_type": "h200_3g.71gb"},
+         "values": [[1000, "80"], [1120, "90"], [1200, "95"]]})
+    SACCT_WAIT = {
+        "4": dict(SACCT["4"], submit="2026-08-29T21:26:40",
+                  start="2026-08-29T22:26:40"),  # 3600 s
+    }
+    monkeypatch.setattr(
+        deps, "sacct_jobs",
+        lambda ids, start_iso=None, **kw: {j: SACCT_WAIT[j] for j in ids
+                                           if j in SACCT_WAIT})
+    try:
+        data = client.get("/api/partitions", params={"since_hours": 24}).json()
+    finally:
+        FakeProm._PART_SUMMARY[:] = saved_summary
+    by_name = {p["name"]: p for p in data["partitions"]}
+    assert by_name["h200_3g.71gb"]["average_wait_seconds"] == 3600
+    assert by_name["h200_3g.71gb"]["wait_sample_count"] == 1
+    assert by_name["h200_3g.71gb"]["wait_candidate_count"] == 1
+    # capped-out groups keep their candidates, never fake samples
+    assert by_name["gpu-h100"]["average_wait_seconds"] is None
+    assert by_name["gpu-h100"]["wait_sample_count"] == 0
+    assert by_name["gpu-h100"]["wait_candidate_count"] == 2
+    assert by_name["gpu-h200"]["wait_candidate_count"] == 1
+
+
+def test_partitions_wait_stats_array_grouping(client, fake_prom, monkeypatch):
+    # A bare array parent's sacct rows are its task rows; resolution must
+    # merge the tasks whose nodes match the observed instances, and the
+    # merged row's earliest start wins.
+    fake_prom.extra_jobs = []
+    # _PART_SUMMARY is a class-level list shared by every FakeProm
+    # instance: snapshot and restore it so the appended series below can
+    # never leak into other tests (or the golden fixtures).
+    saved_summary = list(FakeProm._PART_SUMMARY)
+    monkeypatch.setattr(
+        deps, "sacct_jobs",
+        lambda ids, start_iso=None, **kw: {
+            "45_0": {"jobid": "45_0", "array_jobid": "45",
+                     "submit": "2026-08-29T20:00:00",
+                     "start": "2026-08-29T21:00:00", "node_list": "gpu1", "gpus": 1,
+                     "elapsed_s": 3600, "state": "COMPLETED"},
+            "45_1": {"jobid": "45_1", "array_jobid": "45",
+                     "submit": "2026-08-29T20:00:00",
+                     "start": "2026-08-29T22:00:00", "node_list": "gpu1", "gpus": 1,
+                     "elapsed_s": 3600, "state": "COMPLETED"},
+        })
+    # Pretend the Prometheus series label is the bare parent: patch the
+    # summary query result by adding a series with slurmjobid "45".
+    fake_prom._PART_SUMMARY.append(
+        {"metric": {"slurmjobid": "45", "instance": "gpu1", "job": "gpu-h100",
+                    "gpu_type": "h100"},
+         "values": [[1000, "10"]]})
+    try:
+        data = client.get("/api/partitions", params={"since_hours": 24}).json()
+    finally:
+        FakeProm._PART_SUMMARY[:] = saved_summary
+    by_name = {p["name"]: p for p in data["partitions"]}
+    # gpu-h100 gains the array parent as a 3rd candidate. The stubbed
+    # sacct resolves ONLY the array's task rows, so exactly one record
+    # (the merged parent) contributes a sample; the merged row's earliest
+    # start (21:00) minus the shared submit (20:00) is 3600 s.
+    assert by_name["gpu-h100"]["wait_candidate_count"] == 3
+    assert by_name["gpu-h100"]["wait_sample_count"] == 1
+    assert by_name["gpu-h100"]["average_wait_seconds"] == 3600
+
+
+def test_partition_window_observed_jobs_groups_and_union(client, fake_prom):
+    # observed_jobs: one entry per unique slurmjobid, canonical group
+    # (MIG profile split out), node set, and the greatest sample timestamp.
+    observed = domain_partitions.partition_window(
+        24, node_gpu_types=gpu_groups.build_node_index(deps.show_nodes()))[4]
+    assert set(observed) == {"1", "2", "3", "4"}
+    assert observed["1"]["nodes"] == {"gpu1"}
+    assert observed["4"]["group"] == "h200_3g.71gb"  # canonical MIG group
+    assert observed["4"]["nodes"] == {"gpu49"}
+    # each series' greatest sample timestamp is the job's last_seen
+    assert observed["4"]["last_seen"] == 1120.0
+    assert observed["3"]["last_seen"] == 1120.0
+    assert observed["1"]["group"] == "gpu-h100"
+
+
+def test_partitions_queue_orders_and_filters(client, fake_prom, monkeypatch):
+    # Submit strings are naive sacct/scontrol timestamps; the suite pins
+    # TZ=UTC (conftest), so 12:26:40 is NOW - 7200 s and 13:26:40 is
+    # NOW - 3600 s.
+    pending = {
+        "600": {"jobid": "600", "name": "long-wait", "user": "alice",
+                "account": "acc", "partition": "gpu-h100", "state": "PENDING",
+                "qos": "normal", "priority": 10, "submit": "2026-08-30T12:26:40",
+                "requested_gpus": 2, "requested_gpu_type": "h100",
+                "node_list": "", "gpus": 0},
+        "601": {"jobid": "601", "name": "short-wait", "user": "bob",
+                "account": "acc", "partition": "gpu-h100", "state": "PENDING",
+                "qos": "normal", "priority": 20, "submit": "2026-08-30T13:26:40",
+                "requested_gpus": 1, "requested_gpu_type": "h100",
+                "node_list": "", "gpus": 0},
+        "602": {"jobid": "602", "name": "no-submit", "user": "carol",
+                "account": "acc", "partition": "gpu-h200", "state": "PENDING",
+                "qos": "", "priority": 5, "submit": "Unknown",
+                "requested_gpus": 8, "requested_gpu_type": "h200",
+                "node_list": "", "gpus": 0, "array_task_id": "0-224"},
+        # non-pending and non-GPU jobs must never enter the queue
+        "603": {"jobid": "603", "name": "running", "user": "dave",
+                "account": "acc", "partition": "gpu-h100", "state": "RUNNING",
+                "qos": "", "priority": 0, "submit": "2026-08-30T10:00:00",
+                "requested_gpus": 4, "requested_gpu_type": "h100",
+                "node_list": "gpu1", "gpus": 4},
+        "604": {"jobid": "604", "name": "cpu-job", "user": "erin",
+                "account": "acc", "partition": "batch", "state": "PENDING",
+                "qos": "", "priority": 0, "submit": "2026-08-30T09:00:00",
+                "requested_gpus": 0, "requested_gpu_type": "",
+                "node_list": "", "gpus": 0},
+    }
+    monkeypatch.setattr(deps, "show_jobs", lambda: pending)
+    data = client.get("/api/partitions", params={"since_hours": 24}).json()
+    q = data["queue"]
+    # longest known wait first, unknown waits after them
+    assert [r["jobid"] for r in q] == ["600", "601", "602"]
+    assert q[0]["wait_seconds"] == 7200 and q[1]["wait_seconds"] == 3600
+    assert q[2]["wait_seconds"] is None
+    # one scontrol record is one queued record (no task inference)
+    assert q[2]["requested_gpus"] == 8
+    assert q[0]["gpu_group"] == "gpu-h100"
+    assert q[0]["reason"] == "" and q[0]["qos"] == "normal"
+
+
+def test_partitions_queue_ignores_running_only(client, fake_prom, monkeypatch):
+    pending = {
+        "610": {"jobid": "610", "name": "p", "user": "u", "account": "acc",
+                "partition": "gpu-h100", "state": "PENDING", "qos": "",
+                "priority": 0, "submit": "2026-08-30T16:26:40",
+                "requested_gpus": 1, "requested_gpu_type": "h100",
+                "node_list": "", "gpus": 0},
+    }
+    monkeypatch.setattr(deps, "show_jobs", lambda: pending)
+    plain = client.get("/api/partitions", params={"since_hours": 24}).json()
+    ro = client.get("/api/partitions",
+                    params={"since_hours": 24, "running_only": "true"}).json()
+    assert [r["jobid"] for r in plain["queue"]] == ["610"]
+    assert [r["jobid"] for r in ro["queue"]] == ["610"]
+    # ... while the historical views do collapse under running_only with
+    # no live jobs
+    fake_prom.live_ids = set()
+    ro_empty = client.get(
+        "/api/partitions",
+        params={"since_hours": 24, "running_only": "true"}).json()
+    assert ro_empty["partitions"] == [] and ro_empty["trend"] == {}
+    assert [r["jobid"] for r in ro_empty["queue"]] == ["610"]
+
+
+def test_partitions_queue_only_partition_in_selector_source(
+        client, fake_prom, monkeypatch):
+    # A pending job whose partition has NO historical utilization in the
+    # window appears only in the queue (the UI unions it into the
+    # selector); the historical rows are not fabricated for it.
+    pending = {
+        "620": {"jobid": "620", "name": "p", "user": "u", "account": "acc",
+                "partition": "gpu-fresh", "state": "PENDING", "qos": "",
+                "priority": 0, "submit": "2026-08-30T16:26:40",
+                "requested_gpus": 3, "requested_gpu_type": "a100",
+                "node_list": "", "gpus": 0},
+    }
+    monkeypatch.setattr(deps, "show_jobs", lambda: pending)
+    data = client.get("/api/partitions", params={"since_hours": 24}).json()
+    assert [r["jobid"] for r in data["queue"]] == ["620"]
+    assert data["queue"][0]["gpu_group"] == "gpu-fresh"
+    assert {p["name"] for p in data["partitions"]} == {
+        "gpu-h100", "gpu-h200", "h200_3g.71gb"}
+
+
+def test_partitions_queue_slurm_failure_propagates(client, fake_prom,
+                                                   monkeypatch):
+    # The live queue is a primary part of the response: a controller
+    # failure must surface as 502, not silently render an empty queue.
+    def boom():
+        from slurm import SlurmError
+        raise SlurmError("scontrol is not available")
+
+    monkeypatch.setattr(deps, "show_jobs", boom)
+    r = client.get("/api/partitions", params={"since_hours": 24})
+    assert r.status_code == 502
+
+
+def test_partitions_queue_pending_mig_request_groups_by_requested_type(
+        client, fake_prom, monkeypatch):
+    # A pending job has no allocated gpu_type and (often) no nodes: its
+    # canonical group must come from the REQUESTED GPU type, so a MIG
+    # request lands in the profile group instead of the whole-GPU
+    # partition the selector would otherwise filter it under.
+    pending = {
+        "630": {"jobid": "630", "name": "mig", "user": "u", "account": "acc",
+                "partition": "gpu-h200", "state": "PENDING", "qos": "",
+                "priority": 0, "submit": "2026-08-30T16:26:40",
+                "requested_gpus": 2, "requested_gpu_type": "h200_3g.71gb",
+                "node_list": "", "gpus": 0},
+    }
+    monkeypatch.setattr(deps, "show_jobs", lambda: pending)
+    data = client.get("/api/partitions", params={"since_hours": 24}).json()
+    assert data["queue"][0]["gpu_group"] == "h200_3g.71gb"
+
+
+def test_partitions_empty_series_is_not_a_wait_candidate(
+        client, fake_prom, monkeypatch):
+    # A stats series with no parseable samples means the job was not
+    # observed in the window: aggregate_partition_stats already ignores
+    # it, and it must not inflate wait_candidate_count either.
+    saved_summary = list(FakeProm._PART_SUMMARY)
+    FakeProm._PART_SUMMARY.append(
+        {"metric": {"slurmjobid": "77", "instance": "gpu1",
+                    "job": "gpu-h100", "gpu_type": "h100"},
+         "values": []})
+    try:
+        data = client.get("/api/partitions", params={"since_hours": 24}).json()
+    finally:
+        FakeProm._PART_SUMMARY[:] = saved_summary
+    by_name = {p["name"]: p for p in data["partitions"]}
+    assert by_name["gpu-h100"]["wait_candidate_count"] == 2  # jobs 1 and 2
+
+
+def test_partition_wait_stats_rounds_exact_total_once():
+    # Waits 0, 1, 1 s: incremental rounding of the running mean would
+    # yield 0; the exact total must round to 1.
+    observed = {
+        "a": {"group": "g", "nodes": {"n1"}, "last_seen": 30.0},
+        "b": {"group": "g", "nodes": {"n1"}, "last_seen": 20.0},
+        "c": {"group": "g", "nodes": {"n1"}, "last_seen": 10.0},
+    }
+    import datetime as _dt
+
+    def iso(offset):
+        base = datetime(2026, 8, 30, 12, 0, 0)
+        return (base + _dt.timedelta(seconds=offset)).isoformat()
+
+    meta = {
+        "a": {"jobid": "a", "submit": iso(0), "start": iso(0)},
+        "b": {"jobid": "b", "submit": iso(0), "start": iso(1)},
+        "c": {"jobid": "c", "submit": iso(0), "start": iso(1)},
+    }
+    deps.route_cache.get_or_set(
+        cache.sacct_key(["a", "b", "c"]), 300, lambda: meta)
+    stats = domain_partitions.partition_wait_stats(observed)
+    assert stats["g"]["average_wait_seconds"] == 1  # round(2/3) = 1
+    assert stats["g"]["wait_sample_count"] == 3

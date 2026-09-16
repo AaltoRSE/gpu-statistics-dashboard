@@ -175,14 +175,52 @@ class PartitionRow(BaseModel):
     mean_util: float = Field(
         description="Time-weighted mean utilization over the window.")
     max_util: float
-    job_count: int
-    gpus_alloc: int = Field(description="Live allocated GPU count.")
-    gpus_total: int = Field(description="Total scontrol GPU capacity of "
+    job_count: int = Field(
+        description="Total unique GPU jobs Prometheus observed in the "
+                    "selected window.")
+    average_wait_seconds: Optional[int] = Field(
+        default=None,
+        description="Mean submit-to-start time (s) over the window's "
+                    "resolved GPU jobs; null when none resolved.")
+    wait_sample_count: int = Field(
+        default=0,
+        description="Observed jobs whose sacct submit/start both resolved "
+                    "into the average.")
+    wait_candidate_count: int = Field(
+        default=0,
+        description="Jobs observed in the window before enrichment "
+                    "capping/resolution; >= wait_sample_count.")
+    gpus_alloc: int = Field(default=0,
+                            description="Live allocated GPU count.")
+    gpus_total: int = Field(default=0,
+                            description="Total scontrol GPU capacity of "
                             "the group's nodes, idle included.")
     mean_occupancy: Optional[float] = Field(
         default=None,
         description="Window-average share of gpus_total with an active "
                     "job (%); null when capacity is unknown.")
+
+
+class QueuedJob(BaseModel):
+    jobid: str
+    name: str = ""
+    user: str = ""
+    account: str = ""
+    partition: str = Field(
+        description="The job's raw Slurm partition, as submitted.")
+    gpu_group: str = Field(
+        description="Canonical GPU group (Slurm partition, MIG GRES "
+                    "profiles split out) the pending job would run in.")
+    qos: str = ""
+    priority: int = 0
+    submit: str = ""
+    wait_seconds: Optional[int] = Field(
+        default=None,
+        description="Seconds elapsed since submission; null while Slurm "
+                    "has no SubmitTime for the job.")
+    requested_gpus: int = 0
+    requested_gpu_type: str = ""
+    reason: str = ""
 
 
 class PartitionsResponse(BaseModel):
@@ -192,6 +230,10 @@ class PartitionsResponse(BaseModel):
     trend: Dict[str, List[Tuple[float, float]]] = Field(
         description="Per-group utilization trend series, keyed by group "
                     "name.")
+    queue: List[QueuedJob] = Field(
+        description="Current controller snapshot of pending jobs that "
+                    "request GPUs, longest known wait first; live data, "
+                    "independent of the window.")
 
 
 class VramRecord(BaseModel):

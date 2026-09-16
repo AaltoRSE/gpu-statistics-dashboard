@@ -1,33 +1,43 @@
 {
   "partitions": [
     {
+      "average_wait_seconds": null,
       "gpus_alloc": 3,
       "gpus_total": 16,
       "job_count": 1,
       "max_util": 95.0,
       "mean_occupancy": 6.2,
       "mean_util": 92.5,
-      "name": "gpu-h200"
+      "name": "gpu-h200",
+      "wait_candidate_count": 1,
+      "wait_sample_count": 0
     },
     {
+      "average_wait_seconds": null,
       "gpus_alloc": 1,
       "gpus_total": 8,
       "job_count": 1,
       "max_util": 90.0,
       "mean_occupancy": 12.5,
       "mean_util": 85.0,
-      "name": "h200_3g.71gb"
+      "name": "h200_3g.71gb",
+      "wait_candidate_count": 1,
+      "wait_sample_count": 0
     },
     {
+      "average_wait_seconds": null,
       "gpus_alloc": 2,
       "gpus_total": 16,
       "job_count": 2,
       "max_util": 60.0,
       "mean_occupancy": 12.5,
       "mean_util": 36.67,
-      "name": "gpu-h100"
+      "name": "gpu-h100",
+      "wait_candidate_count": 2,
+      "wait_sample_count": 0
     }
   ],
+  "queue": [],
   "step": 120,
   "trend": {
     "gpu-h100": [

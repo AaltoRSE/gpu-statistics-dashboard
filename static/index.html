@@ -174,14 +174,35 @@
             <thead><tr>
               <th data-k="name">Partition</th>
               <th class="num" data-k="gpus_total" title="allocated / total GPUs">GPUs</th>
-              <th class="num" data-k="job_count">Jobs</th>
+              <th class="num" data-k="job_count" title="unique GPU jobs Prometheus observed in this window">Jobs in window</th>
+              <th class="num" data-k="average_wait_seconds" title="mean submit-to-start time of the window's resolved GPU jobs">Avg wait</th>
               <th class="num" data-k="mean_util">Mean util %<button type="button" class="glossary-btn" data-glossary="mean-util" title="What is this?">?</button></th>
             </tr></thead>
             <tbody></tbody>
           </table>
         </div>
-        <div class="hint">Mean utilization is time-weighted over the window; GPU devices are collapsed to a per-job/per-node max, so it measures &ldquo;how busy&rdquo; rather than aggregate GPU-hours. Mean occupancy is the window-average share of the partition&rsquo;s capacity with an active job. GPUs show allocated/total capacity of the partition&rsquo;s nodes. Select a partition to scope the trend and the VRAM distribution to it.</div>
+        <div class="hint">Mean utilization is time-weighted over the window; GPU devices are collapsed to a per-job/per-node max, so it measures &ldquo;how busy&rdquo; rather than aggregate GPU-hours. Mean occupancy is the window-average share of the partition&rsquo;s capacity with an active job. GPUs show allocated/total capacity of the partition&rsquo;s nodes. <strong>Jobs in window</strong> counts the unique GPU jobs Prometheus observed in the selected window. <strong>Avg wait</strong> is the mean submit-to-start time of those jobs, enriched from sacct for up to 2,000 of the most recently observed; its tooltip shows how many jobs resolved (&ldquo;based on X of Y&rdquo;). Select a partition to scope the trend, VRAM distribution, and waiting queue to it.</div>
       </div>
+
+      <div class="card" style="margin-top:14px">
+        <h2>Current waiting queue <span class="small" id="pQueueCount"></span>
+          <span class="small" data-fresh-for="partitionsResults"></span></h2>
+        <div class="stat-row" id="pQueueStats"></div>
+        <div class="table-scroll compact">
+          <table id="queueTable">
+            <thead><tr>
+              <th data-k="jobid">Job</th>
+              <th data-k="name">Name</th>
+              <th data-k="user">User</th>
+              <th data-k="partition">Partition</th>
+              <th class="num" data-k="requested_gpus" title="GPUs the job requests">Requested GPUs</th>
+              <th class="num" data-k="wait_seconds" title="elapsed time since submission">Wait</th>
+              <th data-k="reason">Reason</th>
+            </tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+        <div class="hint">The controller&rsquo;s current pending jobs that request GPUs &mdash; a live snapshot, independent of the window above (waits keep counting while you watch). One row per <code>scontrol</code> record, so a pending array is one row regardless of its task count. Wait is time since submission; &ldquo;&mdash;&rdquo; means Slurm has not recorded one yet. Runs update only when the tab reloads data.</div>
       </div>
       <div class="results-loading">Data is loading&hellip;</div>
     </div>

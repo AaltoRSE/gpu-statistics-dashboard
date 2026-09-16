@@ -9,9 +9,10 @@ import cache
 import deps
 import gpu_groups
 from domain.common import job_window, running_gpu_job_ids, series_values, step_for_range
+from domain.metadata import resolve_sacct_metadata
 from prom import PrometheusError
 from promql import label_eq, label_in, selector
-from slurm import SlurmError
+from slurm import SlurmError, expand_node_list
 
 
 def _sacct_epoch(value):
@@ -40,7 +41,7 @@ def partition_window(since_hours, running_only=False, now=None,
     if running_only:
         live = running_gpu_job_ids()
         if not live:
-            return [], {}, {}, {}, start, now, step
+            return [], {}, {}, {}, {}, start, now, step
         sel = selector(label_in("slurmjobid", live))
 
     def fetch():
@@ -87,7 +88,30 @@ def partition_window(since_hours, running_only=False, now=None,
         if inst:
             name = gpu_groups.gpu_group_name(m, node_gpu_types, aliases)
             instances.setdefault(name, set()).add(inst)
-    return out, trend_out, instances, occupancy, start, now, step
+    # Per-job evidence across the window: which nodes observed the job and
+    # when it was last seen. Historical wait enrichment ranks unique jobs by
+    # this timestamp (newest first) so the cap keeps the most recent work.
+    observed_jobs = {}
+    for s in stats:
+        m = s["metric"]
+        jid = m.get("slurmjobid", "")
+        if not jid:
+            continue
+        values = series_values(s)
+        if not values:
+            # A series with no parseable samples means the job was not
+            # observed in this window at all — the same rule
+            # aggregate_partition_stats applies; it must not become a
+            # wait candidate or consume a capped sacct lookup.
+            continue
+        ev = observed_jobs.setdefault(
+            jid, {"group": gpu_groups.gpu_group_name(m, node_gpu_types, aliases),
+                  "nodes": set(), "last_seen": 0.0})
+        inst = m.get("instance", "")
+        if inst:
+            ev["nodes"].add(inst)
+        ev["last_seen"] = max(ev["last_seen"], values[-1][0])
+    return out, trend_out, instances, occupancy, observed_jobs, start, now, step
 
 
 def aggregate_partition_stats(stats, node_gpu_types=None, aliases=None):
@@ -272,3 +296,109 @@ def node_job_start(name, now):
     if not starts:
         return fallback_start
     return max(min(starts), now - 7 * 86400)
+
+
+def partition_wait_stats(observed_jobs, limit=None):
+    """Historical submit-to-start wait per GPU group for a window's jobs.
+
+    ``observed_jobs`` is ``partition_window``'s per-job evidence. Enrichment
+    is bounded: the unique jobs are ranked newest-observation first, only
+    the first ``limit`` (deps.PARTITION_WAIT_SAMPLE_CAP) go through explicit
+    ``sacct -j`` batches, and array parents resolve through the same
+    metadata merge the Jobs tab uses. A job counts as a candidate whenever
+    it was observed in the window; it contributes a wait sample only when
+    sacct resolved it and both its submit and start timestamps parse — a
+    capped-out, unresolved, or unparseable job never becomes a zero-wait
+    sample. Returns ``{group: {average_wait_seconds, wait_sample_count,
+    wait_candidate_count}}`` for every group seen in the window.
+    """
+    if limit is None:
+        limit = deps.PARTITION_WAIT_SAMPLE_CAP
+    candidates = {}
+    for jid, ev in observed_jobs.items():
+        candidates.setdefault(
+            ev["group"], {"average_wait_seconds": None,
+                          "wait_sample_count": 0, "wait_candidate_count": 0,
+                          "_wait_total": 0})
+        candidates[ev["group"]]["wait_candidate_count"] += 1
+    if not observed_jobs:
+        return candidates
+    ranked = sorted(
+        observed_jobs,
+        key=lambda jid: (-observed_jobs[jid]["last_seen"], jid))[:limit]
+    meta = deps.route_cache.get_or_set(
+        cache.sacct_key(ranked), 300, lambda: deps.sacct_jobs(ranked))
+    for jid in ranked:
+        ev = observed_jobs[jid]
+        # Exact IDs resolve directly; a bare array parent (sacct -j returns
+        # only its task rows) merges the tasks whose node list intersects
+        # the observed instances — the same resolution the Jobs tab uses.
+        row = resolve_sacct_metadata(jid, ev["nodes"], meta)
+        if not row:
+            continue
+        submit = _sacct_epoch(row.get("submit"))
+        start = _sacct_epoch(row.get("start"))
+        if submit is None or start is None:
+            continue
+        group = candidates.setdefault(
+            ev["group"], {"average_wait_seconds": None,
+                          "wait_sample_count": 0, "wait_candidate_count": 0,
+                          "_wait_total": 0})
+        # Accumulate exact seconds; rounding once at the end keeps
+        # incremental rounding error out of the average.
+        group["_wait_total"] += max(0, start - submit)
+        group["wait_sample_count"] += 1
+    for group in candidates.values():
+        if group["wait_sample_count"]:
+            group["average_wait_seconds"] = round(
+                group.pop("_wait_total") / group["wait_sample_count"])
+        else:
+            group.pop("_wait_total", None)
+    return candidates
+
+
+def pending_gpu_queue(active_jobs, node_gpu_types, now):
+    """The current controller snapshot of GPU-requesting pending jobs.
+
+    One ``scontrol show job`` row is one queued record — a compressed array
+    record (``ArrayTaskId=0-224``) stays one row; task cardinality is never
+    inferred from its text. Waits are live elapsed time since submission
+    (unknown while Slurm hasn't recorded SubmitTime) and are re-derived on
+    every call, so they never need invalidating — the 30 s
+    ``scontrol_jobs`` cache bounds their staleness instead.
+    """
+    rows = []
+    for jobid, job in active_jobs.items():
+        if job.get("state") != "PENDING":
+            continue
+        requested = job.get("requested_gpus") or 0
+        if requested <= 0:
+            continue
+        nodes = expand_node_list(job.get("node_list") or "") or set()
+        # A pending job has no allocation yet: group it by what it asked
+        # for, not by its (empty) allocated gpu_type — otherwise a MIG
+        # request would count against the whole-GPU partition.
+        group = gpu_groups.job_gpu_group(
+            dict(job, nodes=nodes, gpu_type=job.get("requested_gpu_type")
+                 or job.get("gpu_type") or ""),
+            node_gpu_types)
+        submit = _sacct_epoch(job.get("submit"))
+        wait = None if submit is None else max(0, int(now - submit))
+        rows.append({
+            "jobid": jobid,
+            "name": job.get("name") or "",
+            "user": job.get("user") or "",
+            "account": job.get("account") or "",
+            "partition": job.get("partition") or "",
+            "gpu_group": group,
+            "qos": job.get("qos") or "",
+            "priority": job.get("priority") or 0,
+            "submit": job.get("submit") or "",
+            "wait_seconds": wait,
+            "requested_gpus": requested,
+            "requested_gpu_type": job.get("requested_gpu_type") or "",
+            "reason": job.get("reason") or "",
+        })
+    rows.sort(key=lambda r: (
+        r["wait_seconds"] is None, -(r["wait_seconds"] or 0), r["jobid"]))
+    return rows
