@@ -7,6 +7,8 @@ collection) from:
 
 - **`sacct`** — job metadata (name, user, state, start/end, GPU allocation)
 - **`scontrol`** — node state and GPU capacity
+- **`squeue`** — the pending-job queue (`-t PD`) behind the Partitions tab's
+  queue status
 - **Prometheus** (`stats.triton.aalto.fi`) — `slurm_job_*` exporter metrics:
   per-GPU utilization and VRAM, live and historical
 
@@ -70,6 +72,16 @@ OS-level preference applies when no choice has been saved.
   over the window), a utilization trend chart, a mean-occupancy chart
   (window average of allocated GPUs / resolved capacity per partition),
   and GPU capacity per partition.
+- **Pending jobs by partition** (queue status): one `squeue -t PD` snapshot
+  (30 s TTL cache) aggregated into the tab's GPU-group semantics — a MIG
+  TresPerNode request forms its own group. Rows are per-partition
+  *placements*: a job requesting several partitions appears in each, so a
+  GPU job's per-node request (`squeue %b` × `%D` nodes) counts toward
+  every row it could fill. A GPU job whose `%D` is N/A makes the exact
+  GPU total `unknown` (the one-node lower bound stays in *GPUs (min)*);
+  the header's pending-job count is the unique number of queued jobs. An
+  squeue failure renders as an explicit unavailable state — never as an
+  empty queue.
 - **Running only** toggle restricts the bar, trend, and occupancy charts
   and the table to jobs with a live Prometheus GPU series.
 - `GPUs` shows allocated/total: the total spans every scontrol node whose
@@ -135,7 +147,7 @@ Prometheus connection settings are read in this order:
    `~/.config/jobgraph.conf` (shared with the jobgraph tool; keys
    `prom_url`, `username`, `password`, `timeout`)
 Cluster access is **strictly read-only**: the app only issues `sacct -j`,
-`scontrol show nodes`, and Prometheus read queries.
+`scontrol show nodes`, `squeue -t PD`, and Prometheus read queries.
 
 ## API
 
@@ -144,7 +156,7 @@ Cluster access is **strictly read-only**: the app only issues `sacct -j`,
 | `GET /api/health` | backend + Prometheus connectivity |
 | `GET /api/jobs?since_hours=&user=&partition=&search=&limit=&running_only=&refresh=` | job table (Prometheus discovery + sacct enrichment; `running_only=true` keeps only jobs with a live GPU series; `refresh=true` bypasses the 60 s window cache) plus `efficiency_histogram` (GPU-hours by 10%-wide mean-utilization bucket, 0-100) |
 | `GET /api/jobs/{jobid}?since_hours=` | per-GPU utilization/VRAM series + metadata (human-readable `start`/`end` preserved as-is) |
-| `GET /api/partitions?since_hours=&running_only=` | utilization per GPU group + trend + `mean_occupancy` (window-average allocated share) + allocated/total GPU capacity. A group is the Slurm partition, except MIG GPUs, which form their own group per node MIG GRES profile (`h200_3g.71gb`), so a MIG node never counts against its whole-GPU pool. Capacity is summed over all nodes of the group (idle included); a node shared by several partitions counts toward each |
+| `GET /api/partitions?since_hours=&running_only=` | utilization per GPU group + trend + `mean_occupancy` (window-average allocated share) + allocated/total GPU capacity **+ pending-job queue** (`queue`: per-group pending counts and GPU demand keyed by group, `__total__` the unique cluster-wide figure, `queue_available=false` when the squeue snapshot failed). A group is the Slurm partition, except MIG GPUs, which form their own group per node MIG GRES profile (`h200_3g.71gb`), so a MIG node never counts against its whole-GPU pool. Capacity is summed over all nodes of the group (idle included); a node shared by several partitions counts toward each |
 | `GET /api/partitions/vram?since_hours=&running_only=&partition=` | per-job VRAM records for the distribution chart (average per-GPU peak VRAM in GB, mean utilization, allocated GPU-hours); `partition` keeps only one GPU group (a Slurm partition or a MIG GRES profile). Binning and the utilization-range filter happen client-side. `total` counts all candidates in the window; `jobs` holds only the top 2000 by effective GPU-hours, since a `sacct -j` over the whole window would time out |
 | `GET /api/nodes?gpu_only=&refresh=` | node states (state/reason from `scontrol show node`) + live utilization/VRAM + active jobs (`refresh=true` bypasses the 30 s cache) |
 | `GET /api/nodes/{name}?view=job_start\|1\|6\|24` | per-GPU utilization/VRAM series for one node (`job_start` = since the earliest active job started) |

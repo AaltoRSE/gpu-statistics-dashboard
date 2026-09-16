@@ -8,6 +8,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from config import _read_jobgraph_conf  # noqa: E402
 from slurm import (  # noqa: E402
     SACCT_FIELDS,
+    SQUEUE_QUEUE_FMT,
     _parse_kv_block,
     _parse_sacct_row,
     expand_node_list,
@@ -17,6 +18,8 @@ from slurm import (  # noqa: E402
     parse_scontrol_jobs,
     parse_scontrol_nodes,
     parse_scontrol_partitions,
+    parse_squeue_queue,
+    parse_tres_per_node,
 )
 
 
@@ -411,6 +414,62 @@ def test_parse_scontrol_jobs_invalid_runtime():
     assert set(jobs) == {"301", "302"}
     assert jobs["301"]["elapsed_s"] == 0
     assert jobs["302"]["elapsed_s"] == 2 * 3600 + 3 * 60 + 4
+
+
+def test_parse_tres_per_node_both_gres_forms():
+    # squeue %b is the COLON-form TresPerNode; the equals-form AllocTRES
+    # regex (parse_alloc_tres) cannot read it. Untyped and typed forms
+    # differ by the type name starting with a letter.
+    assert parse_tres_per_node("gres/gpu:1") == (1, "")          # untyped
+    assert parse_tres_per_node("gres/gpu:a100:4") == (4, "a100")  # typed
+    assert parse_tres_per_node("gres/gpu:h200:8") == (8, "h200")
+    # non-GPU resources in the same string are ignored
+    assert parse_tres_per_node("gres/gpu:1,gres/min-cuda-cc:80") == (1, "")
+    assert parse_tres_per_node("gres/min-vram:40g") == (0, "")
+    # a max-count entry's type wins
+    assert parse_tres_per_node("gres/gpu:v100:1,gres/gpu:a100:4") == (4, "a100")
+    # N/A / equals-form / empty parse as no GPU request
+    assert parse_tres_per_node("N/A") == (0, "")
+    assert parse_tres_per_node("gres/gpu=4") == (0, "")
+    assert parse_tres_per_node("") == (0, "")
+
+
+def test_parse_squeue_queue_rows():
+    lines = (
+        "20276510|gpu-a100-80g|PENDING|2026-09-16T10:00:00"
+        "|2026-09-17T21:00:00|(Resources)|2|gres/gpu:a100:4\n"
+        "20291030|batch-bdw|PENDING|2026-09-16T17:38:14|N/A"
+        "|(Dependency)|1|N/A\n"
+        "18162157|gpu-a100-80g|PENDING|2026-06-01T14:20:39"
+        "|2026-09-16T23:19:23|(DependencyNeverSatisfied)|1|gres/gpu:1\n"
+    )
+    rows = parse_squeue_queue(lines)
+    assert [r["jobid"] for r in rows] == ["20276510", "20291030", "18162157"]
+    assert rows[0] == {
+        "jobid": "20276510", "partition": "gpu-a100-80g", "state": "PENDING",
+        "submit": "2026-09-16T10:00:00", "start": "2026-09-17T21:00:00",
+        "reason": "(Resources)", "nodes": 2, "gpus": 4, "gpu_type": "a100"}
+    # N/A start parses empty; N/A TRES parses zero GPUs
+    assert rows[1]["start"] == "" and rows[1]["gpus"] == 0
+    # the untyped GRES form parses count without a type
+    assert rows[2]["gpus"] == 1 and rows[2]["gpu_type"] == ""
+    assert parse_squeue_queue("") == []
+    assert parse_squeue_queue("garbage|line") == []
+
+
+def test_queue_pending_command(monkeypatch):
+    import slurm
+
+    cmds = {}
+
+    def fake_run(cmd, timeout=30):
+        cmds["cmd"] = cmd
+        return ""
+
+    monkeypatch.setattr(slurm, "_run", fake_run)
+    assert slurm.queue_pending() == []
+    assert cmds["cmd"] == ["squeue", "-t", "PD", "--noheader", "-o",
+                           SQUEUE_QUEUE_FMT]
 
 
 def test_sacct_jobs_invalid_elapsed(monkeypatch):
