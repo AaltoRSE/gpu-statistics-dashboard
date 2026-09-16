@@ -270,6 +270,72 @@ def show_nodes():
 def show_partitions():
     return parse_scontrol_partitions(_run(["scontrol", "show", "partitions"]))
 
+
+def parse_tres_per_node(text):
+    """A job's TresPerNode string (``squeue %b`` / scontrol's TresPerNode)
+    to (gpu_count_per_node, gpu_type).
+
+    This is the colon-form GRES syntax (``gres/gpu:a100:4``), not the
+    equals-form AllocTRES ``parse_alloc_tres`` handles (``gres/gpu=4``).
+    The untyped form (``gres/gpu:1``) and the typed form
+    (``gres/gpu:a100:4``) are distinguished by the type name starting with
+    a letter: a bare ``gres/gpu:1`` parses as count 1 with no type.
+    Non-GPU resources in the same string (``gres/min-vram:40g``,
+    ``gres/min-cuda-cc:80``) are ignored.
+    """
+    gpus, gpu_type = 0, ""
+    for m in re.finditer(r"gres/gpu(?::([A-Za-z][\w.-]*))?(?::(\d+))?(?=,|$)",
+                         text or ""):
+        count = int(m.group(2)) if m.group(2) else 0
+        if count > gpus:
+            gpus = count
+            gpu_type = m.group(1) or ""
+    return gpus, gpu_type
+
+
+SQUEUE_QUEUE_FMT = "%i|%P|%T|%V|%S|%R|%D|%b"
+
+
+def parse_squeue_queue(output):
+    """Parse ``squeue -o <SQUEUE_QUEUE_FMT>`` output into a list of
+    pending-job dicts.
+
+    ``%b`` (TresPerNode) is parsed to ``gpus`` (the per-node GPU count)
+    and ``gpu_type``; non-GPU TRES entries are dropped there. Rows whose
+    TresPerNode names no GPU (plain ``gres/min-vram:...`` CPU jobs) are
+    kept with ``gpus=0`` so the queue depth stays exact.
+    """
+    jobs = []
+    for line in output.splitlines():
+        if not line.strip():
+            continue
+        f = line.split("|")
+        if len(f) < 8:
+            continue
+        gpus, gpu_type = parse_tres_per_node(f[7])
+        jobs.append({
+            "jobid": f[0],
+            "partition": f[1],
+            "state": f[2],
+            "submit": f[3],
+            "start": f[4] if f[4] not in ("N/A", "Unknown") else "",
+            "reason": f[5].strip(),
+            "nodes": _int(f[6], 0),
+            "gpus": gpus,
+            "gpu_type": gpu_type,
+        })
+    return jobs
+
+
+def queue_pending():
+    """Pending (PD) jobs from squeue. Raises SlurmError when squeue is
+    unavailable or fails; callers must surface that as an error state,
+    not an empty queue."""
+    return parse_squeue_queue(_run(
+        ["squeue", "-t", "PD", "--noheader", "-o", SQUEUE_QUEUE_FMT],
+        timeout=15))
+
+
 def parse_scontrol_jobs(output):
     """Parse ``scontrol show job -o`` output into a job metadata dict.
 
