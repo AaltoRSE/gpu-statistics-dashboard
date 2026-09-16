@@ -7,10 +7,30 @@ import deps
 import gpu_groups
 from api.schemas import PartitionsResponse, VramResponse
 from domain.common import window
-from domain.partitions import gpu_capacity, node_current, partition_window
+from domain.partitions import (
+    gpu_capacity,
+    node_current,
+    partition_window,
+    pending_queue_summary,
+)
 from domain.vram import vram_job_records
+from slurm import SlurmError
 
 router = APIRouter()
+
+
+def _queue_snapshot():
+    """Pending-job summary per partition-view group, plus reachability.
+
+    A failed or missing squeue is an explicit ``available=False`` state,
+    never an empty queue: an operator must be able to tell "nothing
+    pending" from "the queue is unreadable".
+    """
+    try:
+        jobs = deps.route_cache.get_or_set("queue_pending", 30, deps.queue_pending)
+    except SlurmError:
+        return {}, False
+    return pending_queue_summary(jobs), True
 
 
 @router.get("/api/partitions", response_model=PartitionsResponse)
@@ -29,11 +49,14 @@ def api_partitions(since_hours: float = Query(24, gt=0, le=168),
             g["mean_occupancy"] = round(min(100.0, avg_alloc / total * 100.0), 1)
         else:
             g["mean_occupancy"] = None
+    queue, queue_available = _queue_snapshot()
     return {
         "window": window(start, now),
         "step": step,
         "partitions": groups,
         "trend": trend,
+        "queue": queue,
+        "queue_available": queue_available,
     }
 
 

@@ -19,6 +19,8 @@
       "name": "gpu-h100"
     }
   ],
+  "queue": {},
+  "queue_available": true,
   "step": 120,
   "trend": {
     "gpu-h100": [

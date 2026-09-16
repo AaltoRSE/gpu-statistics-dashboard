@@ -19,6 +19,7 @@ import deps  # noqa: E402
 import domain.jobs as domain_jobs  # noqa: E402
 import domain.metadata as domain_metadata  # noqa: E402
 import domain.partitions as domain_partitions  # noqa: E402
+import slurm  # noqa: E402
 from api import users as api_users  # noqa: E402
 
 # Deterministic "now" (2026-08-30T18:26:40Z): job 1's sacct start
@@ -299,6 +300,8 @@ def fake_prom(monkeypatch):
                                                            if j in SACCT})
     # No active controller jobs by default; tests opt in to a snapshot.
     monkeypatch.setattr(deps, "show_jobs", lambda: {})
+    # Empty pending queue by default; tests opt in via deps.queue_pending.
+    monkeypatch.setattr(deps, "queue_pending", lambda: [])
 
     def _show_nodes():
         fake.nodes_calls += 1
@@ -730,6 +733,55 @@ def test_partitions_running_only_empty_when_no_live_ids(client, fake_prom):
                    params={"since_hours": 24, "running_only": "true"})
     data = r.json()
     assert data["partitions"] == [] and data["trend"] == {}
+
+def test_partitions_queue_summary(client, fake_prom, monkeypatch):
+    # A GPU job on one partition, a MIG-profile request, a multi-partition
+    # request (counted in both, GPU demand attributed to neither), a CPU
+    # job, and a GPU job with N/A %D (exact total unknowable -> null).
+    monkeypatch.setattr(deps, "queue_pending", lambda: [
+        {"jobid": "10", "partition": "gpu-h100", "state": "PENDING",
+         "submit": "", "start": "", "reason": "(Resources)",
+         "nodes": 2, "gpus": 4, "gpu_type": "h100"},
+        {"jobid": "11", "partition": "gpu-h200", "state": "PENDING",
+         "submit": "", "start": "", "reason": "(Resources)",
+         "nodes": 4, "gpus": 1, "gpu_type": "h200_3g.71gb"},
+        {"jobid": "12", "partition": "batch-csl,batch-skl", "state": "PENDING",
+         "submit": "", "start": "", "reason": "(Priority)", "nodes": 1,
+         "gpus": 0, "gpu_type": ""},
+        {"jobid": "13", "partition": "gpu-h100", "state": "PENDING",
+         "submit": "", "start": "", "reason": "(Dependency)", "nodes": 0,
+         "gpus": 8, "gpu_type": "h100"},
+    ])
+    data = client.get("/api/partitions", params={"since_hours": 24}).json()
+    assert data["queue_available"] is True
+    q = data["queue"]
+    # job 13's unknown node count turns the exact total null; the lower
+    # bound keeps the one-node request (8) plus job 10's 4*2.
+    assert q["gpu-h100"] == {"jobs": 2, "gpus": None, "gpus_min": 16}
+    # a MIG request forms its own group, same as running jobs do
+    assert q["h200_3g.71gb"] == {"jobs": 1, "gpus": 4, "gpus_min": 4}
+    # the CPU job counts in both requested partitions, GPU demand nowhere
+    assert q["batch-csl"] == {"jobs": 1, "gpus": 0, "gpus_min": 0}
+    assert q["batch-skl"] == {"jobs": 1, "gpus": 0, "gpus_min": 0}
+
+
+def test_partitions_queue_unavailable_is_not_empty(client, fake_prom,
+                                                   monkeypatch):
+    def _boom():
+        raise slurm.SlurmError("squeue is not available")
+
+    monkeypatch.setattr(deps, "queue_pending", _boom)
+    data = client.get("/api/partitions", params={"since_hours": 24}).json()
+    assert data["queue_available"] is False
+    assert data["queue"] == {}
+
+
+def test_partitions_queue_empty_when_nothing_pending(client, fake_prom):
+    # default fixture stub: reachable squeue, zero pending jobs
+    data = client.get("/api/partitions", params={"since_hours": 24}).json()
+    assert data["queue_available"] is True
+    assert data["queue"] == {}
+
 
 def test_partitions_vram_records(client):
     r = client.get("/api/partitions/vram", params={"since_hours": 24})

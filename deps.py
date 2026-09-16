@@ -22,7 +22,12 @@ from fastapi import HTTPException
 from cache import TtlCache
 from config import ConfigError, load_config
 from prom import PromClient
-from slurm import sacct_jobs, show_jobs, show_nodes  # noqa: F401 (re-exported)
+from slurm import (  # noqa: F401 (re-exported)
+    queue_pending,
+    sacct_jobs,
+    show_jobs,
+    show_nodes,
+)
 
 route_cache = TtlCache()
 

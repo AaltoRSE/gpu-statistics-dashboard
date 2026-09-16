@@ -272,3 +272,81 @@ def node_job_start(name, now):
     if not starts:
         return fallback_start
     return max(min(starts), now - 7 * 86400)
+
+
+def _pending_group(job, node_gpu_types):
+    """Canonical partition-view group for one pending job.
+
+    The tab's own groups are the Slurm partition, except that a request
+    for MIG GPUs (an ``h200_3g.71gb``-shaped TresPerNode type) forms its
+    own profile group — the same split ``job_gpu_group`` applies to
+    running jobs, derived here from the request instead of observed
+    nodes. A job naming no GPU type lands on its Slurm partition; a job
+    naming GPU types whose nodes are all MIG-profiled would resolve
+    through the partition of its eventual nodes, which is unknowable
+    pre-scheduling, so a typed request always keys on the type name.
+    """
+    if gpu_groups.is_mig_gres(job["gpu_type"]):
+        return job["gpu_type"]
+    return job["partition"] or "unknown"
+
+
+def _pending_partitions(job):
+    """The partition-view groups one pending job counts toward.
+
+    A MIG-profile TresPerNode (``h200_3g.71gb``) forms its own group —
+    the same split ``job_gpu_group`` applies to running jobs, derived
+    here from the request instead of observed nodes. Otherwise the job's
+    Slurm partition list (%P may request several, comma-separated) is
+    split: the job's eventual nodes are unknowable pre-scheduling, so it
+    is counted in every partition it asked for. No partition at all
+    resolves to ``unknown``.
+    """
+    if gpu_groups.is_mig_gres(job["gpu_type"]):
+        return [job["gpu_type"]]
+    parts = [p.strip() for p in (job["partition"] or "").split(",") if p.strip()]
+    return parts or ["unknown"]
+
+
+def pending_queue_summary(jobs):
+    """Aggregate pending jobs per partition-view group.
+
+    Returns ``{group: {jobs, gpus, gpus_min}}``. A pending job counts
+    once per partition it requested (%P can be a comma list), so the
+    per-partition job counts show demand in each place a job could run;
+    the group ``gpus`` figure therefore attributes a job's GPU demand to
+    its partition only when that partition is the job's sole target
+    (multi-partition jobs contribute to ``jobs`` but to no single
+    partition's GPU total, which keeps any per-partition sum of ``gpus``
+    an upper bound on real demand rather than an overcount of shared
+    jobs). ``gpus`` itself is the sum of ``gpus * nodes`` — %b is a
+    per-node request (TresPerNode), so the allocation only exists across
+    the job's whole node set. When a GPU job's node count is missing
+    (Slurm's ``N/A`` %D) the GPU total becomes ``None``: the per-node
+    request is real demand, so a fabricated 0 would understate the
+    queue, and the one-node lower bound is disclosed separately as
+    ``gpus_min``. A job naming no GPUs at all (CPU jobs, N/A TRES)
+    contributes nothing to either GPU figure.
+    """
+    out = defaultdict(lambda: {"jobs": 0, "gpus": 0, "gpus_unknown": 0,
+                               "gpus_min": 0})
+    for job in jobs:
+        groups = _pending_partitions(job)
+        for g in groups:
+            out[g]["jobs"] += 1
+        if not job["gpus"] or len(groups) != 1:
+            continue
+        key = groups[0]
+        if job["nodes"]:
+            out[key]["gpus"] += job["gpus"] * job["nodes"]
+        else:
+            out[key]["gpus_unknown"] += 1
+        out[key]["gpus_min"] += job["gpus"] * max(1, job["nodes"])
+    for g in out.values():
+        if g["gpus_unknown"]:
+            # a per-node request is real demand even when %D is N/A:
+            # rather than a fabricated 0, the exact total becomes unknown
+            # (the one-node lower bound stays in gpus_min)
+            g["gpus"] = None
+        del g["gpus_unknown"]
+    return dict(out)

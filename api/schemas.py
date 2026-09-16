@@ -185,6 +185,18 @@ class PartitionRow(BaseModel):
                     "job (%); null when capacity is unknown.")
 
 
+class QueueGroup(BaseModel):
+    jobs: int = Field(description="Pending (PD) job count for the group.")
+    gpus: Optional[int] = Field(
+        default=None,
+        description="Sum of per-node GPU requests times requested nodes; "
+                    "null when any GPU job in the group declares no node "
+                    "count (N/A %D), so the exact total is unknowable.")
+    gpus_min: int = Field(
+        description="Lower bound on gpus: per-node requests counted once "
+                    "each (times nodes where declared).")
+
+
 class PartitionsResponse(BaseModel):
     window: Window
     step: int
@@ -192,6 +204,16 @@ class PartitionsResponse(BaseModel):
     trend: Dict[str, List[Tuple[float, float]]] = Field(
         description="Per-group utilization trend series, keyed by group "
                     "name.")
+    queue: Dict[str, QueueGroup] = Field(
+        default_factory=dict,
+        description="Pending-job queue per partition-view group; empty "
+                    "when squeue was reachable and reported no pending "
+                    "jobs.")
+    queue_available: bool = Field(
+        default=True,
+        description="False when the squeue snapshot failed (squeue "
+                    "missing or erroring) — ``queue`` is then empty and "
+                    "must not be read as an empty queue.")
 
 
 class VramRecord(BaseModel):
