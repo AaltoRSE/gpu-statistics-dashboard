@@ -179,6 +179,7 @@
               <tbody></tbody>
             </table>
           </div>
+          <div class="hint">Rows are per-partition placements: a job requesting several partitions appears in each, so its GPU request counts toward every row it could fill &mdash; column sums therefore over-count shared jobs. The header&rsquo;s pending-job count is the unique number of queued jobs.</div>
           <div class="hint" id="pQueueHint" hidden>squeue is unreachable &mdash; the queue status is unavailable, which is not the same as an empty queue.</div>
         </div>
 
