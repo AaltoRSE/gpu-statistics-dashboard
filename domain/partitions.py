@@ -4,6 +4,7 @@ current node state, and a node's live-job-start window.
 
 from collections import defaultdict
 from datetime import datetime
+from zoneinfo import ZoneInfo
 
 import cache
 import deps
@@ -13,11 +14,24 @@ from prom import PrometheusError
 from promql import label_eq, label_in, selector
 from slurm import SlurmError
 
+_SLURM_TZ = ZoneInfo("Europe/Helsinki")
+
 
 def _sacct_epoch(value):
     """sacct start/end string to epoch seconds; None when missing/invalid."""
     try:
         return datetime.fromisoformat(value).timestamp()
+    except (TypeError, ValueError):
+        return None
+
+
+def _slurm_epoch(value):
+    """Slurm controller's Helsinki-local timestamp to epoch seconds."""
+    try:
+        parsed = datetime.fromisoformat(value)
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=_SLURM_TZ)
+        return parsed.timestamp()
     except (TypeError, ValueError):
         return None
 
@@ -90,6 +104,52 @@ def partition_window(since_hours, running_only=False, now=None,
     return out, trend_out, instances, occupancy, start, now, step
 
 
+def partition_queue(jobs, start, now):
+    """Current pending jobs submitted in the selected window, by partition.
+
+    Queue state comes from the Slurm controller rather than Prometheus: a
+    pending job has no GPU-utilization series. ``submitted`` is mandatory so
+    the selected window has a precise meaning and no unknown-age job is
+    represented with a misleading wait duration.
+    """
+    queued = []
+    summaries = {}
+    for job in jobs.values():
+        if job.get("state") != "PENDING":
+            continue
+        submitted = _slurm_epoch(job.get("submitted"))
+        partition = job.get("partition")
+        if submitted is None or submitted < start or submitted > now or not partition:
+            continue
+        wait_s = max(0, int(now - submitted))
+        row = {
+            "jobid": job["jobid"],
+            "name": job.get("name") or "",
+            "user": job.get("user") or "",
+            "account": job.get("account") or "",
+            "partition": partition,
+            "gpus": int(job.get("gpus") or 0),
+            "submitted": job.get("submitted") or "",
+            "wait_s": wait_s,
+        }
+        queued.append(row)
+        summary = summaries.setdefault(partition, {
+            "queue_job_count": 0,
+            "queue_gpus": 0,
+            "queue_wait_total_s": 0,
+            "queue_oldest_wait_s": 0,
+        })
+        summary["queue_job_count"] += 1
+        summary["queue_gpus"] += row["gpus"]
+        summary["queue_wait_total_s"] += wait_s
+        summary["queue_oldest_wait_s"] = max(summary["queue_oldest_wait_s"], wait_s)
+    queued.sort(key=lambda job: (-job["wait_s"], job["jobid"]))
+    for summary in summaries.values():
+        summary["queue_avg_wait_s"] = round(
+            summary.pop("queue_wait_total_s") / summary["queue_job_count"])
+    return queued, summaries
+
+
 def aggregate_partition_stats(stats, node_gpu_types=None, aliases=None):
     """Time-weighted mean utilization per GPU group from collapsed-max series.
 
@@ -125,6 +185,24 @@ def aggregate_partition_stats(stats, node_gpu_types=None, aliases=None):
         })
     out.sort(key=lambda p: p["mean_util"], reverse=True)
     return out
+
+
+def apply_queue_metrics(groups, summaries):
+    """Attach the current pending-queue summary to utilization groups."""
+    groups_by_name = {group["name"]: group for group in groups}
+    for name in summaries:
+        if name not in groups_by_name:
+            group = {"name": name, "mean_util": 0.0, "max_util": 0.0,
+                     "job_count": 0}
+            groups.append(group)
+            groups_by_name[name] = group
+    for group in groups:
+        summary = summaries.get(group["name"], {})
+        group["queue_job_count"] = summary.get("queue_job_count", 0)
+        group["queue_gpus"] = summary.get("queue_gpus", 0)
+        group["queue_avg_wait_s"] = summary.get("queue_avg_wait_s")
+        group["queue_oldest_wait_s"] = summary.get("queue_oldest_wait_s", 0)
+    return groups
 
 
 def _node_gres(node):

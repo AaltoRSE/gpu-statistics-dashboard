@@ -8,7 +8,7 @@
 "use strict";
 
 import { $ } from "../core/dom.js";
-import { escapeHtml, fmtInt, pctBar, html, raw, compareStrings, tsToDate, partitionLink } from "../core/format.js";
+import { escapeHtml, fmtDuration, fmtInt, pctBar, html, raw, compareStrings, tsToDate, partitionLink } from "../core/format.js";
 import { setResultsLoading, showPanelError, panelOk } from "../core/panel.js";
 import { renderPlot, plotTheme, partBarColor } from "../core/plot.js";
 import { api } from "../core/api.js";
@@ -79,7 +79,10 @@ export async function loadPartitions() {
   partTrendData = data.trend;
   partTrendStep = data.step;
   applyPartitionSelection(selectedPartition);
-  renderPartTable();
+  renderPartTable(data.queued_jobs);
+  const queued = data.queued_jobs.length;
+  $("pQueueCount").textContent = queued + " queued job" + (queued === 1 ? "" : "s") +
+    " submitted in this window";
   loaded.partitions = true;
   // The summary panel is unblocked as soon as its response renders; the
   // VRAM distribution then fetches independently under its own panel.
@@ -223,9 +226,44 @@ function partRowHtml(p) {
       <td>${raw(partitionLink(p.name))}</td>
       <td class="num" title="allocated / total GPUs">${p.gpus_alloc}/${p.gpus_total}</td>
       <td class="num">${fmtInt(p.job_count)}</td>
+      <td class="num">${fmtInt(p.queue_job_count)}</td>
+      <td class="num">${fmtDuration(p.queue_avg_wait_s)}</td>
+      <td class="num">${fmtInt(p.queue_gpus)}</td>
+      <td class="num">${fmtDuration(p.queue_oldest_wait_s)}</td>
       <td class="num">${raw(pctBar(p.mean_util))}</td>
     </tr>`;
 }
+
+
+function queueRowHtml(job) {
+  return html`
+    <tr>
+      <td>${job.jobid}</td>
+      <td>${job.name || "—"}</td>
+      <td>${job.user || "—"}</td>
+      <td>${job.account || "—"}</td>
+      <td class="num">${fmtInt(job.gpus)}</td>
+      <td class="num">${fmtDuration(job.wait_s)}</td>
+    </tr>`;
+}
+
+
+function queueTableEmptyMessage() {
+  return { text: "No pending jobs were submitted in this window.", resetLabel: null };
+}
+
+
+const queueTable = createTable({
+  el: $("queueTable"),
+  columns: [
+    { key: "jobid", type: "text" }, { key: "name", type: "text" },
+    { key: "user", type: "text" }, { key: "account", type: "text" },
+    { key: "gpus", type: "number" }, { key: "wait_s", type: "number" },
+  ],
+  defaultSort: { key: "wait_s", dir: "desc" },
+  renderRow: queueRowHtml,
+  emptyMessage: queueTableEmptyMessage,
+});
 
 function partRowClick(e, tr) {
   openPartition(tr.dataset.partition);
@@ -239,7 +277,10 @@ const partTable = createTable({
   el: $("partTable"),
   columns: [
     { key: "name", type: "text" }, { key: "gpus_total", type: "number" },
-    { key: "job_count", type: "number" }, { key: "mean_util", type: "number" },
+    { key: "job_count", type: "number" }, { key: "queue_job_count", type: "number" },
+    { key: "queue_avg_wait_s", type: "number" }, { key: "queue_gpus", type: "number" },
+    { key: "queue_oldest_wait_s", type: "number" },
+    { key: "mean_util", type: "number" },
   ],
   defaultSort: { key: "mean_util", dir: "desc" },
   renderRow: partRowHtml,
@@ -247,8 +288,9 @@ const partTable = createTable({
   emptyMessage: partTableEmptyMessage,
 });
 
-function renderPartTable() {
+function renderPartTable(queuedJobs) {
   partTable.setRows(partRows);
+  queueTable.setRows(queuedJobs);
 }
 
 function partControlsChanged() { loadPartitions(); }

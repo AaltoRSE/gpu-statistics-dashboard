@@ -336,11 +336,11 @@ SCTRL_JOB_SAMPLE = (
     "JobId=100 JobName=train UserId=alice(1001) GroupId=alice(1001) Account=acc "
     "QOS=normal JobState=RUNNING NodeList=gpu1-2 NumNodes=2 NumCPUs=16 "
     "RunTime=01:02:03 StartTime=2026-08-30T10:00:00 EndTime=2026-08-31T10:00:00 "
-    "Partition=gpu-h100 AllocTRES=cpu=16,gres/gpu:h100=4\n"
+    "SubmitTime=2026-08-30T09:00:00 Partition=gpu-h100 AllocTRES=cpu=16,gres/gpu:h100=4\n"
     "JobId=201 JobName=arr UserId=bob(1002) GroupId=bob(1002) Account=acc "
     "QOS=normal JobState=PENDING NodeList= NumNodes=1 NumCPUs=4 "
     "RunTime=00:00:00 StartTime=Unknown EndTime=Unknown Partition=batch "
-    "AllocTRES=cpu=4\n"
+    "ReqTRES=cpu=4,gres/gpu:h100=2 AllocTRES=cpu=4\n"
     "JobId=202 ArrayJobId=201 ArrayTaskId=0-224 JobName=arr UserId=bob(1002) "
     "GroupId=bob(1002) Account=acc QOS=normal JobState=PENDING NodeList= "
     "NumNodes=1 NumCPUs=4 RunTime=00:00:00 StartTime=Unknown EndTime=Unknown "
@@ -363,6 +363,7 @@ def test_parse_scontrol_jobs_normal_job():
     assert j["end"] == ""  # projected end hidden for RUNNING
     assert j["elapsed_s"] == 3723
     assert j["gpus"] == 4 and j["gpu_type"] == "h100"
+    assert j["submitted"] == "2026-08-30T09:00:00"
     assert j["node_list"] == "gpu1-2"
     assert j["ncpus"] == 16
 
@@ -376,6 +377,7 @@ def test_parse_scontrol_jobs_array_tasks_share_parent():
     assert t["array_task_id"] == "0-224"
     # PENDING: no start/end, no runtime
     assert t["start"] == "" and t["end"] == "" and t["elapsed_s"] == 0
+    assert p["gpus"] == 2 and p["gpu_type"] == "h100"
     assert t["node_list"] == ""
 
 

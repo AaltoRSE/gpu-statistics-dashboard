@@ -7,7 +7,8 @@ import deps
 import gpu_groups
 from api.schemas import PartitionsResponse, VramResponse
 from domain.common import window
-from domain.partitions import gpu_capacity, node_current, partition_window
+from domain.partitions import (apply_queue_metrics, gpu_capacity, node_current,
+                               partition_queue, partition_window)
 from domain.vram import vram_job_records
 
 router = APIRouter()
@@ -21,6 +22,10 @@ def api_partitions(since_hours: float = Query(24, gt=0, le=168),
     groups, trend, instances, occupancy, start, now, step = partition_window(
         since_hours, running_only, node_gpu_types=node_types)
     _, _, allocs_by_node, allocs_by_group = node_current(node_types)
+    queued_jobs, queue_summaries = partition_queue(
+        deps.route_cache.get_or_set(cache.scontrol_jobs_key(), 30, deps.show_jobs),
+        start, now)
+    apply_queue_metrics(groups, queue_summaries)
     gpu_capacity(groups, instances, nodes, allocs_by_group)
     for g in groups:
         avg_alloc = occupancy.get(g["name"])
@@ -34,6 +39,7 @@ def api_partitions(since_hours: float = Query(24, gt=0, le=168),
         "step": step,
         "partitions": groups,
         "trend": trend,
+        "queued_jobs": queued_jobs,
     }
 
 

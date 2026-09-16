@@ -174,13 +174,35 @@
             <thead><tr>
               <th data-k="name">Partition</th>
               <th class="num" data-k="gpus_total" title="allocated / total GPUs">GPUs</th>
-              <th class="num" data-k="job_count">Jobs</th>
+              <th class="num" data-k="job_count">Window jobs</th>
+              <th class="num" data-k="queue_job_count">Queued</th>
+              <th class="num" data-k="queue_avg_wait_s">Avg wait</th>
+              <th class="num" data-k="queue_gpus">Queued GPUs</th>
+              <th class="num" data-k="queue_oldest_wait_s">Longest wait</th>
               <th class="num" data-k="mean_util">Mean util %<button type="button" class="glossary-btn" data-glossary="mean-util" title="What is this?">?</button></th>
             </tr></thead>
             <tbody></tbody>
           </table>
         </div>
-        <div class="hint">Mean utilization is time-weighted over the window; GPU devices are collapsed to a per-job/per-node max, so it measures &ldquo;how busy&rdquo; rather than aggregate GPU-hours. Mean occupancy is the window-average share of the partition&rsquo;s capacity with an active job. GPUs show allocated/total capacity of the partition&rsquo;s nodes. Select a partition to scope the trend and the VRAM distribution to it.</div>
+        <div class="hint">Window jobs are jobs with GPU utilization observed during the selected window. Queue metrics come from the current Slurm controller snapshot and include pending jobs submitted in the selected window. Mean utilization is time-weighted over the window; GPU devices are collapsed to a per-job/per-node max, so it measures &ldquo;how busy&rdquo; rather than aggregate GPU-hours. Mean occupancy is the window-average share of the partition&rsquo;s capacity with an active job. GPUs show allocated/total capacity of the partition&rsquo;s nodes. Select a partition to scope the trend and the VRAM distribution to it.</div>
+      </div>
+
+      <div class="card" style="margin-top:14px">
+        <h2>Pending queue <span class="small" id="pQueueCount"></span></h2>
+        <div class="table-scroll">
+          <table id="queueTable">
+            <thead><tr>
+              <th data-k="jobid">Job</th>
+              <th data-k="name">Name</th>
+              <th data-k="user">User</th>
+              <th data-k="account">Account</th>
+              <th class="num" data-k="gpus">GPUs</th>
+              <th class="num" data-k="wait_s">Waiting</th>
+            </tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+        <div class="hint">Ordered by current waiting time. Jobs without a known submission time are excluded so the selected window stays accurate.</div>
       </div>
       </div>
       <div class="results-loading">Data is loading&hellip;</div>

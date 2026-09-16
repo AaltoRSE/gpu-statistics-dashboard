@@ -7,7 +7,11 @@
       "max_util": 90.0,
       "mean_occupancy": 12.5,
       "mean_util": 85.0,
-      "name": "h200_3g.71gb"
+      "name": "h200_3g.71gb",
+      "queue_avg_wait_s": null,
+      "queue_gpus": 0,
+      "queue_job_count": 0,
+      "queue_oldest_wait_s": 0
     },
     {
       "gpus_alloc": 2,
@@ -16,9 +20,14 @@
       "max_util": 60.0,
       "mean_occupancy": 12.5,
       "mean_util": 36.67,
-      "name": "gpu-h100"
+      "name": "gpu-h100",
+      "queue_avg_wait_s": null,
+      "queue_gpus": 0,
+      "queue_job_count": 0,
+      "queue_oldest_wait_s": 0
     }
   ],
+  "queued_jobs": [],
   "step": 120,
   "trend": {
     "gpu-h100": [

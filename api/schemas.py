@@ -184,11 +184,38 @@ class PartitionRow(BaseModel):
         description="Window-average share of gpus_total with an active "
                     "job (%); null when capacity is unknown.")
 
+    queue_job_count: int = Field(
+        description="Current pending jobs submitted within the selected "
+                    "window.")
+    queue_gpus: int = Field(
+        description="GPUs requested by the current pending jobs in the "
+                    "selected window.")
+    queue_avg_wait_s: Optional[int] = Field(
+        default=None,
+        description="Mean current wait in seconds for pending jobs submitted "
+                    "within the selected window; null when the queue is empty.")
+    queue_oldest_wait_s: int = Field(
+        description="Longest current wait in seconds for pending jobs "
+                    "submitted within the selected window.")
+
+class QueuedJob(BaseModel):
+    jobid: str
+    name: str
+    user: str
+    account: str
+    partition: str
+    gpus: int
+    submitted: str
+    wait_s: int
+
 
 class PartitionsResponse(BaseModel):
     window: Window
     step: int
     partitions: List[PartitionRow]
+    queued_jobs: List[QueuedJob] = Field(
+        description="Current pending jobs submitted within the selected "
+                    "window, ordered by longest wait first.")
     trend: Dict[str, List[Tuple[float, float]]] = Field(
         description="Per-group utilization trend series, keyed by group "
                     "name.")

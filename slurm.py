@@ -296,7 +296,10 @@ def parse_scontrol_jobs(output):
             end = ""
         user = f.get("UserId", "")
         user = re.sub(r"\(\d+\)$", "", user)
-        gpus, gpu_type = parse_alloc_tres(f.get("AllocTRES"))
+        alloc_gpus, alloc_gpu_type = parse_alloc_tres(f.get("AllocTRES"))
+        req_gpus, req_gpu_type = parse_alloc_tres(f.get("ReqTRES"))
+        gpus, gpu_type = (req_gpus, req_gpu_type) if state == "PENDING" else (
+            alloc_gpus, alloc_gpu_type)
         start = f.get("StartTime", "")
         jobs[jobid] = {
             "jobid": jobid,
@@ -313,6 +316,7 @@ def parse_scontrol_jobs(output):
             "gpus": gpus,
             "gpu_type": gpu_type,
             "node_list": f.get("NodeList", "") or "",
+            "submitted": f.get("SubmitTime", "") or "",
             "ncpus": _int(f.get("NumCPUs")),
         }
     return jobs

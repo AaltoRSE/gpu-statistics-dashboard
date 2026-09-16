@@ -685,6 +685,39 @@ def test_partitions_groups_by_partition(client):
     assert "h200_3g.71gb" in data["trend"]
 
 
+def test_partitions_reports_pending_queue_metrics(client, monkeypatch):
+    monkeypatch.setattr(deps, "show_jobs", lambda: {
+        "10": {"jobid": "10", "name": "older", "user": "alice",
+               "account": "acc", "partition": "gpu-h100", "state": "PENDING",
+               "gpus": 2, "submitted": "2026-08-30T12:00:00"},
+        "11": {"jobid": "11", "name": "newer", "user": "bob",
+               "account": "acc", "partition": "gpu-h100", "state": "PENDING",
+               "gpus": 1, "submitted": "2026-08-30T16:00:00"},
+        "12": {"jobid": "12", "name": "old-window", "user": "carol",
+               "account": "acc", "partition": "gpu-h200", "state": "PENDING",
+               "gpus": 4, "submitted": "2026-08-28T12:00:00"},
+        "13": {"jobid": "13", "name": "running", "user": "dave",
+               "account": "acc", "partition": "gpu-h100", "state": "RUNNING",
+               "gpus": 1, "submitted": "2026-08-30T12:00:00"},
+        "14": {"jobid": "14", "name": "queue-only", "user": "erin",
+               "account": "acc", "partition": "gpu-queue", "state": "PENDING",
+               "gpus": 8, "submitted": "2026-08-30T15:00:00"},
+        "15": {"jobid": "15", "name": "future", "user": "frank",
+               "account": "acc", "partition": "gpu-queue", "state": "PENDING",
+               "gpus": 8, "submitted": "2026-08-30T18:00:00"},
+    })
+    data = client.get("/api/partitions", params={"since_hours": 24}).json()
+    by_name = {p["name"]: p for p in data["partitions"]}
+    queue = by_name["gpu-h100"]
+    assert queue["queue_avg_wait_s"] == 12400
+    assert queue["queue_oldest_wait_s"] == 19600
+    queue_only = by_name["gpu-queue"]
+    assert queue_only["job_count"] == 0
+    assert queue_only["queue_job_count"] == 1
+    assert queue_only["queue_gpus"] == 8
+    assert [job["jobid"] for job in data["queued_jobs"]] == ["10", "14", "11"]
+
+
 def test_partitions_gpu_capacity(client):
     by_name = {p["name"]: p for p in
                client.get("/api/partitions",
