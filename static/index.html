@@ -166,6 +166,22 @@
         </div>
       </div>
 
+        <div class="card" style="grid-column:1 / -1; margin-top:14px">
+          <h2>Pending jobs by partition <span class="small" id="pQueueMeta"></span></h2>
+          <div class="table-scroll">
+            <table id="partQueueTable">
+              <thead><tr>
+                <th data-k="name">Partition</th>
+                <th class="num" data-k="jobs" title="jobs waiting to start">Pending</th>
+                <th class="num" data-k="gpus" title="sum of per-node GPU requests &times; requested nodes; null when a job declares no node count">GPUs requested</th>
+                <th class="num" data-k="gpus_min" title="lower bound: each job's per-node request counted at least once">GPUs (min)</th>
+              </tr></thead>
+              <tbody></tbody>
+            </table>
+          </div>
+          <div class="hint" id="pQueueHint" hidden>squeue is unreachable &mdash; the queue status is unavailable, which is not the same as an empty queue.</div>
+        </div>
+
       <div class="card" style="margin-top:14px">
         <h2>Partition table <span class="small" id="pCount"></span>
           <span class="small" data-fresh-for="partitionsResults"></span></h2>

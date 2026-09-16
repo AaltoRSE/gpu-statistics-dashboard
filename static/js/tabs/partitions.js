@@ -1,7 +1,7 @@
 /* Partitions tab: utilization/occupancy bar charts, the trend chart, the
- * partition table and the VRAM-distribution chart. The VRAM panel loads
- * independently under its own results-panel so a slow VRAM query never
- * blocks the rest of the tab.
+ * partition table, the pending-job queue table and the VRAM-distribution
+ * chart. The VRAM panel loads independently under its own results-panel
+ * so a slow VRAM query never blocks the rest of the tab.
  *
  * See tabs/jobs.js for why this module and core/router.js import each
  * other. */
@@ -16,6 +16,8 @@ import { loaded, setUrl, openPartition } from "../core/router.js";
 import { createTable } from "../core/table.js";
 
 let partRows = [];
+let queueRows = [];
+let queueAvailable = true;
 export let partTrendData = {};
 let partTrendStep = 300; // seconds; set from the API response, used to size the smoothing window
 export let selectedPartition = ""; // deep-linked or chosen partition; "" = all
@@ -69,6 +71,9 @@ export async function loadPartitions() {
   if (token !== partitionsToken) return; // a newer request supersedes this one
   panelOk("partitionsResults");
   partRows = data.partitions;
+  queueRows = Object.entries(data.queue || {}).map(([name, q]) =>
+    Object.assign({ name }, q));
+  queueAvailable = data.queue_available !== false;
   const w = data.window;
   $("pCount").textContent = data.partitions.length + " partitions · " +
     ($("pRunning").checked
@@ -80,6 +85,7 @@ export async function loadPartitions() {
   partTrendStep = data.step;
   applyPartitionSelection(selectedPartition);
   renderPartTable();
+  renderPartQueue();
   loaded.partitions = true;
   // The summary panel is unblocked as soon as its response renders; the
   // VRAM distribution then fetches independently under its own panel.
@@ -249,6 +255,50 @@ const partTable = createTable({
 
 function renderPartTable() {
   partTable.setRows(partRows);
+}
+
+
+/* ---------------- Pending jobs (queue status) ----------------
+ * One squeue -t PD snapshot per partitions fetch, aggregated by the
+ * backend into the tab's GPU-group semantics. Unavailable (squeue
+ * failed) renders as its own state — never as an empty queue. */
+
+function queueRowHtml(q) {
+  return html`
+    <tr class="row" data-partition="${q.name}">
+      <td>${raw(partitionLink(q.name))}</td>
+      <td class="num">${fmtInt(q.jobs)}</td>
+      <td class="num">${q.gpus === null ? "unknown" : fmtInt(q.gpus)}</td>
+      <td class="num">${fmtInt(q.gpus_min)}</td>
+    </tr>`;
+}
+
+function queueRowClick(e, tr) {
+  openPartition(tr.dataset.partition);
+}
+
+const partQueueTable = createTable({
+  el: $("partQueueTable"),
+  columns: [
+    { key: "name", type: "text" }, { key: "jobs", type: "number" },
+    { key: "gpus", type: "number" }, { key: "gpus_min", type: "number" },
+  ],
+  defaultSort: { key: "jobs", dir: "desc" },
+  renderRow: queueRowHtml,
+  onRowClick: queueRowClick,
+  emptyMessage: () => ({ text: queueAvailable
+    ? "No pending jobs."
+    : "Queue status unavailable — squeue could not be reached (this is not an empty queue).",
+    resetLabel: null }),
+});
+
+function renderPartQueue() {
+  partQueueTable.setRows(queueRows);
+  $("pQueueHint").hidden = queueAvailable;
+  const total = queueRows.reduce((s, q) => s + q.jobs, 0);
+  $("pQueueMeta").textContent = total
+    ? total + " pending job" + (total === 1 ? "" : "s")
+    : "";
 }
 
 function partControlsChanged() { loadPartitions(); }
