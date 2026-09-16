@@ -17,6 +17,7 @@ import { createTable } from "../core/table.js";
 
 let partRows = [];
 let queueRows = [];
+let queueTotal = null;   // the backend's unique cluster-wide queue figure
 let queueAvailable = true;
 export let partTrendData = {};
 let partTrendStep = 300; // seconds; set from the API response, used to size the smoothing window
@@ -71,8 +72,11 @@ export async function loadPartitions() {
   if (token !== partitionsToken) return; // a newer request supersedes this one
   panelOk("partitionsResults");
   partRows = data.partitions;
-  queueRows = Object.entries(data.queue || {}).map(([name, q]) =>
-    Object.assign({ name }, q));
+  const q = data.queue || {};
+  queueTotal = q.__total__ || null;
+  queueRows = Object.entries(q)
+    .filter(([name]) => name !== "__total__")
+    .map(([name, g]) => Object.assign({ name }, g));
   queueAvailable = data.queue_available !== false;
   const w = data.window;
   $("pCount").textContent = data.partitions.length + " partitions · " +
@@ -292,10 +296,12 @@ const partQueueTable = createTable({
     resetLabel: null }),
 });
 
+
 function renderPartQueue() {
   partQueueTable.setRows(queueRows);
   $("pQueueHint").hidden = queueAvailable;
-  const total = queueRows.reduce((s, q) => s + q.jobs, 0);
+  const total = queueTotal ? queueTotal.jobs
+    : queueRows.reduce((s, q) => s + q.jobs, 0);
   $("pQueueMeta").textContent = total
     ? total + " pending job" + (total === 1 ? "" : "s")
     : "";

@@ -311,22 +311,23 @@ def _pending_partitions(job):
 def pending_queue_summary(jobs):
     """Aggregate pending jobs per partition-view group.
 
-    Returns ``{group: {jobs, gpus, gpus_min}}``. A pending job counts
-    once per partition it requested (%P can be a comma list), so the
-    per-partition job counts show demand in each place a job could run;
-    the group ``gpus`` figure therefore attributes a job's GPU demand to
-    its partition only when that partition is the job's sole target
-    (multi-partition jobs contribute to ``jobs`` but to no single
-    partition's GPU total, which keeps any per-partition sum of ``gpus``
-    an upper bound on real demand rather than an overcount of shared
-    jobs). ``gpus`` itself is the sum of ``gpus * nodes`` — %b is a
-    per-node request (TresPerNode), so the allocation only exists across
-    the job's whole node set. When a GPU job's node count is missing
-    (Slurm's ``N/A`` %D) the GPU total becomes ``None``: the per-node
-    request is real demand, so a fabricated 0 would understate the
-    queue, and the one-node lower bound is disclosed separately as
-    ``gpus_min``. A job naming no GPUs at all (CPU jobs, N/A TRES)
-    contributes nothing to either GPU figure.
+    Returns ``{group: {jobs, gpus, gpus_min}, "__total__": {...}}``. %P
+    may request several partitions (a comma list); the job's eventual
+    nodes are unknowable pre-scheduling, so its demand shows in EVERY
+    partition it asked for — per-row figures are "demand that could land
+    here", not disjoint slices, and only ``__total__``'s ``jobs`` is the
+    unique job count (rows sum to more than it; per-partition rows are
+    never additive cluster-wide). ``gpus`` attributes each GPU job's
+    ``gpus * nodes`` (%b / TresPerNode is a per-node request) to every
+    requested partition on the same basis, so each row answers "how many
+    GPUs are being asked of this partition", at the cost that a
+    multi-partition job's request appears in each of its rows — the
+    ``__total__`` entry is the de-duplicated cluster-wide view. When a
+    GPU job's node count is missing (Slurm's ``N/A`` %D) the exact GPU
+    total becomes ``None``: the per-node request is real demand, so a
+    fabricated 0 would understate the queue, and the one-node lower
+    bound stays in ``gpus_min``. A job naming no GPUs (CPU jobs, N/A
+    TRES) contributes nothing to the GPU figures.
     """
     out = defaultdict(lambda: {"jobs": 0, "gpus": 0, "gpus_unknown": 0,
                                "gpus_min": 0})
@@ -334,14 +335,17 @@ def pending_queue_summary(jobs):
         groups = _pending_partitions(job)
         for g in groups:
             out[g]["jobs"] += 1
-        if not job["gpus"] or len(groups) != 1:
+        out["__total__"]["jobs"] += 1
+        if not job["gpus"]:
             continue
-        key = groups[0]
-        if job["nodes"]:
-            out[key]["gpus"] += job["gpus"] * job["nodes"]
-        else:
-            out[key]["gpus_unknown"] += 1
-        out[key]["gpus_min"] += job["gpus"] * max(1, job["nodes"])
+        gpu_total = job["gpus"] * job["nodes"] if job["nodes"] else None
+        gpu_min = job["gpus"] * max(1, job["nodes"])
+        for key in groups + ["__total__"]:
+            if gpu_total is None:
+                out[key]["gpus_unknown"] += 1
+            else:
+                out[key]["gpus"] += gpu_total
+            out[key]["gpus_min"] += gpu_min
     for g in out.values():
         if g["gpus_unknown"]:
             # a per-node request is real demand even when %D is N/A:

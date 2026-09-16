@@ -734,10 +734,11 @@ def test_partitions_running_only_empty_when_no_live_ids(client, fake_prom):
     data = r.json()
     assert data["partitions"] == [] and data["trend"] == {}
 
+
 def test_partitions_queue_summary(client, fake_prom, monkeypatch):
     # A GPU job on one partition, a MIG-profile request, a multi-partition
-    # request (counted in both, GPU demand attributed to neither), a CPU
-    # job, and a GPU job with N/A %D (exact total unknowable -> null).
+    # request (counted and GPU-attributed in both), a CPU job, and a GPU
+    # job with N/A %D (exact total unknowable -> null).
     monkeypatch.setattr(deps, "queue_pending", lambda: [
         {"jobid": "10", "partition": "gpu-h100", "state": "PENDING",
          "submit": "", "start": "", "reason": "(Resources)",
@@ -746,8 +747,8 @@ def test_partitions_queue_summary(client, fake_prom, monkeypatch):
          "submit": "", "start": "", "reason": "(Resources)",
          "nodes": 4, "gpus": 1, "gpu_type": "h200_3g.71gb"},
         {"jobid": "12", "partition": "batch-csl,batch-skl", "state": "PENDING",
-         "submit": "", "start": "", "reason": "(Priority)", "nodes": 1,
-         "gpus": 0, "gpu_type": ""},
+         "submit": "", "start": "", "reason": "(Priority)", "nodes": 2,
+         "gpus": 2, "gpu_type": "a100"},
         {"jobid": "13", "partition": "gpu-h100", "state": "PENDING",
          "submit": "", "start": "", "reason": "(Dependency)", "nodes": 0,
          "gpus": 8, "gpu_type": "h100"},
@@ -755,14 +756,18 @@ def test_partitions_queue_summary(client, fake_prom, monkeypatch):
     data = client.get("/api/partitions", params={"since_hours": 24}).json()
     assert data["queue_available"] is True
     q = data["queue"]
-    # job 13's unknown node count turns the exact total null; the lower
-    # bound keeps the one-node request (8) plus job 10's 4*2.
+    # gpu-h100: job 10 (4*2) + job 13 (N/A %D) -> exact total null,
+    # lower bound keeps both one-node requests: 8 + 4*2
     assert q["gpu-h100"] == {"jobs": 2, "gpus": None, "gpus_min": 16}
     # a MIG request forms its own group, same as running jobs do
     assert q["h200_3g.71gb"] == {"jobs": 1, "gpus": 4, "gpus_min": 4}
-    # the CPU job counts in both requested partitions, GPU demand nowhere
-    assert q["batch-csl"] == {"jobs": 1, "gpus": 0, "gpus_min": 0}
-    assert q["batch-skl"] == {"jobs": 1, "gpus": 0, "gpus_min": 0}
+    # the multi-partition GPU job (2 GPUs x 2 nodes) counts and its demand
+    # attributes to each requested partition — rows are placements
+    assert q["batch-csl"] == {"jobs": 1, "gpus": 4, "gpus_min": 4}
+    assert q["batch-skl"] == {"jobs": 1, "gpus": 4, "gpus_min": 4}
+    # unique cluster-wide view: 4 pending jobs, exact GPU demand null
+    # (job 13's %D is N/A), lower bound 8 + 4*2 + 2*2 = 24
+    assert q["__total__"] == {"jobs": 4, "gpus": None, "gpus_min": 24}
 
 
 def test_partitions_queue_unavailable_is_not_empty(client, fake_prom,

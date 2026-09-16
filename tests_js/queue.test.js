@@ -36,7 +36,7 @@ function boot({ queue, queueAvailable }, importCacheBust) {
   });
   // cache-bust: each scenario gets a fresh module instance against its
   // own DOM (module-level table bindings would otherwise be frozen to
-  // the first scenario's document).
+  // the first scenario's DOM).
   return import("../static/js/tabs/partitions.js?cb=" + importCacheBust)
     .then(async (mod) => {
       await mod.loadPartitions();
@@ -50,16 +50,19 @@ test("queue table renders grouped pending jobs with an unknown-GPU state", async
     queue: {
       "gpu-a": { jobs: 3, gpus: 12, gpus_min: 12 },
       "h200_3g.71gb": { jobs: 1, gpus: null, gpus_min: 4 },
+      "__total__": { jobs: 4, gpus: 12, gpus_min: 16 },
     },
   }, 1);
   const doc = dom.window.document;
   const rows = doc.querySelectorAll("#partQueueTable tbody tr");
-  assert.equal(rows.length, 2);
+  assert.equal(rows.length, 2); // __total__ is meta, never a row
+  assert.ok(!doc.querySelector("#partQueueTable tbody").textContent.includes("__total__"));
   const text = doc.querySelector("#partQueueTable tbody").textContent;
   assert.match(text, /gpu-a/);
   assert.match(text, /unknown/); // a null exact total is disclosed, not a 0
   assert.match(text, /12/);
   assert.equal(doc.getElementById("pQueueHint").hidden, true);
+  // the meta line is the UNIQUE cluster-wide count from __total__
   assert.match(doc.getElementById("pQueueMeta").textContent, /4 pending jobs/);
 });
 
