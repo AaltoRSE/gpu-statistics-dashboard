@@ -27,7 +27,8 @@ def _queue_snapshot():
     pending" from "the queue is unreadable".
     """
     try:
-        jobs = deps.route_cache.get_or_set("queue_pending", 30, deps.queue_pending)
+        jobs = deps.route_cache.get_or_set(
+            cache.queue_pending_key(), 30, deps.queue_pending)
     except SlurmError:
         return {}, False
     return pending_queue_summary(jobs), True

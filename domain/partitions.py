@@ -274,33 +274,18 @@ def node_job_start(name, now):
     return max(min(starts), now - 7 * 86400)
 
 
-def _pending_group(job, node_gpu_types):
-    """Canonical partition-view group for one pending job.
-
-    The tab's own groups are the Slurm partition, except that a request
-    for MIG GPUs (an ``h200_3g.71gb``-shaped TresPerNode type) forms its
-    own profile group — the same split ``job_gpu_group`` applies to
-    running jobs, derived here from the request instead of observed
-    nodes. A job naming no GPU type lands on its Slurm partition; a job
-    naming GPU types whose nodes are all MIG-profiled would resolve
-    through the partition of its eventual nodes, which is unknowable
-    pre-scheduling, so a typed request always keys on the type name.
-    """
-    if gpu_groups.is_mig_gres(job["gpu_type"]):
-        return job["gpu_type"]
-    return job["partition"] or "unknown"
-
-
 def _pending_partitions(job):
     """The partition-view groups one pending job counts toward.
 
     A MIG-profile TresPerNode (``h200_3g.71gb``) forms its own group —
     the same split ``job_gpu_group`` applies to running jobs, derived
-    here from the request instead of observed nodes. Otherwise the job's
-    Slurm partition list (%P may request several, comma-separated) is
-    split: the job's eventual nodes are unknowable pre-scheduling, so it
-    is counted in every partition it asked for. No partition at all
-    resolves to ``unknown``.
+    here from the request instead of observed nodes. Deliberately, such
+    a request keys ONLY on the profile, even when %P lists several
+    partitions: its eventual nodes are unknowable pre-scheduling, so
+    the profile group is the one place the demand is certainly wanted.
+    Otherwise the job's Slurm partition list (%P may request several,
+    comma-separated) is split: the job is counted in every partition it
+    asked for. No partition at all resolves to ``unknown``.
     """
     if gpu_groups.is_mig_gres(job["gpu_type"]):
         return [job["gpu_type"]]
