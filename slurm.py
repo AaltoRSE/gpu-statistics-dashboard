@@ -279,11 +279,11 @@ def parse_tres_per_node(text):
     equals-form AllocTRES ``parse_alloc_tres`` handles (``gres/gpu=4``).
     The untyped form (``gres/gpu:1``) and the typed form
     (``gres/gpu:a100:4``) are distinguished by the type name starting with
-    a letter: a bare ``gres/gpu:1`` parses as count 1 with no type. A
-    name starting with a digit (the bare Prometheus MIG-profile form,
-    ``3g.40gb``) deliberately does NOT count as a type — squeue's %b
-    always emits a letter-initial named type, and consuming a profile
-    name as a count would misread it as a number.
+    a letter: a bare ``gres/gpu:1`` parses as count 1 with no type. This
+    makes the grammar ambiguous for a digit-initial type name (the bare
+    Prometheus MIG-profile form, ``gres/gpu:3g.40gb:2``): it cannot be
+    told apart from an untyped count and is unsupported here — it parses
+    as (0, "") rather than misreading the profile name as a number.
     Non-GPU resources in the same string (``gres/min-vram:40g``,
     ``gres/min-cuda-cc:80``) are ignored.
     """

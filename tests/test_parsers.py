@@ -428,6 +428,10 @@ def test_parse_tres_per_node_both_gres_forms():
     assert parse_tres_per_node("gres/min-vram:40g") == (0, "")
     # a max-count entry's type wins
     assert parse_tres_per_node("gres/gpu:v100:1,gres/gpu:a100:4") == (4, "a100")
+    # a digit-initial type name (the bare Prometheus MIG-profile form) is
+    # grammatically indistinguishable from an untyped count and is
+    # unsupported: it must NOT be misread as a count or a type
+    assert parse_tres_per_node("gres/gpu:3g.40gb:2") == (0, "")
     # N/A / equals-form / empty parse as no GPU request
     assert parse_tres_per_node("N/A") == (0, "")
     assert parse_tres_per_node("gres/gpu=4") == (0, "")
