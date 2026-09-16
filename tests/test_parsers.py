@@ -370,7 +370,7 @@ SCTRL_JOB_SAMPLE = (
     "QOS=normal Priority=1000 JobState=PENDING NodeList= NumNodes=1 NumCPUs=4 "
     "Reason=Resources RunTime=00:00:00 StartTime=Unknown EndTime=Unknown "
     "SubmitTime=2026-08-30T11:00:00 Partition=batch "
-    "TRESPerNode=cpu=4,gres/gpu:v100:2 AllocTRES=cpu=4\n"
+    "TresPerNode=cpu=4,gres/gpu:v100:2 AllocTRES=cpu=4\n"
     "JobId=202 ArrayJobId=201 ArrayTaskId=0-224 JobName=arr UserId=bob(1002) "
     "GroupId=bob(1002) Account=acc QOS=normal JobState=PENDING NodeList= "
     "NumNodes=1 NumCPUs=4 Reason=Priority RunTime=00:00:00 StartTime=Unknown "
@@ -423,12 +423,11 @@ def test_parse_scontrol_jobs_pending_fields_and_tres_per_node():
 
 
 def test_parse_scontrol_jobs_request_fallback_skips_gpuless_sources():
-    # A GPU-less ReqTRES (cpu-only pending request) must not shadow a
-    # TRESPerNode that does carry a GPU entry: the fallback continues
-    # until a source actually contains a GPU.
+    # ``TresPerNode`` is scontrol -o's actual spelling. A GPU-less ReqTRES
+    # must not shadow its GPU request.
     sample = (
         "JobId=400 JobName=x UserId=u(1) Account=a JobState=PENDING "
-        "ReqTRES=cpu=4 TRESPerNode=cpu=4,gres/gpu:v100:2 AllocTRES=\n"
+        "ReqTRES=cpu=4 TresPerNode=cpu=4,gres/gpu:v100:2 AllocTRES=\n"
     )
     j = parse_scontrol_jobs(sample)["400"]
     assert j["requested_gpus"] == 2 and j["requested_gpu_type"] == "v100"

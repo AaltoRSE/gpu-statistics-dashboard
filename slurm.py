@@ -324,8 +324,11 @@ def parse_scontrol_jobs(output):
         # The fallback runs until a source actually carries a GPU entry:
         # a GPU-less ReqTRES (cpu-only pending request) must not shadow a
         # TRESPerNode/AllocTRES that does carry one.
-        for source in (f.get("ReqTRES"), f.get("TRESPerNode"),
-                       f.get("AllocTRES")):
+        # Slurm's compact output spells this ``TresPerNode`` (capital T,
+        # lower-case res); accept the all-caps variant too for older
+        # controllers. GPU-only requests may carry their GRES solely here.
+        for source in (f.get("ReqTRES"), f.get("TresPerNode"),
+                       f.get("TRESPerNode"), f.get("AllocTRES")):
             requested_gpus, requested_gpu_type = parse_gpu_request(source)
             if requested_gpus:
                 break
