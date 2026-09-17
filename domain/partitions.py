@@ -4,6 +4,7 @@ current node state, and a node's live-job-start window.
 
 from collections import defaultdict
 from datetime import datetime
+from zoneinfo import ZoneInfo
 
 import cache
 import deps
@@ -14,12 +15,23 @@ from promql import label_eq, label_in, selector
 from slurm import SlurmError
 
 
+CLUSTER_TZ = ZoneInfo("Europe/Helsinki")
+"""sacct prints naive cluster-local (Europe/Helsinki) strings; interpret
+them on that wall clock, never the process's (deployment hosts vary)."""
+
+
 def _sacct_epoch(value):
-    """sacct start/end string to epoch seconds; None when missing/invalid."""
+    """A sacct Europe/Helsinki-naive string to epoch seconds; None when
+    missing/invalid."""
     try:
-        return datetime.fromisoformat(value).timestamp()
+        naive = datetime.fromisoformat(value)
     except (TypeError, ValueError):
         return None
+    if naive.tzinfo is not None:
+        return naive.timestamp()
+    return naive.replace(tzinfo=CLUSTER_TZ).timestamp()
+
+
 
 
 WAIT_TOTAL_KEY = "__total__"

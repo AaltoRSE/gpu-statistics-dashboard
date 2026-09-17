@@ -8,7 +8,6 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from config import _read_jobgraph_conf  # noqa: E402
 from slurm import (  # noqa: E402
     SACCT_FIELDS,
-    SQUEUE_QUEUE_FMT,
     _parse_kv_block,
     _parse_sacct_row,
     expand_node_list,
@@ -18,9 +17,11 @@ from slurm import (  # noqa: E402
     parse_scontrol_jobs,
     parse_scontrol_nodes,
     parse_scontrol_partitions,
-    parse_squeue_queue,
+    parse_squeue_json,
     parse_tres_per_node,
 )
+
+import json
 
 
 def test_expand_node_list_range_and_list():
@@ -442,31 +443,96 @@ def test_parse_tres_per_node_both_gres_forms():
     assert parse_tres_per_node("") == (0, "")
 
 
-def test_parse_squeue_queue_rows():
-    lines = (
-        "20276510|jdoe|gpu-a100-80g|PENDING|2026-09-16T10:00:00"
-        "|2026-09-17T21:00:00|(Resources)|2|gres/gpu:a100:4\n"
-        "20291030|jsmith|batch-bdw|PENDING|2026-09-16T17:38:14|N/A"
-        "|(Dependency)|1|N/A\n"
-        "18162157|jdoe|gpu-a100-80g|PENDING|2026-06-01T14:20:39"
-        "|2026-09-16T23:19:23|(DependencyNeverSatisfied)|1|gres/gpu:1\n"
-    )
-    rows = parse_squeue_queue(lines)
-    assert [r["jobid"] for r in rows] == ["20276510", "20291030", "18162157"]
+def _ts(epoch):
+    """A squeue --json timestamp object; None encodes unset."""
+    return ({"set": True, "infinite": False, "number": epoch}
+            if epoch is not None
+            else {"set": False, "infinite": False, "number": 0})
+
+
+def _queue_json(jobs):
+    return json.dumps({"jobs": jobs, "errors": [], "warnings": []})
+
+
+def _sjob(jid, user, part, tpn="", tpj="", submit=1789635165,
+          start=None, nodes=1, reason="Priority"):
+    return {
+        "job_id": jid, "user_name": user, "partition": part,
+        "job_state": ["PENDING"],
+        "submit_time": _ts(submit), "start_time": _ts(start),
+        "state_reason": reason,
+        "node_count": {"set": True, "infinite": False, "number": nodes},
+        "tres_per_node": tpn, "tres_per_job": tpj,
+    }
+
+
+def test_parse_squeue_json_rows():
+    # The four request shapes from the live cluster: typed tres-per-node,
+    # none, untyped tres-per-node, and the TresPerJob-only bug shape
+    # (constraints-only tres-per-node with the real gres/gpu:1 in
+    # tres-per-job). A long partition list must survive verbatim (JSON
+    # never truncates; fixed-width text columns did).
+    long_part = "gpu-h100-80g,gpu-a100-80g,gpu-h200-141g-short"
+    payload = _queue_json([
+        _sjob(20276510, "jdoe", "gpu-a100-80g", "gres/gpu:a100:4",
+              submit=1789632000, start=1789707600, nodes=2,
+              reason="Resources"),
+        _sjob(20291030, "jsmith", "batch-bdw", reason="Dependency"),
+        _sjob(18162157, "jdoe", "gpu-a100-80g", "gres/gpu:1",
+              submit=1780314039),
+        _sjob(20300658, "bperson", long_part,
+              "gres/min-vram:80g", "gres/gpu:1"),
+    ])
+    rows = parse_squeue_json(payload)
+    assert [r["jobid"] for r in rows] == ["20276510", "20291030",
+                                          "18162157", "20300658"]
     assert rows[0] == {
         "jobid": "20276510", "user": "jdoe", "partition": "gpu-a100-80g",
         "state": "PENDING",
-        "submit": "2026-09-16T10:00:00", "start": "2026-09-17T21:00:00",
-        "reason": "(Resources)", "nodes": 2, "gpus": 4, "gpu_type": "a100"}
-    # N/A start parses empty; N/A TRES parses zero GPUs
-    assert rows[1]["start"] == "" and rows[1]["gpus"] == 0
+        "submit": "2026-09-17T11:00:00", "start": "2026-09-18T08:00:00",
+        "reason": "Resources", "nodes": 2, "gpus": 4, "gpu_type": "a100"}
+    # unset start parses empty; no TRES anywhere parses zero GPUs
     assert rows[1]["user"] == "jsmith"
     # the untyped GRES form parses count without a type
     assert rows[2]["gpus"] == 1 and rows[2]["gpu_type"] == ""
-    assert parse_squeue_queue("") == []
-    assert parse_squeue_queue("garbage|line") == []
-    # a 9-field row is required: an 8-field remnant (pre-%u format) is skipped
-    assert len(parse_squeue_queue(lines.replace("jsmith|", "", 1))) == 2
+    # the union: tres-per-node has no GPU, tres-per-job does — the
+    # richer result wins, so the job is counted as real GPU demand
+    assert rows[3]["gpus"] == 1 and rows[3]["gpu_type"] == ""
+    # the full partition list survives
+    assert rows[3]["partition"] == long_part
+    assert parse_squeue_json('{"jobs": []}') == []
+    assert parse_squeue_json("{}") == []
+
+
+def test_parse_squeue_json_tres_union_precedence():
+    # Both fields carry GPUs: higher count wins; equal counts prefer
+    # the typed request.
+    def row(tpn, tpj):
+        return parse_squeue_json(_queue_json(
+            [_sjob(100, "u", "gpu-h200", tpn, tpj)]))[0]
+    j = row("gres/gpu:1", "gres/gpu:4")
+    assert j["gpus"] == 4 and j["gpu_type"] == ""
+    j = row("gres/gpu:1", "gres/gpu:h200:1")
+    assert j["gpus"] == 1 and j["gpu_type"] == "h200"
+    j = row("gres/gpu:h200:2", "gres/gpu:1")
+    assert j["gpus"] == 2 and j["gpu_type"] == "h200"
+
+
+def test_parse_squeue_json_timestamps_are_cluster_local():
+    # squeue --json epochs are absolute; sacct prints Europe/Helsinki
+    # naive strings and the dashboard header promises that wall clock.
+    # The parse must be TZ-independent (no process-TZ leakage) and must
+    # NOT read the epoch as UTC.
+    # 1789635165 = 2026-09-17T08:52:45Z = 11:52:45 Helsinki.
+    row = parse_squeue_json(_queue_json(
+        [_sjob(20300658, "b", "gpu-h100", "gres/gpu:1",
+               submit=1789635165, start=1789665248)]))[0]
+    assert row["submit"] == "2026-09-17T11:52:45"
+    assert row["start"] == "2026-09-17T20:14:08"
+    # unset start stays ""
+    row = parse_squeue_json(_queue_json(
+        [_sjob(1, "b", "gpu-h100", "gres/gpu:1", start=None)]))[0]
+    assert row["start"] == ""
 
 
 def test_queue_pending_command(monkeypatch):
@@ -476,12 +542,12 @@ def test_queue_pending_command(monkeypatch):
 
     def fake_run(cmd, timeout=30):
         cmds["cmd"] = cmd
-        return ""
+        return '{"jobs": []}'
 
     monkeypatch.setattr(slurm, "_run", fake_run)
     assert slurm.queue_pending() == []
-    assert cmds["cmd"] == ["squeue", "--all", "--states=PENDING", "--noheader",
-                           "-o", SQUEUE_QUEUE_FMT]
+    assert cmds["cmd"] == ["squeue", "--json", "--all",
+                           "--states=PENDING"]
 
 
 

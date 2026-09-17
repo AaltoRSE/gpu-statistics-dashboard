@@ -348,7 +348,11 @@ def client(fake_prom):
 
 
 def _epoch(s):
-    return datetime.fromisoformat(s).timestamp()
+    # sacct/squeue strings are Europe/Helsinki-naive (the cluster wall
+    # clock); interpret them the way domain._sacct_epoch does, not on
+    # the process TZ.
+    from domain.partitions import _sacct_epoch
+    return _sacct_epoch(s)
 
 
 def test_health(client):

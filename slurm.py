@@ -5,10 +5,13 @@ jobs, so job discovery comes from Prometheus labels and ``sacct -j <id>`` is
 used for per-job metadata. All calls are read-only.
 """
 
+import datetime
+import json
 import re
 import shutil
 import subprocess
 from concurrent.futures import ThreadPoolExecutor
+from zoneinfo import ZoneInfo
 
 SACCT_FIELDS = [
     "JobID",
@@ -298,55 +301,95 @@ def parse_tres_per_node(text):
     return gpus, gpu_type
 
 
-SQUEUE_QUEUE_FMT = "%i|%u|%P|%T|%V|%S|%R|%D|%b"
+def queue_pending():
+    """Pending (PD) jobs from ``squeue --json``, hidden partitions included.
 
-
-def parse_squeue_queue(output):
-    """Parse ``squeue -o <SQUEUE_QUEUE_FMT>`` output into a list of
-    pending-job dicts.
-
-    ``%b`` (TresPerNode) is parsed to ``gpus`` (the per-node GPU count)
-    and ``gpu_type``; non-GPU TRES entries are dropped there. Rows whose
-    TresPerNode names no GPU (plain ``gres/min-vram:...`` CPU jobs) are
-    kept with ``gpus=0`` so the queue depth stays exact. A blank or
-    ``N/A`` estimated start time stays ``""``.
+    JSON (not ``-o``/``-O`` text) because the GPU request can live in
+    either of two fields — ``tres_per_node`` (the classic ``%b``) or
+    ``tres_per_job`` (job-level, no ``-o`` short code; Slurm 25.11 keeps
+    a constraints-only ``gres/min-vram:...`` request there alongside the
+    real ``gres/gpu:1``) — and fixed-width text columns truncate long
+    partition lists, which would silently drop eligibility types.
+    ``--all`` is the code-side correction for a queue that is present
+    but absent from the default view. Raises ``SlurmError`` when squeue
+    is unavailable or fails; callers must surface that as an error
+    state, not an empty queue.
     """
+    return parse_squeue_json(_run(
+        ["squeue", "--json", "--all", "--states=PENDING"], timeout=15))
+
+
+def _tres_epoch(ts):
+    """A squeue --json timestamp object to epoch seconds, or None."""
+    if not isinstance(ts, dict) or not ts.get("set") or ts.get("infinite"):
+        return None
+    return ts.get("number")
+
+
+def parse_squeue_json(payload):
+    """Parse ``squeue --json`` output into pending-job dicts.
+
+    The dict shape matches the historical ``-o`` parser exactly
+    (``jobid``, ``user``, ``partition``, ``state``, ``submit`` ISO
+    string, ``start`` ISO string or ``""``, ``reason``, ``nodes``,
+    ``gpus``, ``gpu_type``) so callers are format-agnostic.
+
+    GPU demand comes from BOTH TRES fields: a job may state its request
+    as TresPerNode (``%b``, ``gres/gpu:2``) or TresPerJob
+    (``gres/gpu:1``). Each is parsed with ``parse_tres_per_node`` (same
+    colon grammar) and the richer result wins — higher count first,
+    then the typed request at equal counts. Jobs naming no GPU anywhere
+    stay ``gpus=0`` so the queue depth stays exact. A missing/unset
+    start time stays ``""``.
+    """
+    data = json.loads(payload)
     jobs = []
-    for line in output.splitlines():
-        if not line.strip():
-            continue
-        f = line.split("|")
-        if len(f) < 9:
-            continue
-        gpus, gpu_type = parse_tres_per_node(f[8])
+    for j in data.get("jobs", []):
+        node_gpus, node_type = parse_tres_per_node(j.get("tres_per_node") or "")
+        job_gpus, job_type = parse_tres_per_node(j.get("tres_per_job") or "")
+        if job_gpus > node_gpus or (job_gpus == node_gpus
+                                    and job_type and not node_type):
+            gpus, gpu_type = job_gpus, job_type
+        else:
+            gpus, gpu_type = node_gpus, node_type
+        states = j.get("job_state") or [""]
+        submit = _tres_epoch(j.get("submit_time"))
+        start = _tres_epoch(j.get("start_time"))
         jobs.append({
-            "jobid": f[0],
-            "user": f[1],
-            "partition": f[2],
-            "state": f[3],
-            "submit": f[4],
-            "start": f[5] if f[5] not in ("N/A", "Unknown") else "",
-            "reason": f[6].strip(),
-            "nodes": _int(f[7], 0),
+            "jobid": str(j.get("job_id", "")),
+            "user": j.get("user_name") or "",
+            "partition": j.get("partition") or "",
+            "state": states[0] if states else "",
+            # squeue --json epochs are absolute; sacct and the dashboard
+            # header render Europe/Helsinki-local naive strings, so
+            # convert with the fixed cluster offset, never the process
+            # TZ (host TZ varies, sacct does not).
+            "submit": _cluster_iso(submit),
+            "start": _cluster_iso(start),
+            "reason": j.get("state_reason") or "",
+            "nodes": (j.get("node_count") or {}).get("number", 0) or 0,
             "gpus": gpus,
             "gpu_type": gpu_type,
         })
     return jobs
 
 
+CLUSTER_TZ = ZoneInfo("Europe/Helsinki")
+"""The dashboard's display timezone (see static/index.html header)."""
 
-def queue_pending():
-    """Pending (PD) jobs from squeue, hidden partitions included.
 
-    ``--all`` is the code-side correction for a queue that is present but
-    absent from the default view (squeue hides hidden partitions' jobs
-    without it). Raises SlurmError when squeue is unavailable or fails;
-    callers must surface that as an error state, not an empty queue.
+def _cluster_iso(epoch):
+    """Epoch seconds to a naive Europe/Helsinki ISO string, or ``""``.
+
+    Matches sacct's output convention: sacct prints cluster-local
+    naive timestamps regardless of the caller's TZ, so the queue's
+    submit/estimated-start strings must use the same wall clock —
+    never the process's local zone (deployment hosts vary).
     """
-    return parse_squeue_queue(_run(
-        ["squeue", "--all", "--states=PENDING", "--noheader", "-o",
-         SQUEUE_QUEUE_FMT],
-        timeout=15))
+    if not epoch:
+        return ""
+    return datetime.datetime.fromtimestamp(epoch, CLUSTER_TZ) \
+        .replace(tzinfo=None).isoformat()
 
 
 def parse_scontrol_jobs(output):
