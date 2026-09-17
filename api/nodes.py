@@ -9,7 +9,7 @@ from api.schemas import NodeDetailResponse, NodesResponse
 from domain.common import series_payload, step_for_range, window
 from domain.partitions import node_current, node_job_start
 from prom import PrometheusError
-from promql import label_eq, selector
+from promql import label_eq, selector, util_range
 
 router = APIRouter()
 
@@ -65,8 +65,7 @@ def api_node_detail(
 
     def fetch():
         util = prom.query_range(
-            "max by (slurmjobid, gpu) "
-            "(slurm_job_utilization_gpu%s)" % sel,
+            "max by (slurmjobid, gpu) %s" % util_range(sel),
             start, now, step,
         )
         vram = prom.query_range(

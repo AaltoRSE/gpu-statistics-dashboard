@@ -11,7 +11,7 @@ from collections import defaultdict
 import cache
 import deps
 from domain.common import job_window, series_values, step_for_range
-from promql import label_eq, selector
+from promql import label_eq, util_range, selector
 
 
 def fetch_job_window(since_hours, include_vram=True, user=None):
@@ -29,7 +29,7 @@ def fetch_job_window(since_hours, include_vram=True, user=None):
     def fetch():
         util = deps.get_prom().query_range(
             "max by (slurmjobid, instance, job, user, gpu_type) "
-            "(slurm_job_utilization_gpu%s)" % sel,
+            "%s" % util_range(sel),
             start, now, step,
         )
         vram = []

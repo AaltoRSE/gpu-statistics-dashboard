@@ -21,7 +21,7 @@ from domain.metadata import (
     resolve_sacct_metadata,
     resolve_scontrol_metadata,
 )
-from promql import label_eq, selector
+from promql import label_eq, util_range, selector
 from slurm import SlurmError
 
 router = APIRouter()
@@ -119,8 +119,7 @@ def api_job_detail(jobid: str, since_hours: float = Query(24, gt=0, le=168)):
 
     def fetch():
         util = prom.query_range(
-            "max by (slurmjobid, instance, gpu) "
-            "(slurm_job_utilization_gpu%s)" % sel,
+            "max by (slurmjobid, instance, gpu) %s" % util_range(sel),
             start, now, step,
         )
         vram = prom.query_range(

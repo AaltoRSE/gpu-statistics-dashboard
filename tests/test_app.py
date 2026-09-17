@@ -224,13 +224,42 @@ class FakeProm:
          "values": [[1000, "20"], [1120, "22"]]},
     ]
 
+    @staticmethod
+    def _drop_outlier_samples(series):
+        """Emulate the server-side valid-range filter (promql.util_range).
+
+        The real Prometheus evaluates ``((metric >= 0) and (metric <= 100))``
+        before the aggregation sees any series; this fake must do the same
+        or canned poisoned samples would flow into aggregations that the
+        live backend filters out. Drops out-of-range samples from every
+        utilization series; empty series are removed entirely (a vector
+        selector with no matching samples yields no series at all).
+        """
+        out = []
+        for s in series:
+            values = [[ts, v] for ts, v in s["values"]
+                      if 0 <= float(v) <= 100]
+            if values:
+                out.append({"metric": s["metric"], "values": values})
+        return out
+
     def query_range(self, query, start, end, step):
         self.calls.append(("range", query))
         if "slurm_job_utilization_gpu" in query:
+            # The fake emulates the server-side valid-range filter only on
+            # fixtures holding RAW utilization samples (per-job summary,
+            # jobs window, job/node detail). _PART_UTIL_SUMS and
+            # _PART_GPU_COUNTS stand in for Prometheus's own range-filtered
+            # aggregate operands — their values are sums/counts, not
+            # percentages — so they pass through untouched.
+            def filtered(series):
+                return (self._drop_outlier_samples(series)
+                        if ">= 0" in query and "<= 100" in query
+                        else series)
             if 'slurmjobid="' in query:  # job detail: per-device series
-                return self._JOB_DETAIL_UTIL
+                return filtered(self._JOB_DETAIL_UTIL)
             if 'instance="' in query:  # node detail
-                return self._NODE_DETAIL_UTIL
+                return filtered(self._NODE_DETAIL_UTIL)
             if "count by (instance, gpu_type)" in query:
                 ids = self._matchers(query)
                 if ids is None:
@@ -252,9 +281,10 @@ class FakeProm:
                         if (s["metric"]["instance"], s["metric"]["gpu_type"])
                         in allowed]
             if "max by (slurmjobid, instance, gpu_type)" in query:
-                return self._filter(self._PART_SUMMARY, self._matchers(query))
+                return filtered(self._filter(self._PART_SUMMARY,
+                                             self._matchers(query)))
             jobs_util = self._JOBS_UTIL + self.extra_jobs
-            return self._filter(jobs_util, self._matchers(query))
+            return filtered(self._filter(jobs_util, self._matchers(query)))
         if "memory" in query:  # vram
             if "max by (slurmjobid, instance, gpu)" in query:  # job records
                 return self._filter(self._VRAM_GB, self._matchers(query))
@@ -298,7 +328,8 @@ class FakeProm:
                             "gpu_type": "h200_3g.71gb"},
                  "value": [1, "1"]},
             ]
-        if "max by (instance) (slurm_job_utilization_gpu)" in query:
+        if "max by (instance)" in query:
+            # The range-filtered operand: ((metric{...} >= 0) and (... <= 100))
             return [
                 {"metric": {"instance": "gpu1"}, "value": [1, "55.5"]},
                 {"metric": {"instance": "gpu2"}, "value": [1, "10.0"]},
@@ -1659,6 +1690,75 @@ def test_jobs_efficiency_histogram(client):
     assert by_bucket[(90, 100)] == 0.06
     assert sum(v for k, v in by_bucket.items()
                if k not in {(50, 60), (80, 90), (90, 100)}) == 0
+
+
+def test_utilization_outlier_jobs_histogram_and_detail(client, fake_prom):
+    fake_prom.extra_jobs.append({
+        "metric": {"slurmjobid": "5", "instance": "gpu2", "job": "gpu-h100",
+                   "user": "erin", "gpu_type": "h100"},
+        "values": [[1000, "80"], [1120, "1.40737488355328e+16"]],
+    })
+    data = client.get("/api/jobs", params={"since_hours": 24}).json()
+    job = next(j for j in data["jobs"] if j["jobid"] == "5")
+    # The bad sample is dropped before aggregation: mean stays a real
+    # percentage (the surviving 80 sample), not 7e15.
+    assert job["mean_util"] == 80.0
+    assert job["max_util"] == 80.0
+    # gpu_hours_eff counts only the valid sample: 80 * 120s step / 3600 / 100.
+    assert job["gpu_hours_eff"] == 0.03
+    hist = {(b["bucket_start"], b["bucket_end"]): b["gpu_hours"]
+            for b in data["efficiency_histogram"]}
+    # 0.03 lands in 80-90; the poisoned sample would have dumped ~1e13
+    # into 90-100.
+    assert hist[(80, 90)] == 0.09  # job 3's 0.06 + job 5's 0.03
+    assert hist[(90, 100)] == 0.06  # unchanged by the outlier
+
+def test_utilization_outlier_partition_stats_and_trend(client, fake_prom):
+    # A poisoned h100 sample on gpu2 (outlier job 9): 20 at ts 1000, 1.4e16
+    # at ts 1120. The raw per-job series in _PART_SUMMARY is range-filtered
+    # like the server's operand; the aggregate sum/count records for the
+    # same (instance, gpu_type) REPLACE the base fixtures (aggregation sums
+    # per-timestamp over series, so a duplicate key would double-count):
+    # ts1000 = 90 (job 3) + 20 (job 9, valid), ts1120 = 95 (job 3) only —
+    # the outlier's sample vanishes from numerator and denominator alike.
+    fake_prom._PART_SUMMARY = fake_prom._PART_SUMMARY + [{
+        "metric": {"slurmjobid": "9", "instance": "gpu2", "job": "gpu-h100",
+                   "gpu_type": "h100"},
+        "values": [[1000, "20"], [1120, "1.40737488355328e+16"]]},
+    ]
+    fake_prom._PART_UTIL_SUMS = [
+        s for s in fake_prom._PART_UTIL_SUMS
+        if s["metric"].get("instance") != "gpu2"] + [{
+        "metric": {"instance": "gpu2", "gpu_type": "h100"},
+        "values": [[1000, "110"], [1120, "95"]]},
+    ]
+    fake_prom._PART_GPU_COUNTS = [
+        s for s in fake_prom._PART_GPU_COUNTS
+        if s["metric"].get("instance") != "gpu2"] + [{
+        "metric": {"instance": "gpu2", "gpu_type": "h100"},
+        "values": [[1000, "2"], [1120, "1"]]},
+    ]
+    data = client.get("/api/partitions", params={"since_hours": 24}).json()
+    part = next(p for p in data["partitions"] if p["name"] == "h100")
+    # wsum = 90+95+20 = 205 over 3 valid samples (the 1.4e16 dropped).
+    assert part["mean_util"] == 68.33
+    assert part["max_util"] == 95.0
+    trend = {ts: v for ts, v in data["trend"]["h100"]}
+    assert trend[1000] == 55.0  # (90+20)/2 — both valid GPUs
+    assert trend[1120] == 95.0  # outlier's sum AND count dropped
+
+def test_utilization_outlier_job_detail(client, fake_prom):
+    fake_prom._JOB_DETAIL_UTIL = [
+        {"metric": {"slurmjobid": "1", "instance": "gpu1", "gpu": "0"},
+         "values": [[1000, "40"], [1120, "60"]]},
+        {"metric": {"slurmjobid": "1", "instance": "gpu1", "gpu": "1"},
+         "values": [[1000, "20"], [1120, "1.40737488355328e+16"]]},
+    ]
+    data = client.get("/api/jobs/1", params={"since_hours": 24}).json()
+    assert data["mean_util"] == 40.0  # (40+60+20)/3, outlier excluded
+    # gpu_hours_eff: apply_metadata overrides the Prometheus estimate with
+    # the allocation-based figure: 2.0 alloc GPU-hours x 40%.
+    assert data["gpu_hours_eff"] == 0.8
 
 
 def test_jobs_histogram_bounded_by_search(client):

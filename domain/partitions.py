@@ -11,7 +11,7 @@ import deps
 import gpu_groups
 from domain.common import job_window, running_gpu_job_ids, series_values, step_for_range
 from prom import PrometheusError
-from promql import label_eq, label_in, selector
+from promql import label_eq, label_in, util_range, selector
 from slurm import SlurmError, expand_node_list
 
 CLUSTER_TZ = ZoneInfo("Europe/Helsinki")
@@ -72,19 +72,21 @@ def partition_window(since_hours, running_only=False, now=None,
     def fetch():
         stats = deps.get_prom().query_range(
             "max by (slurmjobid, instance, gpu_type) "
-            "(slurm_job_utilization_gpu%s)" % sel,
+            "%s" % util_range(sel),
             start, now, step,
         )
         # Preserve the source instance through aggregation: a raw label
         # resolves against that node's scontrol GRES list before aliases
         # merge into canonical GPU types. Per-timestamp sum/count is the
-        # utilization trend; the count series is occupancy.
+        # utilization trend; the count series is occupancy. All three
+        # operands share the valid-range filter so a dropped outlier
+        # sample vanishes from numerator and denominator alike.
         util_sums = deps.get_prom().query_range(
-            "sum by (instance, gpu_type) (slurm_job_utilization_gpu%s)" % sel,
+            "sum by (instance, gpu_type) %s" % util_range(sel),
             start, now, step,
         )
         gpu_counts = deps.get_prom().query_range(
-            "count by (instance, gpu_type) (slurm_job_utilization_gpu%s)" % sel,
+            "count by (instance, gpu_type) %s" % util_range(sel),
             start, now, step,
         )
         return stats, util_sums, gpu_counts, start, now, step
@@ -262,18 +264,19 @@ def node_current(node_gpu_types=None):
     prom = deps.get_prom()
 
     def fetch():
-        inst_util = prom.query_instant("max by (instance) (slurm_job_utilization_gpu)")
+        inst_util = prom.query_instant(
+            "max by (instance) %s" % util_range())
         inst_vram = prom.query_instant(
             "avg by (instance) (slurm_job_memory_usage_gpu / "
             "slurm_job_memory_total_gpu * 100)"
         )
         active = prom.query_instant(
-            "max by (instance, slurmjobid, job, user) (slurm_job_utilization_gpu)"
-        )
-        # The exporter publishes one utilization series per allocated GPU, so
-        # the series count per node equals the allocated GPU count. The ``gpu``
-        # label is job-local (every 1-GPU job says gpu="0"), so it must not be
-        # used for allocation accounting.
+            "max by (instance, slurmjobid, job, user) %s" % util_range())
+        # The exporter publishes one utilization series per allocated GPU,
+        # so the series count per node equals the allocated GPU count. The
+        # ``gpu`` label is job-local (every 1-GPU job says gpu="0"), so it
+        # must not be used for allocation accounting. Allocations count
+        # series existence, not values, so they keep the raw metric.
         alloc = prom.query_instant(
             "count by (instance, job, gpu_type) (slurm_job_utilization_gpu)")
         return inst_util, inst_vram, active, alloc
