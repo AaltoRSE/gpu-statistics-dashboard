@@ -28,37 +28,6 @@
       "name": "h200"
     }
   ],
-  "queue": {
-    "__total__": {
-      "avg_wait_s": null,
-      "gpus": 0,
-      "gpus_min": 0,
-      "jobs": 0,
-      "started_jobs": 0
-    },
-    "h100": {
-      "avg_wait_s": null,
-      "gpus": 0,
-      "gpus_min": 0,
-      "jobs": 0,
-      "started_jobs": 0
-    },
-    "h200": {
-      "avg_wait_s": null,
-      "gpus": 0,
-      "gpus_min": 0,
-      "jobs": 0,
-      "started_jobs": 0
-    },
-    "h200_3g.71gb": {
-      "avg_wait_s": null,
-      "gpus": 0,
-      "gpus_min": 0,
-      "jobs": 0,
-      "started_jobs": 0
-    }
-  },
-  "queue_available": true,
   "step": 120,
   "trend": {
     "h100": [
@@ -92,8 +61,6 @@
       ]
     ]
   },
-  "wait_history_available": true,
-  "waiting_jobs": [],
   "window": {
     "end": 1788100000,
     "start": 1788013600

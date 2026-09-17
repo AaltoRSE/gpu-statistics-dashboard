@@ -805,31 +805,58 @@ def test_partitions_queue_summary(client, fake_prom, monkeypatch):
          "state": "PENDING", "submit": "2026-08-30T14:26:40", "start": "",
          "reason": "(Resources)", "nodes": 1, "gpus": 1, "gpu_type": ""},
     ])
-    data = client.get("/api/partitions", params={"since_hours": 72}).json()
+    data = client.get("/api/partitions/queue",
+                      params={"since_hours": 72}).json()
     assert data["queue_available"] is True
     assert data["wait_history_available"] is True
     q = data["queue"]
-    # h200: job 10 typed (4*2=8) + job 11 untyped (1*4=4); jobs 1+2
-    # started in-window (3600s waits each) -> avg 3600, sample 2. Job 3's
-    # 2026-08-27T00:00 start is pre-window (72h back is 18:26:40) and
-    # must not contribute.
-    assert q["h200"] == {"jobs": 2, "gpus": 12, "gpus_min": 12,
-                         "started_jobs": 2, "avg_wait_s": 3600}
-    # job 11's untyped request is also eligible for the MIG profile;
-    # job 4 (the in-window MIG start) waited 7200s: submitted 22:00 the
-    # day before its 00:00 start
-    assert q["h200_3g.71gb"] == {"jobs": 1, "gpus": 4, "gpus_min": 4,
-                                 "started_jobs": 1, "avg_wait_s": 7200}
-    # constraints-only row on the h100 partition
-    assert q["h100"] == {"jobs": 1, "gpus": 0, "gpus_min": 0,
-                         "started_jobs": 0, "avg_wait_s": None}
+    # h200: job 10 typed exclusive (4 GPUs, the per-job request) + job 11
+    # untyped flexible (1 GPU in both its rows); jobs 1+2 started
+    # in-window with 3600s waits each -> P50/P90/avg 3600, 2 samples,
+    # both in the 30m-2h bucket. Job 3's 2026-08-27T00:00 start is
+    # pre-window (72h back is 18:26:40) and must not contribute.
+    assert q["h200"]["exclusive_jobs"] == 1
+    assert q["h200"]["flexible_jobs"] == 1
+    assert q["h200"]["eligible_jobs"] == 2
+    assert q["h200"]["exclusive_gpus"] == 4
+    assert q["h200"]["flexible_gpus"] == 1
+    assert q["h200"]["eligible_gpus"] == 5
+    assert q["h200"]["wait_p50_s"] == 3600
+    assert q["h200"]["wait_p90_s"] == 3600
+    assert q["h200"]["wait_avg_s"] == 3600
+    assert q["h200"]["wait_samples"] == 2
+    assert q["h200"]["wait_buckets"]["m30_to_2h"] == 2
+    assert sum(q["h200"]["wait_buckets"].values()) == 2
+    # job 11's untyped request is also eligible for the MIG profile
+    # (flexible there); job 4 (the in-window MIG start) waited 7200s:
+    # submitted 22:00 the day before its 00:00 start
+    assert q["h200_3g.71gb"]["exclusive_jobs"] == 0
+    assert q["h200_3g.71gb"]["flexible_jobs"] == 1
+    assert q["h200_3g.71gb"]["eligible_jobs"] == 1
+    assert q["h200_3g.71gb"]["flexible_gpus"] == 1
+    assert q["h200_3g.71gb"]["wait_p50_s"] == 7200
+    assert q["h200_3g.71gb"]["wait_p90_s"] == 7200
+    assert q["h200_3g.71gb"]["wait_samples"] == 1
+    assert q["h200_3g.71gb"]["wait_buckets"]["h2_to_12h"] == 1
+    # constraints-only row on the h100 partition: 1 job, 0 GPUs, no waits
+    assert q["h100"]["exclusive_jobs"] == 1
+    assert q["h100"]["eligible_jobs"] == 1
+    assert q["h100"]["eligible_gpus"] == 0
+    assert q["h100"]["wait_samples"] == 0
+    assert q["h100"]["wait_p50_s"] is None
     # explicit untyped GPU with no resolvable partition type
-    assert q["unknown"] == {"jobs": 1, "gpus": 1, "gpus_min": 1,
-                            "started_jobs": 0, "avg_wait_s": None}
+    assert q["unknown"]["exclusive_jobs"] == 1
+    assert q["unknown"]["exclusive_gpus"] == 1
+    assert q["unknown"]["wait_samples"] == 0
+    # no pseudo-total row in the public queue map
+    assert "__total__" not in q
     # unique view: 4 GPU-eligible physical jobs (13 excluded); exact GPU
-    # demand 8 + 4 + 0 + 1 = 13; 3 in-window starts (3600+3600+7200)/3
-    assert q["__total__"] == {"jobs": 4, "gpus": 13, "gpus_min": 13,
-                              "started_jobs": 3, "avg_wait_s": 4800}
+    # demand 4 + 1 + 0 + 1 = 6 (single-node per-job requests)
+    assert data["totals"] == {"unique_pending_jobs": 4,
+                              "unique_gpus_requested": 6}
+    # rows overlap (flexible job 11) and must never sum to the totals
+    assert sum(r["eligible_jobs"] for r in q.values()) > \
+        data["totals"]["unique_pending_jobs"]
     waiting = {j["jobid"]: j for j in data["waiting_jobs"]}
     assert set(waiting) == {"10", "11", "12", "14"}  # CPU-only 13 absent
     assert waiting["10"]["groups"] == ["h200"]       # typed beats %P union
@@ -838,11 +865,47 @@ def test_partitions_queue_summary(client, fake_prom, monkeypatch):
     assert waiting["14"]["groups"] == ["unknown"]
     assert waiting["10"]["wait_s"] == NOW - int(_epoch("2026-08-30T12:26:40"))
     assert waiting["11"]["wait_s"] is None          # unparsable submit
-    assert waiting["10"]["gpu_total"] == 8
+    assert waiting["10"]["gpu_total"] == 4          # the per-job request
     assert waiting["12"]["gpu_total"] == 0          # no GPU request
     assert waiting["14"]["gpu_total"] == 1
     # the raw partition string survives as metadata
     assert waiting["10"]["partition"] == "gpu-h200,gpu-h200-ellis"
+
+
+def test_wait_statistics_percentiles_and_buckets():
+    # Unit contract of the statistics helper: P50 is the ordinary median
+    # (mean of the two middle values for an even count), P90 is
+    # nearest-rank ceil(0.9*n), buckets are half-open at 300/1800/7200/
+    # 43200, and no samples reads as null percentiles + zero buckets.
+    import domain.partitions as dp
+    out = dp._wait_statistics([3600, 3600])
+    assert out["wait_p50_s"] == 3600
+    assert out["wait_p90_s"] == 3600
+    # even count with distinct middles: median is their mean
+    out = dp._wait_statistics([100, 200, 300, 400])
+    assert out["wait_p50_s"] == 250
+    # odd sum across an even sample count: integer-ROUNDED, not truncated
+    # ([1, 2] -> 1.5 -> 2, not 1)
+    out = dp._wait_statistics([1, 2])
+    assert out["wait_p50_s"] == 2
+    # nearest-rank P90 of 10 samples is the 9th ordered value
+    out = dp._wait_statistics(list(range(1, 11)))
+    assert out["wait_p90_s"] == 9
+    # exact bucket boundaries land in the upper bucket, never below
+    out = dp._wait_statistics([299, 300, 1799, 1800, 7199, 7200, 43199,
+                               43200])
+    b = out["wait_buckets"]
+    assert b == {"lt_5m": 1, "m5_to_30m": 2, "m30_to_2h": 2,
+                 "h2_to_12h": 2, "gte_12h": 1}
+    # no valid samples: null percentiles, zero buckets (NOT null buckets)
+    out = dp._wait_statistics([])
+    assert out["wait_p50_s"] is None
+    assert out["wait_p90_s"] is None
+    assert out["wait_avg_s"] is None
+    assert out["wait_samples"] == 0
+    assert out["wait_buckets"] == {"lt_5m": 0, "m5_to_30m": 0,
+                                   "m30_to_2h": 0, "h2_to_12h": 0,
+                                   "gte_12h": 0}
 
 
 def test_started_wait_summary_excludes_invalid_records(client, fake_prom,
@@ -850,8 +913,8 @@ def test_started_wait_summary_excludes_invalid_records(client, fake_prom,
     # started_wait_summary accepts only records whose submit and start
     # both parse, whose start falls inclusively inside the window, and
     # whose start is not before submit. Invalid/missing times are excluded
-    # from numerator AND denominator, never read as 0; a group with no
-    # valid job yields started_jobs 0 / avg_wait_s null.
+    # from every statistic, never read as 0; a group with no valid job
+    # yields zero samples and null percentiles.
     import domain.partitions as dp
     recs = {
         # valid: 3600s wait
@@ -862,7 +925,6 @@ def test_started_wait_summary_excludes_invalid_records(client, fake_prom,
         "102": {"submit": "2026-08-30T09:00:00", "start": "Unknown"},
         # start before submit (negative duration)
         "103": {"submit": "2026-08-30T11:00:00", "start": "2026-08-30T10:00:00"},
-        # start exactly at the window boundary is inclusive
         "104": {"submit": "2026-08-27T16:26:40", "start": "2026-08-27T18:26:40"},
     }
     monkeypatch.setattr(deps, "sacct_jobs",
@@ -870,18 +932,44 @@ def test_started_wait_summary_excludes_invalid_records(client, fake_prom,
                         {j: recs[j] for j in ids if j in recs})
     jg = {jid: {"gpu-h100"} for jid in recs}
     out = dp.started_wait_summary(jg, NOW - 72 * 3600, NOW)
-    assert out["gpu-h100"] == {"started_jobs": 2, "avg_wait_s": 5400}
-    assert out["__total__"] == {"started_jobs": 2, "avg_wait_s": 5400}
+    # valid waits: 3600 and 7200 -> median 5400, nearest-rank P90 7200,
+    # one wait in each of the 30m-2h and 2-12h buckets
+    assert out["gpu-h100"] == {"wait_p50_s": 5400, "wait_p90_s": 7200,
+                               "wait_avg_s": 5400, "wait_samples": 2,
+                               "wait_buckets": {"lt_5m": 0, "m5_to_30m": 0,
+                                                "m30_to_2h": 1,
+                                                "h2_to_12h": 1,
+                                                "gte_12h": 0}}
+    assert out["__total__"] == out["gpu-h100"]
+
+
+def test_started_wait_summary_no_observed_jobs(client, fake_prom):
+    # No observed jobs at all: the empty-statistics shape, still keyed
+    # for the __total__ merge.
+    import domain.partitions as dp
+    out = dp.started_wait_summary({}, NOW - 3600, NOW)
+    assert out == {"__total__": dp.wait_empty()}
+    assert out["__total__"]["wait_samples"] == 0
+    assert out["__total__"]["wait_p50_s"] is None
 
 
 def test_partitions_waiting_zero_pending_partition_visible(client, fake_prom):
     # default fixture stub: reachable squeue, zero pending jobs — but the
-    # utilization groups must still appear in the queue summary.
-    data = client.get("/api/partitions", params={"since_hours": 24}).json()
+    # utilization groups must still appear in the queue summary with
+    # genuine zeros (squeue answered: 0 is a real count here).
+    data = client.get("/api/partitions/queue",
+                      params={"since_hours": 24}).json()
     q = data["queue"]
     for name in ("h200", "h100", "h200_3g.71gb"):
-        assert q[name] == {"jobs": 0, "gpus": 0, "gpus_min": 0,
-                           "started_jobs": 0, "avg_wait_s": None}
+        row = q[name]
+        assert row["exclusive_jobs"] == 0 and row["flexible_jobs"] == 0
+        assert row["eligible_jobs"] == 0
+        assert row["exclusive_gpus"] == 0 and row["flexible_gpus"] == 0
+        assert row["eligible_gpus"] == 0
+        assert row["wait_samples"] == 0
+        assert row["wait_p50_s"] is None
+    assert data["totals"] == {"unique_pending_jobs": 0,
+                              "unique_gpus_requested": 0}
     assert data["waiting_jobs"] == []
 
 
@@ -891,12 +979,20 @@ def test_partitions_queue_unavailable_is_not_empty(client, fake_prom,
         raise slurm.SlurmError("squeue is not available")
 
     monkeypatch.setattr(deps, "queue_pending", _boom)
-    data = client.get("/api/partitions", params={"since_hours": 72}).json()
+    data = client.get("/api/partitions/queue",
+                      params={"since_hours": 72}).json()
     assert data["queue_available"] is False
     assert data["waiting_jobs"] == []
+    # pending demand is unknown, never a fabricated 0
+    assert data["totals"] == {"unique_pending_jobs": None,
+                              "unique_gpus_requested": None}
     # sacct history is independent: it still works
     assert data["wait_history_available"] is True
-    assert data["queue"]["__total__"]["started_jobs"] == 3
+    # the utilization group rows keep null pending fields but valid waits
+    assert data["queue"]["h200"]["exclusive_jobs"] is None
+    assert data["queue"]["h200"]["eligible_jobs"] is None
+    assert data["queue"]["h200"]["wait_samples"] == 2
+    assert data["queue"]["h200"]["wait_p50_s"] == 3600
 
 
 def test_partitions_wait_history_unavailable_keeps_queue(client, fake_prom,
@@ -905,21 +1001,78 @@ def test_partitions_wait_history_unavailable_keeps_queue(client, fake_prom,
         raise slurm.SlurmError("sacct is not available")
 
     monkeypatch.setattr(deps, "sacct_jobs", _boom)
-    data = client.get("/api/partitions", params={"since_hours": 24}).json()
+    data = client.get("/api/partitions/queue",
+                      params={"since_hours": 24}).json()
     assert data["wait_history_available"] is False
     assert data["queue_available"] is True
     # current pending figures survive the history failure
-    assert data["queue"]["__total__"]["jobs"] == 0
-    assert data["queue"]["h200"]["started_jobs"] == 0
-    assert data["queue"]["h200"]["avg_wait_s"] is None
+    assert data["totals"]["unique_pending_jobs"] == 0
+    # wait statistics read as unknown — all null — not as zero samples
+    row = data["queue"]["h200"]
+    assert row["wait_p50_s"] is None
+    assert row["wait_p90_s"] is None
+    assert row["wait_avg_s"] is None
+    assert row["wait_samples"] is None
+    assert row["wait_buckets"] is None
 
 
 def test_partitions_queue_empty_when_nothing_pending(client, fake_prom):
     # default fixture stub: reachable squeue, zero pending jobs
-    data = client.get("/api/partitions", params={"since_hours": 24}).json()
+    data = client.get("/api/partitions/queue",
+                      params={"since_hours": 24}).json()
     assert data["queue_available"] is True
-    assert data["queue"]["__total__"]["jobs"] == 0
-    assert data["queue"]["__total__"]["avg_wait_s"] is None
+    assert data["totals"]["unique_pending_jobs"] == 0
+    assert data["totals"]["unique_gpus_requested"] == 0
+    assert data["queue"]["h200"]["wait_samples"] == 0
+    assert data["queue"]["h200"]["wait_p50_s"] is None
+
+
+
+
+def test_partitions_core_response_has_no_queue_fields(client, fake_prom):
+    # The split: /api/partitions returns only Prometheus-backed data so
+    # it renders without waiting on squeue/sacct; queue fields moved to
+    # /api/partitions/queue.
+    data = client.get("/api/partitions", params={"since_hours": 24}).json()
+    assert set(data) == {"window", "step", "partitions", "trend"}
+
+
+def test_partitions_queue_refetches_squeue_per_window(client, fake_prom,
+                                                      monkeypatch):
+    # The live queue is not a windowed metric, but a window change must
+    # still perform a FRESH squeue call (no constant-key cache) and the
+    # windowed wait columns must follow the requested window. Snapshot A
+    # (24h): one typed h200 job; snapshot B (72h): a second job joined.
+    snap_a = [{"jobid": "20", "user": "eve",
+               "partition": "gpu-h200", "state": "PENDING",
+               "submit": "2026-08-30T12:26:40", "start": "",
+               "reason": "(Resources)", "nodes": 1, "gpus": 2,
+               "gpu_type": "h200"}]
+    snap_b = snap_a + [{"jobid": "21", "user": "eve",
+                        "partition": "gpu-h200", "state": "PENDING",
+                        "submit": "2026-08-30T13:26:40", "start": "",
+                        "reason": "(Priority)", "nodes": 1, "gpus": 1,
+                        "gpu_type": "h200"}]
+    calls = []
+
+    def _queue():
+        calls.append(1)
+        return snap_b if len(calls) > 1 else snap_a
+
+    monkeypatch.setattr(deps, "queue_pending", _queue)
+    first = client.get("/api/partitions/queue",
+                       params={"since_hours": 24}).json()
+    assert first["queue"]["h200"]["exclusive_jobs"] == 1
+    assert {j["jobid"] for j in first["waiting_jobs"]} == {"20"}
+    second = client.get("/api/partitions/queue",
+                        params={"since_hours": 72}).json()
+    # a second, fresh squeue snapshot — not a cached replay
+    assert len(calls) == 2
+    assert second["queue"]["h200"]["exclusive_jobs"] == 2
+    assert {j["jobid"] for j in second["waiting_jobs"]} == {"20", "21"}
+    # wait history stays window-scoped: jobs 1+2 start in-window for 72h
+    assert second["queue"]["h200"]["wait_samples"] == 2
+    assert second["queue"]["h200"]["wait_p50_s"] == 3600
 
 
 def test_partitions_vram_records(client):
