@@ -107,6 +107,18 @@ def test_canonical_gpu_type_token_match_for_long_labels():
         "NVIDIA A100-SXM4-80GB", ["a100"]) == "a100"
 
 
+def test_canonical_gpu_type_keeps_v100_memory_pools_separate():
+    # scontrol's typed GPU GRES is simply v100; the node's min-vram GRES
+    # enriches it to the configured memory pool before this resolver runs.
+    assert gpu_groups.canonical_gpu_type("v100", ["v100_16gb"]) == "v100_16gb"
+    assert gpu_groups.canonical_gpu_type("Tesla V100", ["v100_32gb"]) == (
+        "v100_32gb")
+    assert gpu_groups.gpu_group_name(
+        {"instance": "dgx1", "gpu_type": "v100"},
+        {"dgx1": ["v100_16gb"], "gpu1": ["v100_32gb"]},
+    ) == "v100_16gb"
+
+
 def test_canonical_gpu_type_sole_configured_whole_type():
     # A homogeneous fleet absorbs an unresolvable label; a MIG-shaped
     # label never falls into the whole-GPU pool.

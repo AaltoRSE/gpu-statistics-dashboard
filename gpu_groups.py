@@ -3,10 +3,11 @@
 Every group key in the dashboard — utilization, capacity, occupancy,
 historical waits, and the pending queue — is a canonical GPU type: the
 short GRES type scontrol reports per node (``a100``, ``h100``, ``h200``,
-``b300``, ``v100``, ``gh200``, and MIG profile names such as
-``h200_3g.71gb``), not a Slurm partition name. Partition names are
-unstable keys: priority-only variants (``...-ellis`` vs ``...-short``)
-target the same hardware, so grouping by them forks one pool into
+``b300``, ``v100_16gb``, ``v100_32gb``, ``gh200``, and MIG profile names
+such as ``h200_3g.71gb``), not a Slurm partition name. V100 GRES reports
+only ``v100``; its node-local ``min-vram`` GRES supplies the memory suffix.
+Partition names are unstable keys: priority-only variants (``...-ellis`` vs
+``...-short``) target the same hardware, so grouping by them forks one pool into
 duplicate queue categories and a rename would fork its history. GPU
 types do not move.
 
