@@ -111,11 +111,12 @@ def api_partition_queue(since_hours: float = Query(24, gt=0, le=168),
         progress_key = cache.completed_progress_key(since_hours)
 
         def fetch():
-            # Publish under both identities: the epoch cache key (what this
-            # request can inspect locally) and the stable parameter key the
-            # browser polls. running_only is deliberately excluded — the
-            # accounting cache joins same-window requests regardless of the
-            # flag, so a follower's poll must find this fetch's state.
+            # Publish under both identities: the cache key (what this
+            # request can inspect locally) and the stable parameter key
+            # the browser polls. running_only is deliberately excluded —
+            # the accounting cache joins same-window requests regardless
+            # of the flag, so a follower's poll must find this fetch's
+            # state.
             for key in (cache_key, progress_key):
                 progress_store[key] = {"done": 0, "total": 0,
                                        "failed_batches": 0}
@@ -125,17 +126,24 @@ def api_partition_queue(since_hours: float = Query(24, gt=0, le=168),
                     progress_store[key] = state
 
             try:
-                return deps.completed_jobs(start_iso, end_iso, report)
+                records, coverage = deps.completed_jobs(
+                    start_iso, end_iso, report)
+                # Cache the bounds the records were actually fetched for:
+                # the TTL can outlive the request's epoch window, so a
+                # later hit must filter against THESE bounds, not bounds
+                # recomputed from a newer clock.
+                return (records, coverage, start, now)
             finally:
                 # Failed fetches clear too: a stale in-flight entry would
                 # otherwise read as live progress on every later poll.
                 for key in (cache_key, progress_key):
                     progress_store.pop(key, None)
 
-        records, accounting_coverage = deps.route_cache.get_or_set(
-            cache_key, 300, fetch)
+        records, accounting_coverage, cached_start, cached_end = \
+            deps.route_cache.get_or_set(cache_key, 300, fetch)
         wait_history, wait_history_coverage = completed_wait_summary(
-            records, node_types, start, now, accounting_coverage)
+            records, node_types, cached_start, cached_end,
+            accounting_coverage)
         wait_history_available = bool(accounting_coverage["successful_batches"])
     except SlurmError:
         # An unexpected accounting failure leaves live queue data usable.

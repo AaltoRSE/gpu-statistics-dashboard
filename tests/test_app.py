@@ -1224,6 +1224,35 @@ def test_partitions_queue_empty_when_nothing_pending(client, fake_prom):
     assert data["queue"]["h200"]["wait_p50_s"] is None
 
 
+def test_partitions_queue_cache_hit_filters_on_fetched_bounds(
+        client, fake_prom, monkeypatch):
+    # The 300s accounting TTL outlives any single request's epoch window:
+    # a later cache hit must filter records against the bounds the records
+    # were actually fetched for, not bounds recomputed from an advanced
+    # clock (which would silently drop every recent record).
+    calls = []
+
+    def fake_completed(start_iso, end_iso, progress=None):
+        calls.append((start_iso, end_iso))
+        return (COMPLETED_HISTORY, {"failed_batches": 0,
+                                    "successful_batches": 1,
+                                    "complete": True})
+
+    monkeypatch.setattr(deps, "completed_jobs", fake_completed)
+    first = client.get("/api/partitions/queue",
+                       params={"since_hours": 24}).json()
+    first_examined = first["wait_history_coverage"]["records_examined"]
+    # Advance the clock past the TTL window's tail, then reload: the
+    # cached entry must serve the original bounds untouched.
+    now_marker = _epoch("2026-09-06T00:00:00")
+    monkeypatch.setattr(deps, "now", lambda: now_marker)
+    second = client.get("/api/partitions/queue",
+                        params={"since_hours": 24}).json()
+    assert len(calls) == 1  # served from the TTL cache, not refetched
+    assert second["wait_history_coverage"]["records_examined"] == \
+        first_examined
+    assert second["queue"]["h200"]["wait_samples"] == \
+        first["queue"]["h200"]["wait_samples"]
 
 
 def test_partitions_core_response_has_no_queue_fields(client, fake_prom):
