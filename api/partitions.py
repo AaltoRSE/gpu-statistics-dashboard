@@ -124,10 +124,13 @@ def api_partition_queue(since_hours: float = Query(24, gt=0, le=168),
                 for key in (cache_key, progress_key):
                     progress_store[key] = state
 
-            result = deps.completed_jobs(start_iso, end_iso, report)
-            for key in (cache_key, progress_key):
-                progress_store.pop(key, None)
-            return result
+            try:
+                return deps.completed_jobs(start_iso, end_iso, report)
+            finally:
+                # Failed fetches clear too: a stale in-flight entry would
+                # otherwise read as live progress on every later poll.
+                for key in (cache_key, progress_key):
+                    progress_store.pop(key, None)
 
         records, accounting_coverage = deps.route_cache.get_or_set(
             cache_key, 300, fetch)

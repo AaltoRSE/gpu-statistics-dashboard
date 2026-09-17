@@ -1146,6 +1146,24 @@ def test_partitions_queue_progress_endpoint_serves_batch_state(
         domain.partitions.progress_store.pop(key, None)
 
 
+def test_partitions_queue_progress_clears_after_failed_fetch(
+        client, fake_prom, monkeypatch):
+    # A SlurmError during completed_jobs must leave no stale in-flight
+    # entry behind: later polls (either flag) must see null, not a hung
+    # batch state.
+    def _boom(start_iso, end_iso, progress=None):
+        progress({"done": 1, "total": 7, "failed_batches": 0})
+        raise slurm.SlurmError("sacct unavailable")
+
+    monkeypatch.setattr(deps, "completed_jobs", _boom)
+    data = client.get("/api/partitions/queue",
+                      params={"since_hours": 24}).json()
+    assert data["wait_history_available"] is False
+    assert domain.partitions.progress_store == {}
+    assert client.get("/api/partitions/queue/progress",
+                      params={"since_hours": 24}).json() is None
+
+
 def test_partitions_queue_progress_shares_fetch_across_running_flag(
         client, fake_prom, monkeypatch):
     # The accounting cache joins same-window requests regardless of
