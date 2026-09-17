@@ -107,7 +107,7 @@ def api_partition_queue(since_hours: float = Query(24, gt=0, le=168),
             tzinfo=None).isoformat(timespec="seconds")
         end_iso = datetime.fromtimestamp(now, tz).replace(
             tzinfo=None).isoformat(timespec="seconds")
-        cache_key = cache.completed_jobs_key(start, now)
+        cache_key = cache.completed_jobs_key(since_hours)
         progress_key = cache.completed_progress_key(since_hours)
 
         def fetch():

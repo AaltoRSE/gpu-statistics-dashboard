@@ -1164,6 +1164,36 @@ def test_partitions_queue_progress_clears_after_failed_fetch(
                       params={"since_hours": 24}).json() is None
 
 
+def test_partitions_queue_cache_and_progress_share_window_identity(
+        client, fake_prom, monkeypatch):
+    # The accounting cache keys by since_hours (not the captured epoch
+    # window, which changes every second and would never hit the TTL
+    # cache), and progress uses the same identity: two same-window
+    # requests with opposite running_only flags must resolve to one cache
+    # entry and one progress key, not four divergent identities.
+    calls = []
+
+    def fake_completed(start_iso, end_iso, progress=None):
+        calls.append(start_iso)
+        return (COMPLETED_HISTORY, {"failed_batches": 0,
+                                    "successful_batches": 1,
+                                    "complete": True})
+
+    monkeypatch.setattr(deps, "completed_jobs", fake_completed)
+    first = client.get("/api/partitions/queue",
+                       params={"since_hours": 24}).json()
+    second = client.get("/api/partitions/queue",
+                        params={"since_hours": 24,
+                                "running_only": True}).json()
+    # Both requests join the leader's cached fetch: one accounting query.
+    assert len(calls) == 1
+    assert first["wait_history_coverage"]["records_examined"] == \
+        second["wait_history_coverage"]["records_examined"]
+    # Neither identity may depend on the flag or the captured epoch.
+    assert cache.completed_progress_key(24) == ("completed_progress", 24)
+    assert cache.completed_jobs_key(24) == ("completed_jobs", 24)
+
+
 def test_partitions_queue_progress_shares_fetch_across_running_flag(
         client, fake_prom, monkeypatch):
     # The accounting cache joins same-window requests regardless of

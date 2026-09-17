@@ -117,8 +117,16 @@ def vram_key(since_hours, running_only):
     return ("vram_gb", since_hours, running_only)
 
 
-def completed_jobs_key(start, end):
-    return ("completed_jobs", start, end)
+def completed_jobs_key(since_hours):
+    """The accounting cache identity, keyed like the progress store.
+
+    ``since_hours`` (not the captured epoch window) is the identity: the
+    request's ``now`` changes every second, so an epoch key would never
+    hit the 300s TTL cache in production. Same ``since_hours`` requests
+    join one fetch and its shared progress state; ``running_only`` is
+    deliberately excluded for the same reason progress omits it.
+    """
+    return ("completed_jobs", since_hours)
 
 
 def completed_progress_key(since_hours):
