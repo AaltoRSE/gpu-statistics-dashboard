@@ -50,16 +50,14 @@ const QUEUE = {
     exclusive_gpus: 4, flexible_gpus: 1, eligible_gpus: 5,
     wait_p50_s: 3600, wait_p90_s: 3600, wait_avg_s: 3600,
     wait_samples: 2,
-    wait_buckets: { lt_5m: 0, m5_to_30m: 0, m30_to_2h: 2,
-                    h2_to_12h: 0, gte_12h: 0 },
+    wait_per_gpu_hour_p50: 0.5,
   },
   "h200_3g.71gb": {
     exclusive_jobs: 0, flexible_jobs: 1, eligible_jobs: 1,
     exclusive_gpus: 0, flexible_gpus: 1, eligible_gpus: 1,
     wait_p50_s: null, wait_p90_s: null, wait_avg_s: null,
     wait_samples: 0,
-    wait_buckets: { lt_5m: 0, m5_to_30m: 0, m30_to_2h: 0,
-                    h2_to_12h: 0, gte_12h: 0 },
+    wait_per_gpu_hour_p50: null,
   },
 };
 
@@ -157,9 +155,8 @@ test("queue table renders classification, wait stats, and unique headline", asyn
   assert.match(text, /1h/);      // 3600s P50/P90/avg for h200
   assert.match(text, /—/);       // null percentiles for the MIG profile
   assert.match(text, /2/);       // h200 sample count
-  // buckets render with labels; the MIG row shows its zero-filled counts
-  assert.match(text, /30m–2h 2/);
-  assert.match(text, /<5m 0/);
+  // the size-normalized median renders with its unit; null stays an em dash
+  assert.match(text, /0\.50 h\/GPU-h/);
   // the unique headline is the cluster-wide totals, prominent, above the table
   const unique = doc.getElementById("pQueueUnique");
   assert.match(unique.textContent, /4 unique pending jobs/);

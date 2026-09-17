@@ -17,6 +17,7 @@ import cache  # noqa: E402
 import deps  # noqa: E402
 import domain.jobs as domain_jobs  # noqa: E402
 import domain.metadata as domain_metadata  # noqa: E402
+import domain.partitions  # noqa: E402
 import domain.partitions as domain_partitions  # noqa: E402
 import slurm  # noqa: E402
 from api import users as api_users  # noqa: E402
@@ -331,7 +332,7 @@ def fake_prom(monkeypatch):
                                                            if j in SACCT})
     monkeypatch.setattr(
         deps, "completed_jobs",
-        lambda start_iso, end_iso: (COMPLETED_HISTORY, {
+        lambda start_iso, end_iso, progress=None: (COMPLETED_HISTORY, {
             "failed_batches": 0, "successful_batches": 1, "complete": True,
         }))
     # No active controller jobs by default; tests opt in to a snapshot.
@@ -1051,7 +1052,7 @@ def test_partitions_queue_unavailable_is_not_empty(client, fake_prom,
 
 def test_partitions_wait_history_unavailable_keeps_queue(client, fake_prom,
                                                          monkeypatch):
-    def _boom(start_iso, end_iso):
+    def _boom(start_iso, end_iso, progress=None):
         raise slurm.SlurmError("sacct is not available")
 
     monkeypatch.setattr(deps, "completed_jobs", _boom)
@@ -1074,7 +1075,7 @@ def test_partitions_partial_wait_history_keeps_successful_metrics(
         client, fake_prom, monkeypatch):
     monkeypatch.setattr(
         deps, "completed_jobs",
-        lambda start_iso, end_iso: (COMPLETED_HISTORY, {
+        lambda start_iso, end_iso, progress=None: (COMPLETED_HISTORY, {
             "failed_batches": 1, "successful_batches": 2, "complete": False,
         }))
     data = client.get("/api/partitions/queue", params={"since_hours": 72}).json()
@@ -1082,6 +1083,25 @@ def test_partitions_partial_wait_history_keeps_successful_metrics(
     assert data["wait_history_coverage"]["complete"] is False
     assert data["wait_history_coverage"]["failed_batches"] == 1
     assert data["queue"]["h200"]["wait_samples"] == 2
+
+
+def test_partitions_queue_progress_endpoint_shares_fetch_state(
+        client, fake_prom, monkeypatch):
+    # A poll reads the in-flight fetch's latest batch state through the
+    # stable parameter-derived key, not a per-request epoch window; a
+    # finished fetch clears its entry.
+    def fake_completed(start_iso, end_iso, progress=None):
+        for done, total in ((1, 7), (4, 7), (7, 7)):
+            progress({"done": done, "total": total, "failed_batches": 0})
+        return (COMPLETED_HISTORY, {"failed_batches": 0,
+                                    "successful_batches": 7,
+                                    "complete": True})
+
+    monkeypatch.setattr(deps, "completed_jobs", fake_completed)
+    data = client.get("/api/partitions/queue",
+                      params={"since_hours": 24}).json()
+    assert data["wait_history_available"] is True
+    assert domain.partitions.progress_store == {}
 
 
 def test_partitions_queue_empty_when_nothing_pending(client, fake_prom):

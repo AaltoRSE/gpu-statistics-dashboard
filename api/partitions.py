@@ -17,6 +17,7 @@ from domain.partitions import (
     node_current,
     partition_window,
     pending_queue_status,
+    progress_store,
     wait_empty,
 )
 from domain.vram import vram_job_records
@@ -106,9 +107,22 @@ def api_partition_queue(since_hours: float = Query(24, gt=0, le=168),
             tzinfo=None).isoformat(timespec="seconds")
         end_iso = datetime.fromtimestamp(now, tz).replace(
             tzinfo=None).isoformat(timespec="seconds")
+        cache_key = cache.completed_jobs_key(start, now)
+        progress_key = cache.completed_progress_key(since_hours, running_only)
+
+        def fetch():
+            progress_store[progress_key] = {"done": 0, "total": 0,
+                                            "failed_batches": 0}
+
+            def report(state):
+                progress_store[progress_key] = state
+
+            result = deps.completed_jobs(start_iso, end_iso, report)
+            progress_store.pop(progress_key, None)
+            return result
+
         records, accounting_coverage = deps.route_cache.get_or_set(
-            cache.completed_jobs_key(start, now), 300,
-            lambda: deps.completed_jobs(start_iso, end_iso))
+            cache_key, 300, fetch)
         wait_history, wait_history_coverage = completed_wait_summary(
             records, node_types, start, now, accounting_coverage)
         wait_history_available = bool(accounting_coverage["successful_batches"])
@@ -117,7 +131,6 @@ def api_partition_queue(since_hours: float = Query(24, gt=0, le=168),
         wait_history = {}
         wait_history_coverage = None
         wait_history_available = False
-
     # One summary entry per visible name: the union of live pending
     # groups, historical wait groups, and the utilization groups (so a
     # zero-pending GPU type still renders). squeue and sacct degrade
@@ -171,6 +184,18 @@ def api_partition_queue(since_hours: float = Query(24, gt=0, le=168),
         "wait_history_coverage": wait_history_coverage,
     }
 
+
+@router.get("/api/partitions/queue/progress")
+def api_partition_queue_progress(since_hours: float = Query(24, gt=0, le=168),
+                                 running_only: bool = Query(False)):
+    """Batched accounting progress for the queue's current-window fetch.
+
+    The browser polls this while the queue loader is in flight; the
+    accounting fetch records its daily-batch state into ``progress_store``
+    (single-flighted through the same TTL cache as the accounting result).
+    """
+    key = cache.completed_progress_key(since_hours, running_only)
+    return progress_store.get(key, None)
 
 @router.get("/api/partitions/vram", response_model=VramResponse)
 def api_part_vram(since_hours: float = Query(24, gt=0, le=168),

@@ -544,23 +544,30 @@ def _completed_jobs_batch(start_iso, end_iso):
     return records
 
 
-def completed_jobs(start_iso, end_iso):
+def completed_jobs(start_iso, end_iso, progress=None):
     """Completed records plus bounded-query completeness metadata.
 
     Daily chunks keep a seven-day all-user query bounded. Each chunk retries
     once; successful chunks survive another chunk's failure, and inclusive
     boundary duplicates are removed by sacct JobID (array task IDs remain
-    distinct).
+    distinct). ``progress`` receives a callback after every chunk so a caller
+    can surface batched progress instead of one opaque wait.
     """
     start = datetime.datetime.fromisoformat(start_iso)
     end = datetime.datetime.fromisoformat(end_iso)
     records, seen = [], set()
     failed_batches = successful_batches = 0
     cursor = start
+    chunks = []
     while cursor < end:
         chunk_end = min(cursor + datetime.timedelta(days=1), end)
-        chunk_start_iso = cursor.isoformat(timespec="seconds")
+        chunks.append((cursor, chunk_end))
+        cursor = chunk_end
+    total = len(chunks)
+    for index, (chunk_start, chunk_end) in enumerate(chunks):
+        chunk_start_iso = chunk_start.isoformat(timespec="seconds")
         chunk_end_iso = chunk_end.isoformat(timespec="seconds")
+        chunk = None
         try:
             for attempt in range(2):
                 try:
@@ -569,14 +576,20 @@ def completed_jobs(start_iso, end_iso):
                 except SlurmError:
                     if attempt:
                         raise
-            successful_batches += 1
-            for record in chunk:
-                if record["jobid"] not in seen:
-                    seen.add(record["jobid"])
-                    records.append(record)
         except SlurmError:
             failed_batches += 1
-        cursor = chunk_end
+            if progress:
+                progress({"done": index + 1, "total": total,
+                          "failed_batches": failed_batches})
+            continue
+        successful_batches += 1
+        for record in chunk:
+            if record["jobid"] not in seen:
+                seen.add(record["jobid"])
+                records.append(record)
+        if progress:
+            progress({"done": index + 1, "total": total,
+                      "failed_batches": failed_batches})
     return records, {"failed_batches": failed_batches,
                      "successful_batches": successful_batches,
                      "complete": failed_batches == 0}

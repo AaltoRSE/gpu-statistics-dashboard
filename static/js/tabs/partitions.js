@@ -113,22 +113,40 @@ export async function loadPartitions() {
  * wait history. It is slower than the metrics endpoint, so it renders
  * under its own loading overlay whenever its response lands. */
 let queueToken = 0;
+let queueProgressTimer = null;
+
+function stopPollTimer() {
+  clearInterval(queueProgressTimer);
+}
 
 async function loadPartitionQueue() {
   const token = ++queueToken;
   setResultsLoading("queueResults", true);
+  const params = new URLSearchParams({ since_hours: $("pWindow").value });
+  if ($("pRunning").checked) params.set("running_only", "true");
+  // Poll the accounting progress endpoint while the queue request runs, so
+  // the seven-day wait-history fetch shows real batch progress instead of
+  // an opaque spinner. The poll stops when the queue response lands.
+  queueProgressTimer = setInterval(async () => {
+    try {
+      const prog = await api("/api/partitions/queue/progress?" + params);
+      if (token === queueToken && prog && prog.total) {
+        setQueueProgress(prog.done, prog.total, prog.failed_batches);
+      }
+    } catch (_) { /* progress is best-effort; the queue result decides */ }
+  }, 1000);
   let data;
   try {
-    const params = new URLSearchParams({ since_hours: $("pWindow").value });
-    if ($("pRunning").checked) params.set("running_only", "true");
     data = await api("/api/partitions/queue?" + params);
   } catch (e) {
+    stopPollTimer();
     if (token === queueToken) {
       setResultsLoading("queueResults", false);
       showPanelError("queueResults", e, loadPartitionQueue, "the pending-jobs queue");
     }
     return;
   }
+  stopPollTimer();
   if (token !== queueToken) return; // a newer request supersedes this one
   panelOk("queueResults");
   const q = data.queue || {};
@@ -145,6 +163,14 @@ async function loadPartitionQueue() {
   renderPartQueue();
   renderWaitingJobs();
   setResultsLoading("queueResults", false);
+}
+
+function setQueueProgress(done, total, failed) {
+  const panel = $("queueResults");
+  const chip = panel.querySelector(".results-loading");
+  if (!chip) return;
+  chip.innerHTML = escapeHtml("Loading wait history: batch " + done + " of "
+    + total + (failed ? " (" + failed + " failed)" : "") + "&hellip;");
 }
 
 function renderPartBar() {

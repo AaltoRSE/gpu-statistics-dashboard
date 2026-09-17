@@ -121,6 +121,16 @@ def completed_jobs_key(start, end):
     return ("completed_jobs", start, end)
 
 
+def completed_progress_key(since_hours, running_only):
+    """Stable progress-store key shared by the queue and progress routes.
+
+    Both routes derive it from the same query parameters, so a poll finds
+    the in-flight fetch's entry even though each request computes its own
+    epoch window.
+    """
+    return ("completed_progress", since_hours, bool(running_only))
+
+
 def node_current_key():
     return "node_current"
 

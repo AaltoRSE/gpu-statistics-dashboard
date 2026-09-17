@@ -504,6 +504,15 @@ def wait_empty():
     return _wait_statistics([])
 
 
+progress_store = {}
+"""Per-window latest batched accounting progress for the queue loader.
+
+The queue endpoint polls this while the first seven-day accounting fetch
+works through its daily batches, so the UI can show real progress instead
+of one opaque spinner. Each fetch updates, then clears, its entry.
+"""
+
+
 def completed_wait_summary(records, node_gpu_types, window_start, window_end,
                            accounting_coverage=None):
     """Completed-job wait metrics grouped from bounded sacct records.
