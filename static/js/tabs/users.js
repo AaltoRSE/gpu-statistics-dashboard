@@ -226,7 +226,7 @@ const userJobsTable = createTable({
   el: $("userJobsTable"),
   columns: [
     { key: "jobid", type: "text" }, { key: "name", type: "text" },
-    { key: "partition", type: "text" }, { key: "nodes", type: "text" },
+    { key: "gpu_group", type: "text" }, { key: "nodes", type: "text" },
     { key: "state", type: "text" }, { key: "start", type: "text" },
     { key: "gpus", type: "number" }, { key: "mean_util", type: "number" },
     { key: "gpu_hours_eff", type: "number" },

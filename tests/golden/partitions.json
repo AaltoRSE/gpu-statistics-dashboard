@@ -2,12 +2,12 @@
   "partitions": [
     {
       "gpus_alloc": 3,
-      "gpus_total": 16,
+      "gpus_total": 8,
       "job_count": 1,
       "max_util": 95.0,
-      "mean_occupancy": 6.2,
+      "mean_occupancy": 12.5,
       "mean_util": 92.5,
-      "name": "gpu-h200"
+      "name": "h100"
     },
     {
       "gpus_alloc": 1,
@@ -20,32 +20,65 @@
     },
     {
       "gpus_alloc": 2,
-      "gpus_total": 16,
+      "gpus_total": 20,
       "job_count": 2,
       "max_util": 60.0,
-      "mean_occupancy": 12.5,
+      "mean_occupancy": 7.5,
       "mean_util": 36.67,
-      "name": "gpu-h100"
+      "name": "h200"
     }
   ],
-  "queue": {},
+  "queue": {
+    "__total__": {
+      "avg_wait_s": null,
+      "gpus": 0,
+      "gpus_min": 0,
+      "jobs": 0,
+      "started_jobs": 0
+    },
+    "h100": {
+      "avg_wait_s": null,
+      "gpus": 0,
+      "gpus_min": 0,
+      "jobs": 0,
+      "started_jobs": 0
+    },
+    "h200": {
+      "avg_wait_s": null,
+      "gpus": 0,
+      "gpus_min": 0,
+      "jobs": 0,
+      "started_jobs": 0
+    },
+    "h200_3g.71gb": {
+      "avg_wait_s": null,
+      "gpus": 0,
+      "gpus_min": 0,
+      "jobs": 0,
+      "started_jobs": 0
+    }
+  },
   "queue_available": true,
   "step": 120,
   "trend": {
-    "gpu-h100": [
+    "h100": [
+      [
+        1000.0,
+        90.0
+      ],
+      [
+        1120.0,
+        95.0
+      ]
+    ],
+    "h200": [
       [
         1000.0,
         25.0
       ],
       [
         1120.0,
-        35.0
-      ]
-    ],
-    "gpu-h200": [
-      [
-        1000.0,
-        92.5
+        60.0
       ]
     ],
     "h200_3g.71gb": [
@@ -59,6 +92,8 @@
       ]
     ]
   },
+  "wait_history_available": true,
+  "waiting_jobs": [],
   "window": {
     "end": 1788100000,
     "start": 1788013600

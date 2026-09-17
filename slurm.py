@@ -19,6 +19,7 @@ SACCT_FIELDS = [
     "Partition",
     "State",
     "Start",
+    "Submit",
     "End",
     "Elapsed",
     "AllocTRES",
@@ -297,7 +298,7 @@ def parse_tres_per_node(text):
     return gpus, gpu_type
 
 
-SQUEUE_QUEUE_FMT = "%i|%P|%T|%V|%S|%R|%D|%b"
+SQUEUE_QUEUE_FMT = "%i|%u|%P|%T|%V|%S|%R|%D|%b"
 
 
 def parse_squeue_queue(output):
@@ -307,36 +308,44 @@ def parse_squeue_queue(output):
     ``%b`` (TresPerNode) is parsed to ``gpus`` (the per-node GPU count)
     and ``gpu_type``; non-GPU TRES entries are dropped there. Rows whose
     TresPerNode names no GPU (plain ``gres/min-vram:...`` CPU jobs) are
-    kept with ``gpus=0`` so the queue depth stays exact.
+    kept with ``gpus=0`` so the queue depth stays exact. A blank or
+    ``N/A`` estimated start time stays ``""``.
     """
     jobs = []
     for line in output.splitlines():
         if not line.strip():
             continue
         f = line.split("|")
-        if len(f) < 8:
+        if len(f) < 9:
             continue
-        gpus, gpu_type = parse_tres_per_node(f[7])
+        gpus, gpu_type = parse_tres_per_node(f[8])
         jobs.append({
             "jobid": f[0],
-            "partition": f[1],
-            "state": f[2],
-            "submit": f[3],
-            "start": f[4] if f[4] not in ("N/A", "Unknown") else "",
-            "reason": f[5].strip(),
-            "nodes": _int(f[6], 0),
+            "user": f[1],
+            "partition": f[2],
+            "state": f[3],
+            "submit": f[4],
+            "start": f[5] if f[5] not in ("N/A", "Unknown") else "",
+            "reason": f[6].strip(),
+            "nodes": _int(f[7], 0),
             "gpus": gpus,
             "gpu_type": gpu_type,
         })
     return jobs
 
 
+
 def queue_pending():
-    """Pending (PD) jobs from squeue. Raises SlurmError when squeue is
-    unavailable or fails; callers must surface that as an error state,
-    not an empty queue."""
+    """Pending (PD) jobs from squeue, hidden partitions included.
+
+    ``--all`` is the code-side correction for a queue that is present but
+    absent from the default view (squeue hides hidden partitions' jobs
+    without it). Raises SlurmError when squeue is unavailable or fails;
+    callers must surface that as an error state, not an empty queue.
+    """
     return parse_squeue_queue(_run(
-        ["squeue", "-t", "PD", "--noheader", "-o", SQUEUE_QUEUE_FMT],
+        ["squeue", "--all", "--states=PENDING", "--noheader", "-o",
+         SQUEUE_QUEUE_FMT],
         timeout=15))
 
 
@@ -463,7 +472,6 @@ def sacct_jobs(job_ids, start_iso=None, workers=8):
     with ThreadPoolExecutor(max_workers=workers) as pool:
         for chunk in pool.map(fetch, batches):
             results.update(chunk)
-
     enriched = {}
     for jobid, row in results.items():
         gpus, gpu_type = parse_alloc_tres(row.get("AllocTRES"))
@@ -478,6 +486,7 @@ def sacct_jobs(job_ids, start_iso=None, workers=8):
             "account": row.get("Account") or "",
             "partition": row.get("Partition") or "",
             "state": row.get("State") or "",
+            "submit": row.get("Submit") or "",
             "start": row.get("Start") or "",
             "end": row.get("End") if row.get("End") != "Unknown" else "",
             "elapsed_s": parse_elapsed(row.get("Elapsed")),

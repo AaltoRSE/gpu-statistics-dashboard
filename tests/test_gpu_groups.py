@@ -1,8 +1,10 @@
-"""Tests for gpu_groups.py: the MIG-aware partition-group resolution.
+"""Tests for gpu_groups.py: canonical GPU-type group resolution.
 
-Moved out of test_app.py along with the functions themselves (was
-app._node_gpu_group, etc.) and extended to cover the pair_aliases()
-single-pass rewrite, which replaced an O(pairs * series) rescan.
+Every group key in the dashboard is a canonical GPU type (the short
+scontrol GRES type; MIG profiles split out), resolved through
+``canonical_gpu_type`` — not a Slurm partition name, which forks one
+hardware pool into duplicate categories whenever a priority variant
+(``...-ellis``) or a rename appears.
 """
 
 import gpu_groups
@@ -18,8 +20,8 @@ def test_is_mig_gres_recognizes_profile_shapes():
 
 def test_build_node_index():
     nodes = [{"name": "gpu1", "gpu_type": "h100"},
-              {"name": "gpu2", "gpu_type": ""},
-              {"name": "gpu3"}]
+             {"name": "gpu2", "gpu_type": ""},
+             {"name": "gpu3"}]
     assert gpu_groups.build_node_index(nodes) == {
         "gpu1": ["h100"], "gpu2": [], "gpu3": [],
     }
@@ -35,146 +37,168 @@ def test_build_node_index_prefers_full_gres_list():
     }
 
 
-def test_gpu_group_name_mig_instance_beats_bare_job_label():
-    metric = {"job": "gpu-h200", "gpu_type": "h200", "instance": "gpu49"}
-    node_types = {"gpu49": ["h200_3g.71gb"]}
-    assert gpu_groups.gpu_group_name(metric, node_types) == "h200_3g.71gb"
+def test_partition_gpu_types_maps_partitions_to_node_types():
+    # The reverse index the pending queue resolves through: every
+    # partition a GPU node lists maps to that node's GRES types; a
+    # CPU-only partition is absent; priority variants converge on the
+    # same type set.
+    nodes = [
+        {"name": "gpu1", "gpu_type": "h100", "gres": [("h100", 8)],
+         "partitions": "gpu-h100,gpu-h100-ellis"},
+        {"name": "gpu49", "gpu_type": "h200",
+         "gres": [("h200", 4), ("h200_3g.71gb", 8)],
+         "partitions": "gpu-h200,gpu-h200-ellis"},
+        {"name": "csl1", "gpu_type": "", "gres": [],
+         "partitions": "batch"},
+        {"name": "gpu50", "gpu_type": "a100", "gres": [("a100", 4)],
+         "partitions": "  gpu-a100 ,"},
+    ]
+    assert gpu_groups.partition_gpu_types(nodes) == {
+        "gpu-h100": {"h100"},
+        "gpu-h100-ellis": {"h100"},
+        "gpu-h200": {"h200", "h200_3g.71gb"},
+        "gpu-h200-ellis": {"h200", "h200_3g.71gb"},
+        "gpu-a100": {"a100"},
+    }
 
 
-def test_gpu_group_name_mixed_node_whole_gpu_series_not_misclassified():
+def test_partition_gpu_types_ignores_cpu_only_nodes():
+    assert gpu_groups.partition_gpu_types(
+        [{"name": "csl1", "gpu_type": "", "gres": [],
+          "partitions": "batch"}]) == {}
+
+
+def test_canonical_gpu_type_exact_match():
+    assert gpu_groups.canonical_gpu_type("h200", ["h200", "a100"]) == "h200"
+    assert gpu_groups.canonical_gpu_type("H200", ["h200", "a100"]) == "h200"
+
+
+def test_canonical_gpu_type_mig_profile_resolution():
+    # A MIG node's (sole) profile is authoritative regardless of the
+    # series label; the bare exporter profile (3g.70gb) resolves to the
+    # configured profile (h200_3g.71gb).
+    assert gpu_groups.canonical_gpu_type("h200", ["h200_3g.71gb"]) == (
+        "h200_3g.71gb")
+    assert gpu_groups.canonical_gpu_type("3g.70gb", ["h200_3g.71gb"]) == (
+        "h200_3g.71gb")
+    assert gpu_groups.canonical_gpu_type(
+        "3g.70gb", ["h200", "h200_3g.71gb"]) == "h200_3g.71gb"
+
+
+def test_canonical_gpu_type_mixed_node_whole_label_stays_whole():
     # gpu49 carries both a whole H200 type and a MIG profile; a
-    # whole-GPU series on it must group by job label, not the node's
-    # MIG type (real exporter labels: "NVIDIA H200" for a whole GPU,
-    # "3g.70gb" for a MIG slice).
-    metric = {"job": "h200", "gpu_type": "NVIDIA H200", "instance": "gpu49"}
+    # whole-GPU series on it must never be dragged into the slice pool
+    # (real exporter labels: "NVIDIA H200" for a whole GPU, "3g.70gb"
+    # for a MIG slice).
+    assert gpu_groups.canonical_gpu_type(
+        "NVIDIA H200", ["h200", "h200_3g.71gb"]) == "h200"
+    assert gpu_groups.canonical_gpu_type(
+        "h200", ["h200", "h200_3g.71gb"]) == "h200"
+
+
+def test_canonical_gpu_type_token_match_for_long_labels():
+    # Long vendor labels resolve to the configured short types via
+    # case-insensitive alphanumeric tokens.
+    assert gpu_groups.canonical_gpu_type(
+        "NVIDIA H200", ["h100", "h200"]) == "h200"
+    assert gpu_groups.canonical_gpu_type(
+        "Tesla V100-PCIE-32GB", ["a100", "v100"]) == "v100"
+    assert gpu_groups.canonical_gpu_type(
+        "NVIDIA A100-SXM4-80GB", ["a100"]) == "a100"
+
+
+def test_canonical_gpu_type_sole_configured_whole_type():
+    # A homogeneous fleet absorbs an unresolvable label; a MIG-shaped
+    # label never falls into the whole-GPU pool.
+    assert gpu_groups.canonical_gpu_type("", ["h100"]) == "h100"
+    assert gpu_groups.canonical_gpu_type("NVIDIA H200", ["h100"]) == "h100"
+    assert gpu_groups.canonical_gpu_type("3g.40gb", ["a100"]) == "3g.40gb"
+
+
+def test_canonical_gpu_type_ambiguous_stays_visible():
+    # A bare MIG label behind two configured profiles is ambiguous: keep
+    # the normalized source label rather than pick arbitrarily.
+    assert gpu_groups.canonical_gpu_type(
+        "3g.70gb", ["h200_3g.71gb", "h200_4g.71gb"]) == "3g.70gb"
+
+
+def test_canonical_gpu_type_missing_type_behavior():
+    assert gpu_groups.canonical_gpu_type("", []) == "unknown"
+    assert gpu_groups.canonical_gpu_type(None, None) == "unknown"
+    assert gpu_groups.canonical_gpu_type("mystery", []) == "mystery"
+
+
+def test_gpu_group_name_resolves_from_own_instance():
+    metric = {"job": "gpu-h200", "gpu_type": "h200", "instance": "gpu49"}
     node_types = {"gpu49": ["h200", "h200_3g.71gb"]}
     assert gpu_groups.gpu_group_name(metric, node_types) == "h200"
-
-
-def test_gpu_group_name_mixed_node_mig_series_resolves_canonical_profile():
-    metric = {"job": "h200", "gpu_type": "3g.70gb", "instance": "gpu49"}
-    node_types = {"gpu49": ["h200", "h200_3g.71gb"]}
+    metric = {"job": "gpu-h200", "gpu_type": "3g.70gb", "instance": "gpu49"}
     assert gpu_groups.gpu_group_name(metric, node_types) == "h200_3g.71gb"
 
 
-def test_gpu_group_name_falls_back_to_job_gtype_without_a_resolvable_node():
-    # No instance label, and the gpu_type itself is a MIG profile: falls
-    # back to "<job>_<gpu_type>" so it still stays separated from whole
-    # GPUs of the same job/partition.
-    metric = {"job": "gpu-h200", "gpu_type": "3g.70gb"}
-    assert gpu_groups.gpu_group_name(metric, {}) == "gpu-h200_3g.70gb"
+def test_gpu_group_name_whole_gpu_on_all_mig_node():
+    # An all-MIG node's profile is authoritative even for a whole-shaped
+    # label: the node has no whole-GPU pool to land in.
+    metric = {"job": "gpu-h200", "gpu_type": "h200", "instance": "gpu49"}
+    assert gpu_groups.gpu_group_name(
+        metric, {"gpu49": ["h200_3g.71gb"]}) == "h200_3g.71gb"
 
 
-def test_gpu_group_name_plain_job_for_whole_gpu():
-    metric = {"job": "gpu-h100", "gpu_type": "h100", "instance": "gpu1"}
-    assert gpu_groups.gpu_group_name(metric, {"gpu1": ["h100"]}) == "gpu-h100"
+def test_gpu_group_name_unindexed_instance_does_not_inherit_fleet():
+    # An observed instance missing from the scontrol index must NOT be
+    # absorbed into a sole fleet type: it resolves from its raw label.
+    assert gpu_groups.gpu_group_name(
+        {"job": "j", "gpu_type": "x", "instance": "ghost"},
+        {"gpu1": ["h100"]}) == "x"
+    # a job observed on unknown nodes likewise keeps its raw label.
+    assert gpu_groups.job_gpu_group(
+        {"nodes": ["ghost"], "partition": "p", "gpu_type": "x"},
+        {"gpu1": ["h100"]}) == "x"
 
 
-def test_gpu_group_name_uses_alias_when_present():
-    metric = {"job": "gpu-h200", "gpu_type": "h200"}
-    aliases = {("gpu-h200", "h200"): "custom-alias"}
-    assert gpu_groups.gpu_group_name(metric, {}, aliases) == "custom-alias"
+def test_gpu_group_name_falls_back_to_all_configured_types():
+    # No (resolvable) instance label: the fleet union resolves bare
+    # labels when it is unambiguous, and keeps the normalized label
+    # otherwise.
+    node_types = {"gpu1": ["h100"], "gpu2": ["h200"]}
+    assert gpu_groups.gpu_group_name(
+        {"job": "j", "gpu_type": "NVIDIA H200"}, node_types) == "h200"
+    assert gpu_groups.gpu_group_name(
+        {"job": "j", "gpu_type": "h100"}, {}) == "h100"
+    assert gpu_groups.gpu_group_name(
+        {"job": "j", "gpu_type": "3g.70gb"}, node_types) == "3g.70gb"
 
 
-def test_job_gpu_group_single_mig_profile_from_nodes():
-    job = {"nodes": ["gpu49"], "partition": "gpu-h200", "gpu_type": "h200"}
-    assert gpu_groups.job_gpu_group(job, {"gpu49": ["h200_3g.71gb"]}) == (
-        "h200_3g.71gb")
+def test_gpu_group_name_missing_type_falls_back():
+    # No label anywhere and no configured types: unknown.
+    assert gpu_groups.gpu_group_name({"job": "j", "gpu_type": ""}, {}) == (
+        "unknown")
 
 
-def test_job_gpu_group_multiple_mig_profiles_join_under_partition():
-    job = {"nodes": ["a", "b"], "partition": "gpu-h200", "gpu_type": ""}
-    node_types = {"a": ["h200_3g.71gb"], "b": ["h200_4g.71gb"]}
-    assert gpu_groups.job_gpu_group(job, node_types) == (
-        "gpu-h200_h200_3g.71gb,h200_4g.71gb")
-
-
-def test_job_gpu_group_plain_partition_for_whole_gpu():
-    job = {"nodes": ["gpu1"], "partition": "gpu-h100", "gpu_type": "h100"}
-    assert gpu_groups.job_gpu_group(job, {"gpu1": ["h100"]}) == "gpu-h100"
-
-
-def test_job_gpu_group_mixed_node_whole_gpu_job_not_misclassified():
+def test_job_gpu_group_resolves_from_observed_nodes():
     job = {"nodes": ["gpu49"], "partition": "gpu-h200", "gpu_type": "h200"}
     node_types = {"gpu49": ["h200", "h200_3g.71gb"]}
-    assert gpu_groups.job_gpu_group(job, node_types) == "gpu-h200"
-
-
-def test_job_gpu_group_mixed_node_mig_job_resolves_profile():
+    assert gpu_groups.job_gpu_group(job, node_types) == "h200"
     job = {"nodes": ["gpu49"], "partition": "gpu-h200", "gpu_type": "3g.70gb"}
-    node_types = {"gpu49": ["h200", "h200_3g.71gb"]}
     assert gpu_groups.job_gpu_group(job, node_types) == "h200_3g.71gb"
 
 
-def test_node_gpu_group_first_nonempty_partition():
-    # A node listed in two partitions: the first non-empty (trimmed)
-    # partition wins. A leading-empty or comma-only value must not
-    # yield "".
-    assert gpu_groups.node_gpu_group(
-        {"gpu_type": "h100", "partitions": ",gpu-h100"}) == "gpu-h100"
-    assert gpu_groups.node_gpu_group(
-        {"gpu_type": "h100", "partitions": "  , gpu-h100 ,"}) == "gpu-h100"
-    assert gpu_groups.node_gpu_group(
-        {"gpu_type": "h100", "partitions": "a,b"}) == "a"
-    assert gpu_groups.node_gpu_group(
-        {"gpu_type": "h100", "partitions": ""}) == ""
-    assert gpu_groups.node_gpu_group(
-        {"gpu_type": "h100", "partitions": ","}) == ""
-    # A MIG node whose partition list also names the whole-GPU partition:
-    # the MIG profile wins regardless.
+def test_job_gpu_group_without_observed_nodes_uses_fleet():
+    # A job whose series were never observed on a known node still
+    # canonicalizes against every configured type.
+    job = {"nodes": [], "partition": "p", "gpu_type": "NVIDIA A100-SXM4-80GB"}
+    assert gpu_groups.job_gpu_group(
+        job, {"gpu1": ["a100"], "gpu2": ["h200"]}) == "a100"
+
+
+def test_node_gpu_group_reports_parsed_gpu_type():
+    # The node's own scalar type — the MIG profile for an all-MIG node;
+    # partition membership is irrelevant. CPU-only nodes resolve to "".
     assert gpu_groups.node_gpu_group(
         {"gpu_type": "h200_3g.71gb", "partitions": "gpu-h200"}) == (
         "h200_3g.71gb")
     assert gpu_groups.node_gpu_group(
+        {"gpu_type": "h100", "partitions": "a,b"}) == "h100"
+    assert gpu_groups.node_gpu_group(
         {"gpu_type": "", "partitions": "batch"}) == ""
-
-
-def test_pair_aliases_single_pass_matches_per_pair_resolution():
-    stats = [
-        {"metric": {"job": "gpu-h100", "gpu_type": "h100", "instance": "gpu1"}},
-        {"metric": {"job": "gpu-h200", "gpu_type": "h200", "instance": "gpu49"}},
-    ]
-    node_types = {"gpu1": ["h100"], "gpu49": ["h200_3g.71gb"]}
-    aliases = gpu_groups.pair_aliases(stats, node_types)
-    assert aliases == {
-        ("gpu-h100", "h100"): "gpu-h100",
-        ("gpu-h200", "h200"): "h200_3g.71gb",
-    }
-
-
-def test_pair_aliases_falls_back_when_a_pair_spans_two_mig_profiles():
-    # The same (job, MIG-shaped gpu_type) pair observed via two different
-    # node MIG profiles: ambiguous, so it must fall back to
-    # gpu_group_name's <job>_<gpu_type> form rather than arbitrarily
-    # picking one of the two profiles.
-    stats = [
-        {"metric": {"job": "gpu-h200", "gpu_type": "3g.70gb", "instance": "a"}},
-        {"metric": {"job": "gpu-h200", "gpu_type": "3g.70gb", "instance": "b"}},
-    ]
-    node_types = {"a": ["3g.70gb"], "b": ["4g.70gb"]}
-    aliases = gpu_groups.pair_aliases(stats, node_types)
-    assert aliases[("gpu-h200", "3g.70gb")] == "gpu-h200_3g.70gb"
-
-
-def test_pair_aliases_mixed_node_separates_whole_and_mig_series():
-    # gpu49's whole-GPU and MIG series must resolve to different groups
-    # even though they share one node.
-    stats = [
-        {"metric": {"job": "h200", "gpu_type": "NVIDIA H200", "instance": "gpu49"}},
-        {"metric": {"job": "h200", "gpu_type": "3g.70gb", "instance": "gpu49"}},
-    ]
-    node_types = {"gpu49": ["h200", "h200_3g.71gb"]}
-    aliases = gpu_groups.pair_aliases(stats, node_types)
-    assert aliases[("h200", "NVIDIA H200")] == "h200"
-    assert aliases[("h200", "3g.70gb")] == "h200_3g.71gb"
-
-
-def test_pair_aliases_group_resolvable_only_from_observed_instances():
-    # An instance with no scontrol node-type entry at all (missing from
-    # node_types): must resolve purely from the metric's job/gpu_type
-    # rather than raising or misclassifying as MIG.
-    stats = [
-        {"metric": {"job": "gpu-h100", "gpu_type": "h100", "instance": "ghost"}},
-    ]
-    aliases = gpu_groups.pair_aliases(stats, {})
-    assert aliases == {("gpu-h100", "h100"): "gpu-h100"}
+    assert gpu_groups.node_gpu_group({"gpu_type": None}) == ""

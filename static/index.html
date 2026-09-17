@@ -43,7 +43,7 @@
           <option value="168">last 7 days</option>
         </select>
       </label>
-      <label>Partition
+      <label>GPU type
         <select id="jPartition"><option value="">all</option></select>
       </label>
       <label>Show top N by GPU-hours
@@ -108,7 +108,7 @@
             <table id="jobTable">
               <thead><tr>
                 <th data-k="jobid">Job</th><th data-k="name">Name</th><th data-k="user">User</th>
-                <th data-k="partition">Partition</th><th data-k="nodes">Node</th>
+                <th data-k="gpu_group">GPU type</th><th data-k="nodes">Node</th>
                 <th data-k="state">State</th>
                 <th data-k="start">Start</th><th data-k="gpus">GPUs</th>
                 <th class="num" data-k="mean_util">GPU utilization</th>
@@ -136,8 +136,8 @@
           <option value="168">last 7 days</option>
         </select>
       </label>
-      <label>Partition
-        <select id="pPartition"><option value="">all partitions</option></select>
+      <label>GPU type
+        <select id="pPartition"><option value="">all GPU types</option></select>
       </label>
       <label class="row"><input id="pRunning" type="checkbox"> Running only</label>
     </div>
@@ -145,7 +145,7 @@
       <div class="results-content">
       <div class="grid two">
         <div class="card">
-          <h2>Mean utilization by partition</h2>
+          <h2>Mean utilization by GPU type</h2>
           <div class="chart" id="partBarPlot"></div>
           <div class="legend">
             <span class="legend-key" style="background:var(--bad)"></span> &lt;40%
@@ -154,7 +154,7 @@
           </div>
         </div>
         <div class="card">
-          <h2>Mean occupancy by partition <button type="button" class="glossary-btn" data-glossary="mean-occupancy" title="What is this?">?</button></h2>
+          <h2>Mean occupancy by GPU type <button type="button" class="glossary-btn" data-glossary="mean-occupancy" title="What is this?">?</button></h2>
           <div class="chart" id="partOccupancyPlot"></div>
           <div class="legend neutral">
             <span class="legend-key" style="background:var(--acc)"></span> share of capacity with an active job
@@ -167,29 +167,55 @@
       </div>
 
         <div class="card" style="grid-column:1 / -1; margin-top:14px">
-          <h2>Pending jobs by partition <span class="small" id="pQueueMeta"></span></h2>
+          <h2>Pending jobs by GPU type <span class="small" id="pQueueMeta"></span></h2>
           <div class="table-scroll">
             <table id="partQueueTable">
               <thead><tr>
-                <th data-k="name">Partition</th>
+                <th data-k="name">GPU type</th>
                 <th class="num" data-k="jobs" title="jobs waiting to start">Pending</th>
+                <th class="num" data-k="avg_wait_s" title="actual Submit &rarr; Start wait averaged over jobs of this GPU type that started inside the selected window &mdash; not the current pending age and not Slurm's estimate">Average wait</th>
+                <th class="num" data-k="started_jobs" title="jobs of this GPU type that started inside the selected window (sample behind Average wait)">Started in window</th>
                 <th class="num" data-k="gpus" title="sum of per-node GPU requests &times; requested nodes; null when a job declares no node count">GPUs requested</th>
                 <th class="num" data-k="gpus_min" title="lower bound: each job's per-node request counted at least once">GPUs (min)</th>
               </tr></thead>
               <tbody></tbody>
             </table>
           </div>
-          <div class="hint">Rows are per-partition placements: a job requesting several partitions appears in each, so its GPU request counts toward every row it could fill &mdash; column sums therefore over-count shared jobs. The header&rsquo;s pending-job count is the unique number of queued jobs.</div>
-          <div class="hint" id="pQueueHint" hidden>squeue is unreachable &mdash; the queue status is unavailable, which is not the same as an empty queue.</div>
+          <div class="hint">Rows are per-GPU-type placements: a job eligible for several GPU types appears in each, so its GPU request counts toward every row it could fill &mdash; column sums therefore over-count shared jobs. The header&rsquo;s pending-job count is the unique number of GPU-eligible queued jobs (CPU-only pending jobs are excluded).</div>
+          <div class="hint">Average wait is the actual Submit &rarr; Start time of jobs that started inside the selected window; &ldquo;&mdash;&rdquo; with 0 in Started in window means no valid starts, not a zero wait.</div>
+          <div class="hint" id="pQueueHint" hidden>Queue status unavailable &mdash; squeue could not be reached (this is not an empty queue).</div>
+          <div class="hint" id="pWaitHistoryHint" hidden>Historical wait data unavailable &mdash; sacct enrichment failed; pending counts above are still live.</div>
+        </div>
+
+        <div class="card" style="grid-column:1 / -1; margin-top:14px">
+          <h2>Waiting jobs <span class="small" id="pWaitingMeta"></span></h2>
+          <div class="table-scroll">
+            <table id="pendingJobsTable">
+              <thead><tr>
+                <th data-k="jobid">Job</th>
+                <th data-k="user">User</th>
+                <th data-k="groups">GPU type</th>
+                <th data-k="partition" title="the raw Slurm partition(s) the job was submitted to &mdash; metadata only, not a selectable filter">Partition</th>
+                <th data-k="submit" title="when the job was submitted">Submitted</th>
+                <th data-k="wait_s" title="time since submission (Slurm's estimated start is a separate column)">Waiting</th>
+                <th data-k="start" title="Slurm's estimated start time, when it has one">Estimated start</th>
+                <th data-k="reason">Reason</th>
+                <th class="num" data-k="nodes">Nodes</th>
+                <th class="num" data-k="gpu_total" title="total GPUs requested (per-node request &times; nodes); unknown when the node count is missing">GPUs requested</th>
+              </tr></thead>
+              <tbody></tbody>
+            </table>
+          </div>
+          <div class="hint">Waiting is the job&rsquo;s current age in the queue. Each GPU-eligible job is listed once even when it could run on several GPU types; selecting a type filters this list. The Partition column is the raw Slurm target the job was submitted to (metadata only &mdash; not a filter).</div>
         </div>
 
       <div class="card" style="margin-top:14px">
-        <h2>Partition table <span class="small" id="pCount"></span>
+        <h2>GPU type table <span class="small" id="pCount"></span>
           <span class="small" data-fresh-for="partitionsResults"></span></h2>
         <div class="table-scroll">
           <table id="partTable">
             <thead><tr>
-              <th data-k="name">Partition</th>
+              <th data-k="name">GPU type</th>
               <th class="num" data-k="gpus_total" title="allocated / total GPUs">GPUs</th>
               <th class="num" data-k="job_count">Jobs</th>
               <th class="num" data-k="mean_util">Mean util %<button type="button" class="glossary-btn" data-glossary="mean-util" title="What is this?">?</button></th>
@@ -197,7 +223,7 @@
             <tbody></tbody>
           </table>
         </div>
-        <div class="hint">Mean utilization is time-weighted over the window; GPU devices are collapsed to a per-job/per-node max, so it measures &ldquo;how busy&rdquo; rather than aggregate GPU-hours. Mean occupancy is the window-average share of the partition&rsquo;s capacity with an active job. GPUs show allocated/total capacity of the partition&rsquo;s nodes. Select a partition to scope the trend and the VRAM distribution to it.</div>
+        <div class="hint">Mean utilization is time-weighted over the window; GPU devices are collapsed to a per-job/per-node max, so it measures &ldquo;how busy&rdquo; rather than aggregate GPU-hours. Mean occupancy is the window-average share of the type&rsquo;s capacity with an active job. GPUs show allocated/total capacity of every node carrying the type. Select a type to scope the trend and the VRAM distribution to it.</div>
       </div>
       </div>
       <div class="results-loading">Data is loading&hellip;</div>
@@ -293,7 +319,7 @@
             <table id="userJobsTable">
               <thead><tr>
                 <th data-k="jobid">Job</th><th data-k="name">Name</th>
-                <th data-k="partition">Partition</th><th data-k="nodes">Node</th>
+                <th data-k="gpu_group">GPU type</th><th data-k="nodes">Node</th>
                 <th data-k="state">State</th><th data-k="start">Start</th>
                 <th class="num" data-k="gpus">GPUs</th>
                 <th class="num" data-k="mean_util">GPU utilization</th>
@@ -379,12 +405,13 @@
     <dt id="glossary-mean-util">Mean utilization</dt>
     <dd>Time-weighted mean GPU utilization over the window. GPU devices are
       collapsed to a per-job/per-node max first, so this measures &ldquo;how
-      busy&rdquo; a job, node or partition was &mdash; not raw GPU-hours.</dd>
+      busy&rdquo; a job, node or GPU type was &mdash; not raw GPU-hours.</dd>
     <dt id="glossary-mean-occupancy">Mean occupancy</dt>
-    <dd>A partition's window-average share of its total GPU capacity that had
-      an active job on it, regardless of how busy that job's GPUs actually
-      were. A partition can have high occupancy and low utilization (jobs
-      running but idle) or the reverse.</dd>
+    <dd>A GPU type&rsquo;s window-average share of its total GPU capacity
+      (every node carrying that type, idle included) that had an active job
+      on it, regardless of how busy that job's GPUs actually were. A type
+      can have high occupancy and low utilization (jobs running but idle)
+      or the reverse.</dd>
     <dt id="glossary-util-gpu-hours">GPU-hours (Users table)</dt>
     <dd>Utilization-weighted GPU-hours: mean utilization &times; GPU time.
       Ranks users by how much they actually used, not how much they were

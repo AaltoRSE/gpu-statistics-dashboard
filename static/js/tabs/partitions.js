@@ -1,5 +1,5 @@
 /* Partitions tab: utilization/occupancy bar charts, the trend chart, the
- * partition table, the pending-job queue table and the VRAM-distribution
+ * GPU-type table, the pending-job queue table and the VRAM-distribution
  * chart. The VRAM panel loads independently under its own results-panel
  * so a slow VRAM query never blocks the rest of the tab.
  *
@@ -7,21 +7,23 @@
  * other. */
 "use strict";
 
-import { $ } from "../core/dom.js";
-import { escapeHtml, fmtInt, pctBar, html, raw, compareStrings, tsToDate, partitionLink } from "../core/format.js";
+import { $, isPlainClick } from "../core/dom.js";
+import { escapeHtml, fmtInt, pctBar, html, raw, compareStrings, tsToDate, partitionLink, fmtDuration, fmtSacctTime, jobLink, userLink } from "../core/format.js";
 import { setResultsLoading, showPanelError, panelOk } from "../core/panel.js";
 import { renderPlot, plotTheme, partBarColor } from "../core/plot.js";
 import { api } from "../core/api.js";
-import { loaded, setUrl, openPartition } from "../core/router.js";
+import { loaded, setUrl, openPartition, openJob, openUser } from "../core/router.js";
 import { createTable } from "../core/table.js";
 
 let partRows = [];
 let queueRows = [];
 let queueTotal = null;   // the backend's unique cluster-wide queue figure
 let queueAvailable = true;
+let waitingJobs = [];    // raw waiting_jobs records from the API
+let waitHistoryAvailable = true;
 export let partTrendData = {};
 let partTrendStep = 300; // seconds; set from the API response, used to size the smoothing window
-export let selectedPartition = ""; // deep-linked or chosen partition; "" = all
+export let selectedPartition = ""; // deep-linked or chosen GPU type; "" = all
 let partitionsToken = 0;
 
 export function setSelectedPartition(name) {
@@ -31,13 +33,18 @@ export function setSelectedPartition(name) {
 export function applyPartitionSelection(name) {
   selectedPartition = name || "";
   const sel = $("pPartition");
-  const names = [...new Set(partRows.map((p) => p.name).filter(Boolean))].sort();
-  const options = ['<option value="">all partitions</option>'];
+  // Union of utilization rows and queue group names: a pending-only GPU
+  // type (no utilization series in this window) stays selectable.
+  const names = [...new Set([
+    ...partRows.map((p) => p.name),
+    ...queueRows.map((q) => q.name),
+  ].filter(Boolean))].sort(compareStrings);
+  const options = ['<option value="">all GPU types</option>'];
   const listed = names.includes(selectedPartition);
   names.forEach((n) =>
     options.push('<option value="' + escapeHtml(n) + '">' + escapeHtml(n) + "</option>"));
   if (selectedPartition && !listed) {
-    // A deep-linked partition absent from the current window stays selected
+    // A deep-linked type absent from the current window stays selected
     // so the URL keeps yielding the scoped (possibly empty) result.
     options.push('<option value="' + escapeHtml(selectedPartition) + '">' +
       escapeHtml(selectedPartition) + " (no data in window)</option>");
@@ -46,11 +53,13 @@ export function applyPartitionSelection(name) {
   sel.value = selectedPartition;
   if (!sel.value) selectedPartition = "";
   renderPartTrend(partTrendData);
-  // Re-outline the selected partition's bar in the two charts above the
+  // Re-outline the selected type's bar in the two charts above the
   // trend (T-27) — previously only the trend/VRAM charts showed which
-  // partition was scoped.
+  // type was scoped.
   renderPartBar();
   renderPartOccupancy();
+  renderWaitingJobs();
+  renderPartQueue();
   setUrl(sel.value ? "/partition/" + encodeURIComponent(sel.value) : "/partitions");
 }
 
@@ -65,7 +74,7 @@ export async function loadPartitions() {
   } catch (e) {
     if (token === partitionsToken) {
       setResultsLoading("partitionsResults", false);
-      showPanelError("partitionsResults", e, loadPartitions, "the partition data");
+      showPanelError("partitionsResults", e, loadPartitions, "the GPU type data");
     }
     return;
   }
@@ -78,8 +87,10 @@ export async function loadPartitions() {
     .filter(([name]) => name !== "__total__")
     .map(([name, g]) => Object.assign({ name }, g));
   queueAvailable = data.queue_available !== false;
+  waitingJobs = data.waiting_jobs || [];
+  waitHistoryAvailable = data.wait_history_available !== false;
   const w = data.window;
-  $("pCount").textContent = data.partitions.length + " partitions · " +
+  $("pCount").textContent = data.partitions.length + " GPU types · " +
     ($("pRunning").checked
       ? "live jobs · instantaneous"
       : tsToDate(w.start) + " → " + tsToDate(w.end));
@@ -107,9 +118,9 @@ function renderPartBar() {
     y: rows.map((p) => p.mean_util),
     marker: {
       color: rows.map((p) => partBarColor(p.mean_util)),
-      // Selecting a partition already scopes the trend and VRAM charts
+      // Selecting a GPU type already scopes the trend and VRAM charts
       // below; outlining its bar here too (T-27) is the only place these
-      // two charts show which partition that is.
+      // two charts show which type that is.
       line: {
         width: rows.map((p) => p.name === selectedPartition ? 2 : 0),
         color: th.font.color,
@@ -188,8 +199,8 @@ function renderPartTrend(trend) {
     ? Object.entries(trend).filter(([name]) => name === selectedPartition)
     : Object.entries(trend);
   const withData = entries.filter(([, values]) => values && values.length);
-  // Rank by each partition's mean utilization (computed from the series
-  // actually plotted) so the busiest partitions sit first and get the
+  // Rank by each GPU type's mean utilization (computed from the series
+  // actually plotted) so the busiest types sit first and get the
   // stable leading colors; a plain insertion order would be arbitrary.
   const ranked = withData
     .map(([name, values]) => ({ name, values,
@@ -219,7 +230,7 @@ function renderPartTrend(trend) {
     layout.annotations = [{
       text: selectedPartition
         ? "No trend data for " + selectedPartition + " in this window"
-        : "No partition trend data in this window",
+        : "No GPU type trend data in this window",
       showarrow: false, xref: "paper", yref: "paper", x: 0.5, y: 0.5,
       font: { color: th.font.color, size: 12 },
     }];
@@ -242,8 +253,9 @@ function partRowClick(e, tr) {
 }
 
 function partTableEmptyMessage() {
-  return { text: "No partitions in this window.", resetLabel: null };
+  return { text: "No GPU types in this window.", resetLabel: null };
 }
+
 
 const partTable = createTable({
   el: $("partTable"),
@@ -264,7 +276,7 @@ function renderPartTable() {
 
 /* ---------------- Pending jobs (queue status) ----------------
  * One squeue -t PD snapshot per partitions fetch, aggregated by the
- * backend into the tab's GPU-group semantics. Unavailable (squeue
+ * backend into the tab's GPU-type semantics. Unavailable (squeue
  * failed) renders as its own state — never as an empty queue. */
 
 function queueRowHtml(q) {
@@ -272,6 +284,9 @@ function queueRowHtml(q) {
     <tr class="row" data-partition="${q.name}">
       <td>${raw(partitionLink(q.name))}</td>
       <td class="num">${fmtInt(q.jobs)}</td>
+      <td class="num">${q.avg_wait_s === null || q.avg_wait_s === undefined
+        ? "—" : fmtDuration(q.avg_wait_s)}</td>
+      <td class="num">${fmtInt(q.started_jobs || 0)}</td>
       <td class="num">${q.gpus === null ? "unknown" : fmtInt(q.gpus)}</td>
       <td class="num">${fmtInt(q.gpus_min)}</td>
     </tr>`;
@@ -285,6 +300,8 @@ const partQueueTable = createTable({
   el: $("partQueueTable"),
   columns: [
     { key: "name", type: "text" }, { key: "jobs", type: "number" },
+    { key: "avg_wait_s", type: "number" },
+    { key: "started_jobs", type: "number" },
     { key: "gpus", type: "number" }, { key: "gpus_min", type: "number" },
   ],
   defaultSort: { key: "jobs", dir: "desc" },
@@ -300,11 +317,99 @@ const partQueueTable = createTable({
 function renderPartQueue() {
   partQueueTable.setRows(queueRows);
   $("pQueueHint").hidden = queueAvailable;
-  const total = queueTotal ? queueTotal.jobs
+  $("pWaitHistoryHint").hidden = waitHistoryAvailable;
+  // All-types: the backend's unique cluster-wide figure (__total__).
+  // Filtered: the selected type's own placement count — rows are
+  // "demand that could land here", so that is the honest per-type
+  // number (the unique count is unknowable per type).
+  const selected = queueRows.find((q) => q.name === selectedPartition);
+  const total = selected ? selected.jobs
+    : queueTotal ? queueTotal.jobs
     : queueRows.reduce((s, q) => s + q.jobs, 0);
   $("pQueueMeta").textContent = total
     ? total + " pending job" + (total === 1 ? "" : "s")
     : "";
+}
+
+
+/* -------------- Waiting jobs (the individual queue rows) --------------
+ * Each GPU-eligible physical pending job once, filtered client-side by
+ * the selected GPU type through its groups. Row/link opens the job
+ * detail; user links keep their higher-priority navigation. The raw
+ * partition column is plain text: a partition name is no longer a
+ * selectable group and must not navigate to an empty type view. */
+
+function waitingRowHtml(j) {
+  return html`
+    <tr class="row" data-job="${j.jobid}">
+      <td>${raw(jobLink(j.jobid))}</td>
+      <td>${raw(userLink(j.user))}</td>
+      <td>${(j.groups || []).join(", ")}</td>
+      <td>${(j.partition || "").split(",").map((p) => p.trim())
+        .filter(Boolean).join(", ")}</td>
+      <td>${fmtSacctTime(j.submit)}</td>
+      <td class="num">${j.wait_s === null || j.wait_s === undefined
+        ? "—" : fmtDuration(j.wait_s)}</td>
+      <td>${j.start ? fmtSacctTime(j.start) : "—"}</td>
+      <td>${j.reason}</td>
+      <td class="num">${j.nodes ? fmtInt(j.nodes) : "—"}</td>
+      <td class="num">${j.gpu_total === null || j.gpu_total === undefined
+        ? "unknown" : fmtInt(j.gpu_total)}</td>
+    </tr>`;
+}
+
+function waitingRowClick(e, tr) {
+  const jlink = e.target.closest("a.joblink");
+  if (jlink) {
+    e.stopPropagation();
+    if (!isPlainClick(e)) return;
+    e.preventDefault();
+    openJob(jlink.dataset.job, { kind: "partitions" });
+    return;
+  }
+  const ulink = e.target.closest("a.userlink");
+  if (ulink) {
+    e.stopPropagation();
+    if (!isPlainClick(e)) return;
+    e.preventDefault();
+    openUser(ulink.dataset.user);
+    return;
+  }
+  openJob(tr.dataset.job, { kind: "partitions" });
+}
+
+const pendingJobsTable = createTable({
+  el: $("pendingJobsTable"),
+  columns: [
+    { key: "jobid", type: "text" }, { key: "user", type: "text" },
+    { key: "groups", type: "text" }, { key: "partition", type: "text" },
+    { key: "submit", type: "text" },
+    { key: "wait_s", type: "number" }, { key: "start", type: "text" },
+    { key: "reason", type: "text" }, { key: "nodes", type: "number" },
+    { key: "gpu_total", type: "number" },
+  ],
+  defaultSort: { key: "wait_s", dir: "desc" },
+  renderRow: waitingRowHtml,
+  onRowClick: waitingRowClick,
+  emptyMessage: () => {
+    if (!queueAvailable) {
+      return { text: "Queue status unavailable — squeue could not be reached (this is not an empty queue).", resetLabel: null };
+    }
+    return selectedPartition
+      ? { text: "No pending jobs for " + selectedPartition + ".", resetLabel: null }
+      : { text: "No pending jobs.", resetLabel: null };
+  },
+});
+
+
+function renderWaitingJobs() {
+  const rows = selectedPartition
+    ? waitingJobs.filter((j) => Array.isArray(j.groups) && j.groups.includes(selectedPartition))
+    : waitingJobs;
+  pendingJobsTable.setRows(rows);
+  $("pWaitingMeta").textContent = selectedPartition
+    ? rows.length + " waiting for " + selectedPartition
+    : (rows.length ? rows.length + " waiting" : "");
 }
 
 function partControlsChanged() { loadPartitions(); }
@@ -331,7 +436,7 @@ let vramGpuType = "";
 export async function loadVram() {
   const token = ++vramToken;
   // The VRAM fetch blurs only the VRAM panel (vramResults), never the whole
-  // partitions tab: window / running-only / partition changes here must not
+  // partitions tab: window / running-only / GPU-type changes here must not
   // freeze the other graphs.
   const origin = partitionsToken;
   setResultsLoading("vramResults", true);
@@ -428,7 +533,7 @@ function renderVram() {
     showlegend: true,
     legend: { orientation: "h", x: 0, y: 1.06, xanchor: "left", yanchor: "bottom" },
     // Bar distribution is read-only: no rectangle drag, pan, or axis zoom
-    // (same treatment as the partition bar charts).
+    // (same treatment as the GPU-type bar charts).
     xaxis: { title: "VRAM usage (GB per GPU, peak over window)",
              gridcolor: th.grid, fixedrange: true },
     yaxis: { title: normalize ? "Share of matched allocated GPU-hours (%)"
@@ -501,6 +606,7 @@ export function clearPartitionSelection() {
   renderPartTrend(partTrendData);
   renderPartBar();
   renderPartOccupancy();
+  renderWaitingJobs();
   if (loaded.partitions) loadVram();
 }
 

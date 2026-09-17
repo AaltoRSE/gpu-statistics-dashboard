@@ -34,52 +34,62 @@ JOB3_END = "2026-08-28T00:00:00"
 
 SACCT = {
     "1": {"jobid": "1", "name": "train.sh", "user": "alice", "account": "acc",
-          "partition": "gpu-h100", "state": "RUNNING", "start": JOB1_START,
-          "end": JOB1_END, "elapsed_s": 3600, "gpus": 2, "gpu_type": "h100",
+          "partition": "gpu-h200-ellis", "state": "RUNNING", "submit": "2026-08-27T23:00:00",
+          "start": JOB1_START,
+          "end": JOB1_END, "elapsed_s": 3600, "gpus": 2, "gpu_type": "h200",
           "node_list": "gpu1", "ncpus": 8},
     "2": {"jobid": "2", "name": "fin.sh", "user": "bob", "account": "acc",
-          "partition": "gpu-h100", "state": "COMPLETED", "start": JOB2_START,
-          "end": JOB2_END, "elapsed_s": 7200, "gpus": 1, "gpu_type": "h100",
+          "partition": "gpu-h200", "state": "COMPLETED", "submit": "2026-08-28T23:00:00",
+          "start": JOB2_START,
+          "end": JOB2_END, "elapsed_s": 7200, "gpus": 1, "gpu_type": "h200",
           "node_list": "gpu1", "ncpus": 4},
     "3": {"jobid": "3", "name": "infer.sh", "user": "carol", "account": "acc",
-          "partition": "gpu-h200", "state": "COMPLETED", "start": JOB3_START,
-          "end": JOB3_END, "elapsed_s": 86400, "gpus": 4, "gpu_type": "h200",
+          "partition": "gpu-h100", "state": "COMPLETED", "submit": "2026-08-26T23:00:00",
+          "start": JOB3_START,
+          "end": JOB3_END, "elapsed_s": 86400, "gpus": 4, "gpu_type": "h100",
           "node_list": "gpu2", "ncpus": 8},
-    # MIG slice on gpu49: distinct user, same Slurm partition as job 3
-    # but its node's GRES is a MIG profile, so it must group separately in
-    # Partitions (and its capacity belongs only to the profile group).
+    # MIG slice on gpu49: distinct user; its node's GRES profile splits
+    # it from the whole-GPU h200 group (capacity belongs only to the
+    # profile group).
     "4": {"jobid": "4", "name": "mig.sh", "user": "dave", "account": "acc",
-          "partition": "gpu-h200", "state": "RUNNING", "start": JOB2_START,
+          "partition": "gpu-h200-mig", "state": "RUNNING",
+          "submit": "2026-08-28T22:00:00",
+          "start": JOB2_START,
           "end": JOB1_END, "elapsed_s": 3600, "gpus": 1,
           "gpu_type": "h200_3g.71gb", "node_list": "gpu49", "ncpus": 32},
 }
 
 NODES = [
     {"name": "gpu1", "state": "MIXED", "state_full": "MIXED", "reason": "",
-     "partitions": "gpu-h100", "cpus": 64, "gpus": 8, "gpu_type": "h100",
+     "partitions": "gpu-h200,gpu-h200-ellis", "cpus": 64, "gpus": 8,
+     "gpu_type": "h200",
+     "gres": [("h200", 8)],
      "gpus_alloc": 2, "cpus_alloc": 16, "free_mem": 1000, "real_mem": 5000},
+    # priority variant over the same hardware: must collapse into the
+    # same h200 queue type
+    {"name": "gpu3", "state": "IDLE", "state_full": "IDLE", "reason": "",
+     "partitions": "gpu-h200-ellis", "cpus": 64, "gpus": 8,
+     "gpu_type": "h200",
+     "gres": [("h200", 8)],
+     "gpus_alloc": 0, "cpus_alloc": 0, "free_mem": 4000, "real_mem": 5000},
+    # another type entirely
     {"name": "gpu2", "state": "ALLOCATED", "state_full": "ALLOCATED*",
      "reason": "",
-     "partitions": "gpu-h200", "cpus": 64, "gpus": 8, "gpu_type": "h200",
-     "gpus_alloc": 3, "cpus_alloc": 32, "free_mem": 900, "real_mem": 5000},
-    # idle h100 node: must be included in the h100 group's capacity total
-    {"name": "gpu3", "state": "IDLE", "state_full": "IDLE", "reason": "",
      "partitions": "gpu-h100", "cpus": 64, "gpus": 8, "gpu_type": "h100",
-     "gpus_alloc": 0, "cpus_alloc": 0, "free_mem": 4000, "real_mem": 5000},
-    # MIG node: its GRES is a MIG profile, so its capacity belongs to the
-    # profile group, never to the whole-GPU h200 pool.
+     "gres": [("h100", 8)],
+     "gpus_alloc": 3, "cpus_alloc": 32, "free_mem": 900, "real_mem": 5000},
+    # gpu49 in reality: 4 whole H200 GPUs + 8 MIG h200_3g.71gb slices on
+    # one node — each group must see only its own type's count
     {"name": "gpu49", "state": "ALLOCATED", "state_full": "ALLOCATED",
      "reason": "",
-     "partitions": "gpu-h200", "cpus": 128, "gpus": 8,
-     "gpu_type": "h200_3g.71gb",
+     "partitions": "gpu-h200-mig", "cpus": 128, "gpus": 12,
+     "gpu_type": "h200",
+     "gres": [("h200", 4), ("h200_3g.71gb", 8)],
      "gpus_alloc": 1, "cpus_alloc": 32, "free_mem": 900, "real_mem": 5000},
-    # drained node: qualifiers and reason must survive parsing
-    {"name": "gpu51", "state": "IDLE", "state_full": "IDLE+DRAIN",
-     "reason": "maintenance: firmware update scheduled",
-     "partitions": "gpu-h200", "cpus": 64, "gpus": 8, "gpu_type": "h200",
-     "gpus_alloc": 0, "cpus_alloc": 0, "free_mem": 100, "real_mem": 5000},
+    # CPU-only node: its partition must never appear as a GPU queue
     {"name": "csl1", "state": "IDLE", "state_full": "IDLE", "reason": "",
      "partitions": "batch", "cpus": 40, "gpus": 0, "gpu_type": "",
+     "gres": [],
      "gpus_alloc": 0, "cpus_alloc": 0, "free_mem": 100, "real_mem": 200},
 ]
 
@@ -121,44 +131,61 @@ class FakeProm:
         {"metric": {"slurmjobid": "1", "gpu": "0"},
          "values": [[1000, "50"], [1120, "50"]]},
     ]
-    # Partition summary keeps slurmjobid + instance + job + gpu_type so
-    # job identity, the capacity join, and the partition/MIG grouping
-    # survive aggregation. ``job`` is the Slurm partition (the metric's
-    # partition label); job 4 runs on MIG node gpu49 under the same
-    # partition but its gpu_type must split it into the profile group.
+    # Partition summary keeps slurmjobid + instance + gpu_type so job
+    # identity, the capacity join, and the GPU-type grouping survive
+    # aggregation. The exporter's gpu_type label aliases the short
+    # scontrol type (gpu1 reports "NVIDIA H200"); grouping must
+    # canonicalize against the instance's configured types. Job 4 runs
+    # on mixed node gpu49; its MIG-shaped label must split it into the
+    # profile group, and the whole-GPU label must not.
     _PART_SUMMARY = [
-        {"metric": {"slurmjobid": "1", "instance": "gpu1", "job": "gpu-h100",
-                    "gpu_type": "h100"},
+        {"metric": {"slurmjobid": "1", "instance": "gpu1", "job": "gpu-h200",
+                    "gpu_type": "NVIDIA H200"},
          "values": [[1000, "40"], [1120, "60"]]},
-        {"metric": {"slurmjobid": "2", "instance": "gpu1", "job": "gpu-h100",
-                    "gpu_type": "h100"},
-         "values": [[1000, "10"]]},
-        {"metric": {"slurmjobid": "3", "instance": "gpu2", "job": "gpu-h200",
+        {"metric": {"slurmjobid": "2", "instance": "gpu1", "job": "gpu-h200",
                     "gpu_type": "h200"},
+         "values": [[1000, "10"]]},
+        {"metric": {"slurmjobid": "3", "instance": "gpu2", "job": "gpu-h100",
+                    "gpu_type": "h100"},
          "values": [[1000, "90"], [1120, "95"]]},
-        {"metric": {"slurmjobid": "4", "instance": "gpu49", "job": "gpu-h200",
+        {"metric": {"slurmjobid": "4", "instance": "gpu49", "job": "gpu-h200-mig",
                     "gpu_type": "h200_3g.71gb"},
          "values": [[1000, "80"], [1120, "90"]]},
     ]
-    _PART_TREND = [
-        {"metric": {"job": "gpu-h100", "gpu_type": "h100"},
-         "values": [[1000, "25.0"], [1120, "35.0"]]},
-        {"metric": {"job": "gpu-h200", "gpu_type": "h200"},
-         "values": [[1000, "92.5"]]},
-        {"metric": {"job": "gpu-h200", "gpu_type": "h200_3g.71gb"},
-         "values": [[1000, "80.0"], [1120, "90.0"]]},
+    # Trend/occupancy arrive as raw-label sum/count series (the same
+    # partition-window queries the API issues); per-timestamp sum/count
+    # is the utilization trend, the count is the occupancy series.
+    _PART_UTIL_SUMS = [
+        {"metric": {"gpu_type": "NVIDIA H200"},
+         "values": [[1000, "40"], [1120, "60"]]},
+        {"metric": {"gpu_type": "h200"},
+         "values": [[1000, "10"]]},
+        {"metric": {"gpu_type": "h100"},
+         "values": [[1000, "90"], [1120, "95"]]},
+        {"metric": {"gpu_type": "h200_3g.71gb"},
+         "values": [[1000, "80"], [1120, "90"]]},
+    ]
+    _PART_GPU_COUNTS = [
+        {"metric": {"gpu_type": "NVIDIA H200"},
+         "values": [[1000, "2"], [1120, "2"]]},
+        {"metric": {"gpu_type": "h200"},
+         "values": [[1000, "1"]]},
+        {"metric": {"gpu_type": "h100"},
+         "values": [[1000, "1"], [1120, "1"]]},
+        {"metric": {"gpu_type": "h200_3g.71gb"},
+         "values": [[1000, "1"], [1120, "1"]]},
     ]
     _JOBS_UTIL = [
-        {"metric": {"slurmjobid": "1", "instance": "gpu1", "job": "gpu-h100",
-                    "user": "alice", "gpu_type": "h100"},
+        {"metric": {"slurmjobid": "1", "instance": "gpu1", "job": "gpu-h200",
+                    "user": "alice", "gpu_type": "NVIDIA H200"},
          "values": [[1000, "40"], [1120, "60"]]},
-        {"metric": {"slurmjobid": "2", "instance": "gpu1", "job": "gpu-h100",
-                    "user": "bob", "gpu_type": "h100"},
+        {"metric": {"slurmjobid": "2", "instance": "gpu1", "job": "gpu-h200",
+                    "user": "bob", "gpu_type": "h200"},
          "values": [[1000, "10"]]},
-        {"metric": {"slurmjobid": "3", "instance": "gpu2", "job": "gpu-h200",
-                    "user": "carol", "gpu_type": "h200"},
+        {"metric": {"slurmjobid": "3", "instance": "gpu2", "job": "gpu-h100",
+                    "user": "carol", "gpu_type": "h100"},
          "values": [[1000, "90"], [1120, "95"]]},
-        {"metric": {"slurmjobid": "4", "instance": "gpu49", "job": "gpu-h200",
+        {"metric": {"slurmjobid": "4", "instance": "gpu49", "job": "gpu-h200-mig",
                     "user": "dave", "gpu_type": "h200_3g.71gb"},
          "values": [[1000, "80"], [1120, "90"]]},
     ]
@@ -185,31 +212,34 @@ class FakeProm:
                 return self._JOB_DETAIL_UTIL
             if 'instance="' in query:  # node detail
                 return self._NODE_DETAIL_UTIL
-            if "count by (job, gpu_type)" in query:  # partition occupancy
-                # concurrent allocated series per (partition, gpu_type)
-                ids = self._matchers(query)
-                n = {}
-                for s in self._PART_SUMMARY:
-                    if ids is None or s["metric"]["slurmjobid"] in ids:
-                        g = (s["metric"]["job"], s["metric"]["gpu_type"])
-                        n[g] = n.get(g, 0) + 1
-                return [
-                    {"metric": {"job": g[0], "gpu_type": g[1]},
-                     "values": [[1000, str(c)], [1120, str(c)]]}
-                    for g, c in sorted(n.items())
-                ]
-            if "avg by (job, gpu_type)" in query:  # partition trend
+            if "count by (gpu_type)" in query:  # partition occupancy
+                # concurrent allocated series per raw exporter gpu_type;
                 # a matched selector only yields groups with matching jobs
                 ids = self._matchers(query)
+                # series present per raw label per timestamp (a job with
+                # one sample contributes only at that timestamp)
+                per_ts = {}
+                for s in self._PART_SUMMARY:
+                    if ids is not None and s["metric"]["slurmjobid"] not in ids:
+                        continue
+                    g = s["metric"]["gpu_type"]
+                    for ts, _ in s["values"]:
+                        per_ts.setdefault(g, {}).setdefault(ts, 0)
+                        per_ts[g][ts] += 1
+                return [
+                    {"metric": {"gpu_type": g},
+                     "values": [[ts, str(c)] for ts, c in sorted(by_ts.items())]}
+                    for g, by_ts in sorted(per_ts.items())
+                ]
+            if "sum by (gpu_type)" in query:  # partition trend numerator
+                ids = self._matchers(query)
                 if ids is None:
-                    return self._PART_TREND
-                allowed = {(s["metric"]["job"], s["metric"]["gpu_type"])
-                           for s in self._PART_SUMMARY
+                    return self._PART_UTIL_SUMS
+                allowed = {s["metric"]["gpu_type"] for s in self._PART_SUMMARY
                            if s["metric"]["slurmjobid"] in ids}
-                return [t for t in self._PART_TREND
-                        if (t["metric"]["job"], t["metric"]["gpu_type"])
-                        in allowed]
-            if "max by (slurmjobid, instance, job, gpu_type)" in query:
+                return [t for t in self._PART_UTIL_SUMS
+                        if t["metric"]["gpu_type"] in allowed]
+            if "max by (slurmjobid, instance, gpu_type)" in query:
                 return self._filter(self._PART_SUMMARY, self._matchers(query))
             jobs_util = self._JOBS_UTIL + self.extra_jobs
             return self._filter(jobs_util, self._matchers(query))
@@ -246,13 +276,13 @@ class FakeProm:
                     for j in sorted(self.live_ids)]
         if "count by (instance, job, gpu_type)" in query:
             return [
-                {"metric": {"instance": "gpu1", "job": "gpu-h100",
-                            "gpu_type": "h100"},
+                {"metric": {"instance": "gpu1", "job": "gpu-h200",
+                            "gpu_type": "NVIDIA H200"},
                  "value": [1, "2"]},
-                {"metric": {"instance": "gpu2", "job": "gpu-h200",
-                            "gpu_type": "h200"},
+                {"metric": {"instance": "gpu2", "job": "gpu-h100",
+                            "gpu_type": "h100"},
                  "value": [1, "3"]},
-                {"metric": {"instance": "gpu49", "job": "gpu-h200",
+                {"metric": {"instance": "gpu49", "job": "gpu-h200-mig",
                             "gpu_type": "h200_3g.71gb"},
                  "value": [1, "1"]},
             ]
@@ -398,7 +428,9 @@ def test_users_aggregates_per_user(client):
     assert alice["util_gpu_hours"] == pytest.approx(0.0333, abs=0.005)
     assert alice["mean_util"] == pytest.approx(50.0)
     assert alice["vram_avg"] == pytest.approx(11.0)  # mean of 10 and 12
-    assert alice["gpu_types"] == ["h100"]
+    # the Users table shows the raw exporter gpu_type label (not the
+    # canonical Partitions-tab group)
+    assert alice["gpu_types"] == ["NVIDIA H200"]
     assert "name" not in alice and "gpu_hours_alloc" not in alice
     dave = by_user["dave"]
     assert dave["jobs"] == 1 and dave["running_jobs"] == 1
@@ -668,23 +700,25 @@ def test_jobs_running_only_ignores_limit(client, fake_prom):
     assert r.status_code == 200
     assert {j["jobid"] for j in r.json()["jobs"]} == {"1", "2", "4"}
 
-def test_partitions_groups_by_partition(client):
+def test_partitions_group_by_gpu_type(client):
     r = client.get("/api/partitions", params={"since_hours": 24})
     assert r.status_code == 200
     data = r.json()
     by_name = {p["name"]: p for p in data["partitions"]}
-    # job 4 runs on MIG node gpu49, so the whole-GPU gpu-h200 group is split
-    # out into the MIG profile group.
-    assert set(by_name) == {"gpu-h100", "gpu-h200", "h200_3g.71gb"}
-    # gpu-h100: samples 40, 60 (job1) and 10 (job2) -> time-weighted mean 36.67
-    assert by_name["gpu-h100"]["job_count"] == 2
-    assert by_name["gpu-h100"]["mean_util"] == pytest.approx(36.67, abs=0.01)
-    assert by_name["gpu-h200"]["mean_util"] == pytest.approx(92.5)
+    # Two priority partitions (gpu-h200, gpu-h200-ellis) over the same
+    # h200 hardware collapse into ONE h200 queue row; jobs 1+2 both land
+    # there (2+2+1 samples of 40/60/10 -> mean 36.67). Job 3's h100 and
+    # job 4's MIG profile stay their own groups. No partition-name row
+    # survives.
+    assert set(by_name) == {"h200", "h100", "h200_3g.71gb"}
+    assert by_name["h200"]["job_count"] == 2
+    assert by_name["h200"]["mean_util"] == pytest.approx(36.67, abs=0.01)
+    assert by_name["h100"]["mean_util"] == pytest.approx(92.5)
     assert by_name["h200_3g.71gb"]["job_count"] == 1
     assert by_name["h200_3g.71gb"]["mean_util"] == pytest.approx(85.0)
     for p in data["partitions"]:
         assert 0 <= p["mean_util"] <= 100
-    assert "gpu-h100" in data["trend"] and "gpu-h200" in data["trend"]
+    assert "h100" in data["trend"] and "h200" in data["trend"]
     assert "h200_3g.71gb" in data["trend"]
 
 
@@ -692,17 +726,19 @@ def test_partitions_gpu_capacity(client):
     by_name = {p["name"]: p for p in
                client.get("/api/partitions",
                           params={"since_hours": 24}).json()["partitions"]}
-    # gpu-h100 members are all scontrol nodes with that partition (idle gpu3
-    # included); allocation is the exact per-partition live GPU count.
-    assert by_name["gpu-h100"]["gpus_total"] == 16
-    assert by_name["gpu-h100"]["gpus_alloc"] == 2
-    # job 4 moved to the MIG profile group, so gpu51 (idle) is the only
-    # other gpu-h200 member now.
-    assert by_name["gpu-h200"]["gpus_total"] == 16
-    assert by_name["gpu-h200"]["gpus_alloc"] == 3
-    # the MIG profile group carries only gpu49's capacity and job 4.
+    # Capacity is summed per exact GRES type across ALL scontrol nodes
+    # (idle gpu3 included, independent of partition membership):
+    # h200 = gpu1's 8 + gpu3's 8 + gpu49's 4 whole = 20.
+    assert by_name["h200"]["gpus_total"] == 20
+    # allocation is the exact per-group live count (jobs 1+2 on gpu1 = 2).
+    assert by_name["h200"]["gpus_alloc"] == 2
+    assert by_name["h100"]["gpus_total"] == 8
+    assert by_name["h100"]["gpus_alloc"] == 3
+    # the MIG profile group carries only gpu49's slices.
     assert by_name["h200_3g.71gb"]["gpus_total"] == 8
     assert by_name["h200_3g.71gb"]["gpus_alloc"] == 1
+
+
 
 
 def test_partitions_running_only_injects_matcher(client, fake_prom):
@@ -713,18 +749,19 @@ def test_partitions_running_only_injects_matcher(client, fake_prom):
     assert r.status_code == 200
     ranges = [q for t, q in fake_prom.calls if t == "range"]
     matcher = 'slurmjobid=~"^(?:1|2|4)$"'
-    assert any(matcher in q and "max by (slurmjobid, instance, job, gpu_type)" in q
+    assert any(matcher in q and "max by (slurmjobid, instance, gpu_type)" in q
                for q in ranges), ranges
-    assert any(matcher in q and "avg by (job, gpu_type)" in q
+    assert any(matcher in q and "sum by (gpu_type)" in q for q in ranges), ranges
+    assert any(matcher in q and "count by (gpu_type)" in q
                for q in ranges), ranges
-    # non-running job 3 (whole-GPU gpu-h200) is gone; running jobs 1, 2 are
-    # gpu-h100 and running MIG job 4 is its profile group
+    # non-running job 3 (h100) is gone; running jobs 1+2 stay h200 and
+    # running MIG job 4 is its profile group
     data = r.json()
     by_name = {p["name"]: p for p in data["partitions"]}
-    assert set(by_name) == {"gpu-h100", "h200_3g.71gb"}
+    assert set(by_name) == {"h200", "h200_3g.71gb"}
     # the trend has no slurmjobid label: the matched selector must have
-    # excluded whole-GPU gpu-h200 upstream
-    assert set(data["trend"]) == {"gpu-h100", "h200_3g.71gb"}
+    # excluded h100 upstream
+    assert set(data["trend"]) == {"h200", "h200_3g.71gb"}
 
 
 def test_partitions_running_only_empty_when_no_live_ids(client, fake_prom):
@@ -736,38 +773,116 @@ def test_partitions_running_only_empty_when_no_live_ids(client, fake_prom):
 
 
 def test_partitions_queue_summary(client, fake_prom, monkeypatch):
-    # A GPU job on one partition, a MIG-profile request, a multi-partition
-    # request (counted and GPU-attributed in both), a CPU job, and a GPU
-    # job with N/A %D (exact total unknowable -> null).
+    # Queue eligibility by GPU type: same-type priority partitions
+    # (gpu-h200 / gpu-h200-ellis both map to h200), the mixed whole+MIG
+    # partition (maps to h200 + h200_3g.71gb), a typed %b request, an
+    # untyped request eligible for several types, a constraints-only
+    # row, a CPU-only job (omitted), and an explicit untyped GPU request
+    # with no resolvable partition type (-> unknown). Wait history comes
+    # from the same window's sacct-enriched jobs (jobs 1 and 2 start
+    # 2026-08-28/29 under h200; job 4 under the MIG profile). Submit
+    # times are naive-UTC so wait_s math is TZ-independent.
     monkeypatch.setattr(deps, "queue_pending", lambda: [
-        {"jobid": "10", "partition": "gpu-h100", "state": "PENDING",
-         "submit": "", "start": "", "reason": "(Resources)",
-         "nodes": 2, "gpus": 4, "gpu_type": "h100"},
-        {"jobid": "11", "partition": "gpu-h200", "state": "PENDING",
-         "submit": "", "start": "", "reason": "(Resources)",
-         "nodes": 4, "gpus": 1, "gpu_type": "h200_3g.71gb"},
-        {"jobid": "12", "partition": "batch-csl,batch-skl", "state": "PENDING",
-         "submit": "", "start": "", "reason": "(Priority)", "nodes": 2,
-         "gpus": 2, "gpu_type": "a100"},
-        {"jobid": "13", "partition": "gpu-h100", "state": "PENDING",
-         "submit": "", "start": "", "reason": "(Dependency)", "nodes": 0,
-         "gpus": 8, "gpu_type": "h100"},
+        # typed %b request: belongs ONLY to that type, despite %P
+        {"jobid": "10", "user": "eve", "partition": "gpu-h200,gpu-h200-ellis",
+         "state": "PENDING", "submit": "2026-08-30T12:26:40", "start": "",
+         "reason": "(Resources)", "nodes": 2, "gpus": 4, "gpu_type": "h200"},
+        # untyped GPU request on the mixed whole+MIG partition: counts
+        # once per eligible union type (h200 AND h200_3g.71gb)
+        {"jobid": "11", "user": "eve", "partition": "gpu-h200-mig",
+         "state": "PENDING", "submit": "", "start": "",
+         "reason": "(Resources)", "nodes": 4, "gpus": 1, "gpu_type": ""},
+        # constraints-only row on a GPU-backed partition: eligible via %P
+        {"jobid": "12", "user": "eve", "partition": "gpu-h100",
+         "state": "PENDING", "submit": "2026-08-30T15:26:40", "start": "N/A",
+         "reason": "(Priority)", "nodes": 2, "gpus": 0, "gpu_type": ""},
+        # CPU-only job on a CPU partition: omitted entirely
+        {"jobid": "13", "user": "eve", "partition": "batch",
+         "state": "PENDING", "submit": "", "start": "",
+         "reason": "(Dependency)", "nodes": 0, "gpus": 0, "gpu_type": ""},
+        # explicit untyped GPU count on an unmapped partition: unknown
+        {"jobid": "14", "user": "eve", "partition": "ghost",
+         "state": "PENDING", "submit": "2026-08-30T14:26:40", "start": "",
+         "reason": "(Resources)", "nodes": 1, "gpus": 1, "gpu_type": ""},
     ])
-    data = client.get("/api/partitions", params={"since_hours": 24}).json()
+    data = client.get("/api/partitions", params={"since_hours": 72}).json()
     assert data["queue_available"] is True
+    assert data["wait_history_available"] is True
     q = data["queue"]
-    # gpu-h100: job 10 (4*2) + job 13 (N/A %D) -> exact total null,
-    # lower bound keeps both one-node requests: 8 + 4*2
-    assert q["gpu-h100"] == {"jobs": 2, "gpus": None, "gpus_min": 16}
-    # a MIG request forms its own group, same as running jobs do
-    assert q["h200_3g.71gb"] == {"jobs": 1, "gpus": 4, "gpus_min": 4}
-    # the multi-partition GPU job (2 GPUs x 2 nodes) counts and its demand
-    # attributes to each requested partition — rows are placements
-    assert q["batch-csl"] == {"jobs": 1, "gpus": 4, "gpus_min": 4}
-    assert q["batch-skl"] == {"jobs": 1, "gpus": 4, "gpus_min": 4}
-    # unique cluster-wide view: 4 pending jobs, exact GPU demand null
-    # (job 13's %D is N/A), lower bound 8 + 4*2 + 2*2 = 24
-    assert q["__total__"] == {"jobs": 4, "gpus": None, "gpus_min": 24}
+    # h200: job 10 typed (4*2=8) + job 11 untyped (1*4=4); jobs 1+2
+    # started in-window (3600s waits each) -> avg 3600, sample 2. Job 3's
+    # 2026-08-27T00:00 start is pre-window (72h back is 18:26:40) and
+    # must not contribute.
+    assert q["h200"] == {"jobs": 2, "gpus": 12, "gpus_min": 12,
+                         "started_jobs": 2, "avg_wait_s": 3600}
+    # job 11's untyped request is also eligible for the MIG profile;
+    # job 4 (the in-window MIG start) waited 7200s: submitted 22:00 the
+    # day before its 00:00 start
+    assert q["h200_3g.71gb"] == {"jobs": 1, "gpus": 4, "gpus_min": 4,
+                                 "started_jobs": 1, "avg_wait_s": 7200}
+    # constraints-only row on the h100 partition
+    assert q["h100"] == {"jobs": 1, "gpus": 0, "gpus_min": 0,
+                         "started_jobs": 0, "avg_wait_s": None}
+    # explicit untyped GPU with no resolvable partition type
+    assert q["unknown"] == {"jobs": 1, "gpus": 1, "gpus_min": 1,
+                            "started_jobs": 0, "avg_wait_s": None}
+    # unique view: 4 GPU-eligible physical jobs (13 excluded); exact GPU
+    # demand 8 + 4 + 0 + 1 = 13; 3 in-window starts (3600+3600+7200)/3
+    assert q["__total__"] == {"jobs": 4, "gpus": 13, "gpus_min": 13,
+                              "started_jobs": 3, "avg_wait_s": 4800}
+    waiting = {j["jobid"]: j for j in data["waiting_jobs"]}
+    assert set(waiting) == {"10", "11", "12", "14"}  # CPU-only 13 absent
+    assert waiting["10"]["groups"] == ["h200"]       # typed beats %P union
+    assert waiting["11"]["groups"] == ["h200", "h200_3g.71gb"]
+    assert waiting["12"]["groups"] == ["h100"]
+    assert waiting["14"]["groups"] == ["unknown"]
+    assert waiting["10"]["wait_s"] == NOW - int(_epoch("2026-08-30T12:26:40"))
+    assert waiting["11"]["wait_s"] is None          # unparsable submit
+    assert waiting["10"]["gpu_total"] == 8
+    assert waiting["12"]["gpu_total"] == 0          # no GPU request
+    assert waiting["14"]["gpu_total"] == 1
+    # the raw partition string survives as metadata
+    assert waiting["10"]["partition"] == "gpu-h200,gpu-h200-ellis"
+
+
+def test_started_wait_summary_excludes_invalid_records(client, fake_prom,
+                                                       monkeypatch):
+    # started_wait_summary accepts only records whose submit and start
+    # both parse, whose start falls inclusively inside the window, and
+    # whose start is not before submit. Invalid/missing times are excluded
+    # from numerator AND denominator, never read as 0; a group with no
+    # valid job yields started_jobs 0 / avg_wait_s null.
+    import domain.partitions as dp
+    recs = {
+        # valid: 3600s wait
+        "100": {"submit": "2026-08-30T09:00:00", "start": "2026-08-30T10:00:00"},
+        # missing submit
+        "101": {"submit": "", "start": "2026-08-30T10:00:00"},
+        # missing/unparsable start
+        "102": {"submit": "2026-08-30T09:00:00", "start": "Unknown"},
+        # start before submit (negative duration)
+        "103": {"submit": "2026-08-30T11:00:00", "start": "2026-08-30T10:00:00"},
+        # start exactly at the window boundary is inclusive
+        "104": {"submit": "2026-08-27T16:26:40", "start": "2026-08-27T18:26:40"},
+    }
+    monkeypatch.setattr(deps, "sacct_jobs",
+                        lambda ids, start_iso=None, **kw:
+                        {j: recs[j] for j in ids if j in recs})
+    jg = {jid: {"gpu-h100"} for jid in recs}
+    out = dp.started_wait_summary(jg, NOW - 72 * 3600, NOW)
+    assert out["gpu-h100"] == {"started_jobs": 2, "avg_wait_s": 5400}
+    assert out["__total__"] == {"started_jobs": 2, "avg_wait_s": 5400}
+
+
+def test_partitions_waiting_zero_pending_partition_visible(client, fake_prom):
+    # default fixture stub: reachable squeue, zero pending jobs — but the
+    # utilization groups must still appear in the queue summary.
+    data = client.get("/api/partitions", params={"since_hours": 24}).json()
+    q = data["queue"]
+    for name in ("h200", "h100", "h200_3g.71gb"):
+        assert q[name] == {"jobs": 0, "gpus": 0, "gpus_min": 0,
+                           "started_jobs": 0, "avg_wait_s": None}
+    assert data["waiting_jobs"] == []
 
 
 def test_partitions_queue_unavailable_is_not_empty(client, fake_prom,
@@ -776,16 +891,35 @@ def test_partitions_queue_unavailable_is_not_empty(client, fake_prom,
         raise slurm.SlurmError("squeue is not available")
 
     monkeypatch.setattr(deps, "queue_pending", _boom)
-    data = client.get("/api/partitions", params={"since_hours": 24}).json()
+    data = client.get("/api/partitions", params={"since_hours": 72}).json()
     assert data["queue_available"] is False
-    assert data["queue"] == {}
+    assert data["waiting_jobs"] == []
+    # sacct history is independent: it still works
+    assert data["wait_history_available"] is True
+    assert data["queue"]["__total__"]["started_jobs"] == 3
+
+
+def test_partitions_wait_history_unavailable_keeps_queue(client, fake_prom,
+                                                         monkeypatch):
+    def _boom(ids, start_iso=None, **kw):
+        raise slurm.SlurmError("sacct is not available")
+
+    monkeypatch.setattr(deps, "sacct_jobs", _boom)
+    data = client.get("/api/partitions", params={"since_hours": 24}).json()
+    assert data["wait_history_available"] is False
+    assert data["queue_available"] is True
+    # current pending figures survive the history failure
+    assert data["queue"]["__total__"]["jobs"] == 0
+    assert data["queue"]["h200"]["started_jobs"] == 0
+    assert data["queue"]["h200"]["avg_wait_s"] is None
 
 
 def test_partitions_queue_empty_when_nothing_pending(client, fake_prom):
     # default fixture stub: reachable squeue, zero pending jobs
     data = client.get("/api/partitions", params={"since_hours": 24}).json()
     assert data["queue_available"] is True
-    assert data["queue"] == {}
+    assert data["queue"]["__total__"]["jobs"] == 0
+    assert data["queue"]["__total__"]["avg_wait_s"] is None
 
 
 def test_partitions_vram_records(client):
@@ -796,8 +930,8 @@ def test_partitions_vram_records(client):
     # per-GPU peaks averaged: job1 (12+18)/2, job2 30, job3 8, job4 22
     assert by_id["1"]["vram_gb"] == 15.0
     # ``partition`` is the group label (MIG jobs carry their profile group)
-    assert by_id["1"]["partition"] == "gpu-h100"
-    assert by_id["3"]["partition"] == "gpu-h200"
+    assert by_id["1"]["partition"] == "h200"
+    assert by_id["3"]["partition"] == "h100"
     assert by_id["4"]["partition"] == "h200_3g.71gb"
     # mean_util from the utilization window (time-weighted mean)
     assert by_id["1"]["mean_util"] == pytest.approx(50.0)
@@ -851,21 +985,21 @@ def test_partitions_vram_empty_when_no_live_ids(client, fake_prom):
 
 def test_partitions_vram_partition_filter(client):
     data = client.get("/api/partitions/vram",
-                      params={"since_hours": 24, "partition": "gpu-h100"}).json()
+                      params={"since_hours": 24, "partition": "h200"}).json()
     assert data["total"] == 2
     assert {j["jobid"] for j in data["jobs"]} == {"1", "2"}
-    # the gpu-h200 partition filter selects the whole-GPU group only; the
-    # MIG slice is reached through its profile group label
-    data = client.get("/api/partitions/vram",
-                      params={"since_hours": 24, "partition": "gpu-h200"}).json()
-    assert data["total"] == 1
-    assert [j["jobid"] for j in data["jobs"]] == ["3"]
+    # the h200 type filter selects the whole-GPU group only; the MIG
+    # slice is reached through its profile group label
     data = client.get("/api/partitions/vram",
                       params={"since_hours": 24,
                               "partition": "h200_3g.71gb"}).json()
     assert data["total"] == 1
     assert [j["jobid"] for j in data["jobs"]] == ["4"]
-    # unknown partition: no candidates, empty payload
+    data = client.get("/api/partitions/vram",
+                      params={"since_hours": 24, "partition": "h100"}).json()
+    assert data["total"] == 1
+    assert [j["jobid"] for j in data["jobs"]] == ["3"]
+    # unknown type: no candidates, empty payload
     data = client.get("/api/partitions/vram",
                       params={"since_hours": 24, "partition": "b300"}).json()
     assert data["total"] == 0 and data["jobs"] == []
@@ -899,7 +1033,7 @@ def test_nodes_endpoint(client):
     r = client.get("/api/nodes")
     assert r.status_code == 200
     data = r.json()
-    assert data["count"] == 5  # gpu_only=True default (gpu1,2,3,49,51)
+    assert data["count"] == 4  # gpu_only=True default (gpu1, gpu2, gpu3, gpu49)
     by_name = {n["name"]: n for n in data["nodes"]}
     assert by_name["gpu1"]["current_util"] == 55.5
     assert by_name["gpu1"]["current_vram"] == 41.2
@@ -909,12 +1043,16 @@ def test_nodes_endpoint(client):
 
 def test_nodes_gpu_group(client):
     by_name = {n["name"]: n for n in client.get("/api/nodes").json()["nodes"]}
-    # non-MIG nodes follow their partition; the MIG node is grouped by its
-    # profile name, not by partition.
-    assert by_name["gpu1"]["gpu_group"] == "gpu-h100"
-    assert by_name["gpu2"]["gpu_group"] == "gpu-h200"
-    assert by_name["gpu49"]["gpu_group"] == "h200_3g.71gb"
-    assert by_name["gpu51"]["gpu_group"] == "gpu-h200"
+    # A node's gpu_group is its own parsed scalar type (the MIG profile
+    # for an all-MIG node); partition membership is irrelevant.
+    assert by_name["gpu1"]["gpu_group"] == "h200"
+    assert by_name["gpu2"]["gpu_group"] == "h100"
+    assert by_name["gpu3"]["gpu_group"] == "h200"
+    # gpu49 is mixed (4 whole + 8 MIG): its scalar gpu_type is the first
+    # GRES entry; per-type capacity accounting splits its MIG profile out.
+    assert by_name["gpu49"]["gpu_group"] == "h200"
+    assert by_name["gpu49"]["gpu_type"] == "h200"
+    assert by_name["gpu49"]["gpus"] == 12
 
 
 def test_nodes_gpus_alloc(client):
@@ -1009,13 +1147,18 @@ def test_deep_link_routes_serve_spa(client):
 
 def test_aggregate_partition_stats_fixture():
     stats = [
-        {"metric": {"slurmjobid": "1", "instance": "gpu1", "job": "gpu-h100"},
+        {"metric": {"slurmjobid": "1", "instance": "gpu1",
+                    "gpu_type": "h200"},
          "values": [[1, "40"], [2, "60"]]},
-        {"metric": {"slurmjobid": "2", "instance": "gpu1", "job": "gpu-h100"},
+        {"metric": {"slurmjobid": "2", "instance": "gpu1",
+                    "gpu_type": "NVIDIA H200"},
          "values": [[1, "10"]]},
     ]
-    out = domain_partitions.aggregate_partition_stats(stats)
-    assert out[0]["name"] == "gpu-h100"
+    out = domain_partitions.aggregate_partition_stats(
+        stats, {"gpu1": ["h200"]})
+    # both series canonicalize to h200 and merge into one group
+    assert len(out) == 1
+    assert out[0]["name"] == "h200"
     assert out[0]["mean_util"] == pytest.approx(36.67, abs=0.01)
     assert out[0]["max_util"] == 60.0
     assert out[0]["job_count"] == 2
@@ -1118,12 +1261,13 @@ def test_jobs_total_candidates_reflects_pre_limit_count(client):
 def test_partitions_mean_occupancy(client):
     data = client.get("/api/partitions", params={"since_hours": 24}).json()
     by_name = {p["name"]: p for p in data["partitions"]}
-    # occupancy = concurrent series / capacity, rounded to 0.1:
-    # gpu-h100 2 / 16 = 12.5%; gpu-h200 1 / 16 = 6.25% -> 6.2 (job 3's
-    # whole-GPU group lost job 4's series); h200_3g.71gb 1 / 8 = 12.5%
-    # (job 4 on the MIG node)
-    assert by_name["gpu-h100"]["mean_occupancy"] == 12.5
-    assert by_name["gpu-h200"]["mean_occupancy"] == 6.2
+    # occupancy = window-average concurrent series / capacity:
+    # h200: merged counts 3 @t0, 2 @t1 -> mean 2.5/20 = 12.5%...
+    # but the second h200 job reports label "h200" with a single sample,
+    # so merged counts are 2,1 -> mean 1.5/20 = 7.5%;
+    # h100: 1 / 8 = 12.5%; h200_3g.71gb: 1 / 8 = 12.5% (gpu49's slices)
+    assert by_name["h200"]["mean_occupancy"] == 7.5
+    assert by_name["h100"]["mean_occupancy"] == 12.5
     assert by_name["h200_3g.71gb"]["mean_occupancy"] == 12.5
 
 
@@ -1131,13 +1275,14 @@ def test_partitions_mean_occupancy_running_only(client, fake_prom):
     data = client.get("/api/partitions",
                       params={"since_hours": 24, "running_only": "true"}).json()
     by_name = {p["name"]: p for p in data["partitions"]}
-    # whole-GPU gpu-h200 (non-running job 3 only) is gone; the matched
-    # running series are gpu-h100 jobs plus running MIG job 4
-    assert set(by_name) == {"gpu-h100", "h200_3g.71gb"}
-    assert by_name["gpu-h100"]["mean_occupancy"] == 12.5
+    # non-running job 3 (h100) is gone; the matched running series are
+    # h200 jobs plus running MIG job 4 (job 2's single sample keeps the
+    # merged h200 occupancy at 7.5)
+    assert set(by_name) == {"h200", "h200_3g.71gb"}
+    assert by_name["h200"]["mean_occupancy"] == 7.5
     assert by_name["h200_3g.71gb"]["mean_occupancy"] == 12.5
     ranges = [q for t, q in fake_prom.calls if t == "range"]
-    assert any('slurmjobid=~"^(?:1|2|4)$"' in q and "count by (job, gpu_type)" in q
+    assert any('slurmjobid=~"^(?:1|2|4)$"' in q and "count by (gpu_type)" in q
                for q in ranges), ranges
 
 

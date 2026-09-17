@@ -23,16 +23,22 @@ def _sacct_epoch(value):
 
 
 def partition_window(since_hours, running_only=False, now=None,
-                      node_gpu_types=None):
-    """Slurm-partition utilization window.
+                     node_gpu_types=None):
+    """GPU-type utilization window.
 
-    Groups are keyed by the canonical GPU-group name (the Slurm partition,
-    except MIG GPUs, which are keyed by the node's MIG GRES profile so a
-    MIG node never counts against its whole-GPU pool). Summary data keeps
-    the ``slurmjobid`` label (per-job/per-node max, so the job identity
-    survives for running-only matching); trend data is a plain
-    ``avg by (job, gpu_type)`` and has no job identity, so the matcher must
-    be injected into the metric selector before the aggregation.
+    Groups are keyed by the canonical GPU type (gpu_groups.canonical_gpu_type):
+    the short scontrol GRES type, MIG profiles split out from their node's
+    whole-GPU pool), not by Slurm partition — priority-only partitions over
+    the same hardware share one group. Summary data keeps the
+    ``slurmjobid`` label (per-job/per-node max, so the job identity
+    survives for running-only matching); the trend/occupancy queries are
+    ``sum``/``count`` ``by (gpu_type)`` — per-timestamp sum / count gives
+    the utilization trend, the count itself is the occupancy series —
+    and have no job identity, so the matcher must be injected into the
+    metric selector before the aggregation.
+
+    Also returns ``job_groups`` — the canonical group(s) each observed job
+    belongs to — for the historical wait join in ``started_wait_summary``.
     """
     start, now = job_window(since_hours, now)
     step = step_for_range(now - start)
@@ -40,69 +46,121 @@ def partition_window(since_hours, running_only=False, now=None,
     if running_only:
         live = running_gpu_job_ids()
         if not live:
-            return [], {}, {}, {}, start, now, step
+            return [], {}, {}, {}, {}, start, now, step
         sel = selector(label_in("slurmjobid", live))
 
     def fetch():
         stats = deps.get_prom().query_range(
-            "max by (slurmjobid, instance, job, gpu_type) "
+            "max by (slurmjobid, instance, gpu_type) "
             "(slurm_job_utilization_gpu%s)" % sel,
             start, now, step,
         )
-        trend = deps.get_prom().query_range(
-            "avg by (job, gpu_type) (slurm_job_utilization_gpu%s)" % sel,
+        # Utilization numerators and per-timestamp series counts, both
+        # keyed by the raw exporter gpu_type label: per-timestamp
+        # sum/count is the utilization trend and the count series is the
+        # occupancy series (same selector so running-only matches both).
+        util_sums = deps.get_prom().query_range(
+            "sum by (gpu_type) (slurm_job_utilization_gpu%s)" % sel,
             start, now, step,
         )
-        # Concurrent allocated GPUs per group, for the window-average
-        # occupancy chart (same selector so running-only matches here too).
-        occ = deps.get_prom().query_range(
-            "count by (job, gpu_type) (slurm_job_utilization_gpu%s)" % sel,
+        gpu_counts = deps.get_prom().query_range(
+            "count by (gpu_type) (slurm_job_utilization_gpu%s)" % sel,
             start, now, step,
         )
-        return stats, trend, occ, start, now, step
+        return stats, util_sums, gpu_counts, start, now, step
 
     key = cache.partition_window_key(since_hours, running_only)
-    stats, trend, occ, start, now, step = deps.route_cache.get_or_set(key, 60, fetch)
-    # One canonical group name per (job, gpu_type) pair, derived from the
-    # summary series' instances so summary, trend, and occupancy agree.
-    aliases = gpu_groups.pair_aliases(stats, node_gpu_types)
-    out = aggregate_partition_stats(stats, node_gpu_types, aliases)
-    trend_out = {
-        gpu_groups.gpu_group_name(s["metric"], node_gpu_types, aliases):
-        series_values(s)
-        for s in trend
-    }
-    # Window-average allocated GPU count per group, for mean occupancy.
-    occupancy = {}
-    for s in occ:
-        values = series_values(s)
-        if values:
-            name = gpu_groups.gpu_group_name(s["metric"], node_gpu_types, aliases)
-            occupancy[name] = sum(v for _, v in values) / len(values)
+    stats, util_sums, gpu_counts, start, now, step = \
+        deps.route_cache.get_or_set(key, 60, fetch)
+    out = aggregate_partition_stats(stats, node_gpu_types)
+    trend_out, occupancy = aggregate_gpu_type_series(
+        util_sums, gpu_counts, node_gpu_types)
     # Observed instances per group, for the capacity join in api_partitions.
     instances = {}
     for s in stats:
         m = s["metric"]
         inst = m.get("instance", "")
         if inst:
-            name = gpu_groups.gpu_group_name(m, node_gpu_types, aliases)
+            name = gpu_groups.gpu_group_name(m, node_gpu_types)
             instances.setdefault(name, set()).add(inst)
-    return out, trend_out, instances, occupancy, start, now, step
+    # Canonical group per observed job, for the historical wait join in
+    # started_wait_summary. Built from the same non-empty summary series
+    # as the rows; raw job-ID sets stay server-side.
+    job_groups = {}
+    for s in stats:
+        m = s["metric"]
+        if not series_values(s):
+            continue
+        jobid = m.get("slurmjobid", "")
+        if jobid:
+            name = gpu_groups.gpu_group_name(m, node_gpu_types)
+            job_groups.setdefault(jobid, set()).add(name)
+    return out, trend_out, instances, occupancy, job_groups, start, now, step
 
 
-def aggregate_partition_stats(stats, node_gpu_types=None, aliases=None):
-    """Time-weighted mean utilization per GPU group from collapsed-max series.
+def aggregate_gpu_type_series(util_sums, gpu_counts, node_gpu_types=None):
+    """Utilization trend and mean occupancy from raw-label sum/count series.
+
+    ``util_sums`` (``sum by (gpu_type)``) and ``gpu_counts`` (``count by
+    (gpu_type)``) are keyed by the exporter's raw ``gpu_type`` label, which
+    aliases one hardware type under several spellings (``NVIDIA H200`` /
+    ``h200``; several V100 model labels). Canonicalize every label against
+    the configured scontrol types, sum numerators and counts per canonical
+    group at each timestamp, and divide only where the merged count is
+    positive — that per-timestamp sum/count IS the utilization trend. The
+    count series itself is the occupancy series: a group's value is the
+    mean of its merged per-timestamp counts (window-average concurrent
+    allocated GPUs). Trend timestamps are sorted. Returns
+    ``({group: [(ts, util)], ...}, {group: mean_count})``.
+    """
+    node_gpu_types = node_gpu_types or {}
+    configured = sorted({t for types in node_gpu_types.values()
+                         for t in types})
+
+    def canonical(label):
+        # Same resolution gpu_group_name applies to the per-series labels:
+        # exact/aliased/MIG-profile labels canonicalize against the
+        # configured scontrol types; anything unresolvable keeps its
+        # normalized own identity.
+        return gpu_groups.canonical_gpu_type(label, configured)
+
+    sums = defaultdict(dict)   # group -> {ts: numerator}
+    counts = defaultdict(dict)  # group -> {ts: series count}
+    for s in util_sums:
+        group = canonical(s["metric"].get("gpu_type", ""))
+        for ts, v in series_values(s):
+            sums[group][ts] = sums[group].get(ts, 0.0) + v
+    for s in gpu_counts:
+        group = canonical(s["metric"].get("gpu_type", ""))
+        for ts, v in series_values(s):
+            counts[group][ts] = counts[group].get(ts, 0.0) + v
+    trend = {}
+    for group, by_ts in sums.items():
+        points = [(ts, by_ts[ts] / counts[group][ts])
+                  for ts in sorted(by_ts) if counts[group].get(ts, 0.0) > 0]
+        if points:
+            trend[group] = points
+    occupancy = {
+        group: sum(by_ts.values()) / len(by_ts)
+        for group, by_ts in counts.items() if by_ts
+    }
+    return trend, occupancy
+
+
+def aggregate_partition_stats(stats, node_gpu_types=None):
+    """Time-weighted mean utilization per GPU type from collapsed-max series.
 
     Each series is the per-(job, node) max utilization across its window;
     averaging samples is a time-weighted mean (GPU devices are collapsed, so
     this is utilization, not GPU-hours). Groups are keyed by the canonical
-    GPU-group name (the Slurm partition, MIG GRES profiles split out).
+    GPU type (the short scontrol GRES type, MIG GRES profiles split out);
+    partitions over the same hardware merge.
     """
     node_gpu_types = node_gpu_types or {}
     parts = {}
     for s in stats:
         m = s["metric"]
-        name = gpu_groups.gpu_group_name(m, node_gpu_types, aliases)
+        name = gpu_groups.gpu_group_name(m, node_gpu_types)
         values = series_values(s)
         if not values:
             continue
@@ -144,42 +202,29 @@ def _node_type_count(node, gtype):
     return sum(c for t, c in _node_gres(node) if t == gtype)
 
 
-def _node_whole_gpu_count(node):
-    """This node's total whole-GPU count, MIG-sliced types excluded."""
-    return sum(c for t, c in _node_gres(node) if not gpu_groups.is_mig_gres(t))
-
-
 def gpu_capacity(groups, instances, nodes, allocs):
-    """Join metric groups to scontrol GPU capacity.
+    """Join GPU-type groups to scontrol GPU capacity.
 
     ``instances`` maps group -> observed instance names (built in
     ``partition_window``). Capacity is summed over **all** scontrol nodes
-    carrying a GRES entry whose type exactly equals the group name (MIG
-    profiles), then over all **whole-GPU** nodes whose ``partitions`` list
-    contains the group name (idle capacity included; a node's MIG-sliced
-    GRES entries are excluded from the partition fallback because they
-    belong to profile groups, even on a node that also has a whole-GPU
-    entry) — a node shared by several partitions therefore counts toward
-    each of them, matching how Slurm admits jobs to each. A node with more
-    than one GRES type (part whole, part MIG-sliced) contributes only the
-    matching type's own count to each group, never its other type's.
-    Groups with no scontrol membership fall back to their observed
-    instances. Allocated uses the exact per-group live GPU count from
-    ``allocs`` (a shared node's GPUs are counted only under the groups
-    their jobs actually run in) and is capped at total.
+    carrying a GRES entry whose type exactly equals the group name —
+    whole GPUs and MIG profiles alike, idle capacity included,
+    independent of partition membership (several priority partitions
+    over the same nodes therefore share one type total). A node with
+    more than one GRES type (part whole, part MIG-sliced) contributes
+    only the matching type's own count to each group, never its other
+    type's and never the node's combined GPU count. Groups with no
+    scontrol membership fall back to their observed instances (an
+    exporter label that could not be resolved to a configured type).
+    Allocated uses the exact per-group live GPU count from ``allocs``
+    (a shared node's GPUs are counted only under the groups their jobs
+    actually run in) and is capped at total.
     """
     nodes_by_name = {n["name"]: n for n in nodes}
     for g in groups:
         by_type = [n for n in nodes if _node_type_count(n, g["name"])]
-        by_partition = [
-            n for n in nodes
-            if (_node_whole_gpu_count(n)
-                and g["name"] in (n["partitions"] or "").split(","))
-        ]
         if by_type:
             total = sum(_node_type_count(n, g["name"]) for n in by_type)
-        elif by_partition:
-            total = sum(_node_whole_gpu_count(n) for n in by_partition)
         else:
             scope = [nodes_by_name[i] for i in instances.get(g["name"], ())
                      if i in nodes_by_name]
@@ -274,63 +319,125 @@ def node_job_start(name, now):
     return max(min(starts), now - 7 * 86400)
 
 
-def _pending_partitions(job):
-    """The partition-view groups one pending job counts toward.
+def _pending_gpu_types(job, partition_types):
+    """The GPU-type groups one pending job counts toward.
 
-    A MIG-profile TresPerNode (``h200_3g.71gb``) forms its own group —
-    the same split ``job_gpu_group`` applies to running jobs, derived
-    here from the request instead of observed nodes. Deliberately, such
-    a request keys ONLY on the profile, even when %P lists several
-    partitions: its eventual nodes are unknowable pre-scheduling, so
-    the profile group is the one place the demand is certainly wanted.
-    Otherwise the job's Slurm partition list (%P may request several,
-    comma-separated) is split: the job is counted in every partition it
-    asked for. No partition at all resolves to ``unknown``.
+    Resolution is exact and ordered:
+
+    a. a typed request (``gres/gpu:a100:1`` in %b) is canonicalized
+       against the configured GRES types (MIG profiles resolve to their
+       profile) and belongs only to that type — its eventual nodes are
+       unknowable pre-scheduling, so the named type is the one place the
+       demand is certainly wanted, regardless of %P;
+    b. an untyped GPU request (``gres/gpu:N``), an ``N/A``/absent %b with
+       a GPU count, or a constraints-only request belongs to the
+       deduplicated union of GPU types mapped from all its requested
+       partitions (%P may list several): several priority partitions over
+       the same ``h200`` hardware contribute once to ``h200``; genuinely
+       different hardware contributes once per eligible type;
+    c. an explicit untyped GPU request whose partitions map to no GPU
+       type (or name none at all) is retained under ``unknown`` rather
+       than silently dropped;
+    d. a row with neither an explicit GPU request nor any GPU-backed
+       partition mapping is CPU-only and resolves to ``[]`` — the caller
+       omits it from summary and waiting list alike.
+
+    Returns a sorted, duplicate-free list of canonical type names.
     """
-    if gpu_groups.is_mig_gres(job["gpu_type"]):
-        return [job["gpu_type"]]
-    parts = [p.strip() for p in (job["partition"] or "").split(",") if p.strip()]
-    return parts or ["unknown"]
+    typed = (job.get("gpu_type") or "").strip()
+    if typed:
+        # A typed request belongs only to its canonical type, even when %P
+        # lists several partitions: the named type is the one place the
+        # demand is certainly wanted.
+        return sorted({gpu_groups.canonical_gpu_type(
+            typed, _all_types(partition_types))})
+    # Untyped %b (bare gres/gpu:N, N/A, or constraints-only) or no GPU
+    # request at all: eligibility comes from the requested partitions'
+    # GPU-type union. An explicit GPU count with no resolvable partition
+    # type stays visible under "unknown"; a CPU-only row resolves to [].
+    union = set()
+    for p in (job["partition"] or "").split(","):
+        union |= partition_types.get(p.strip(), set())
+    if job["gpus"] and not union:
+        return ["unknown"]
+    return sorted(union)
 
 
-def pending_queue_summary(jobs):
-    """Aggregate pending jobs per partition-view group.
+def _all_types(partition_types):
+    """Every distinct GPU type any configured partition maps to."""
+    return sorted({t for types in partition_types.values() for t in types})
 
-    Returns ``{group: {jobs, gpus, gpus_min}, "__total__": {...}}``. %P
-    may request several partitions (a comma list); the job's eventual
-    nodes are unknowable pre-scheduling, so its demand shows in EVERY
-    partition it asked for — per-row figures are "demand that could land
-    here", not disjoint slices, and only ``__total__``'s ``jobs`` is the
-    unique job count (rows sum to more than it; per-partition rows are
-    never additive cluster-wide). ``gpus`` attributes each GPU job's
+
+def pending_queue_status(jobs, now, partition_types):
+    """Aggregate pending jobs per GPU type and list the waiting ones.
+
+    Returns ``(summary, waiting_jobs)``. ``summary`` is
+    ``{type: {jobs, gpus, gpus_min}, "__total__": {...}}``. A job's
+    eligible types come from ``_pending_gpu_types`` (%b request first,
+    then the GPU-type union of its %P partitions); CPU-only jobs (no GPU
+    request, no GPU-backed partition) are omitted from the summary and
+    the waiting list entirely. A job eligible for several types shows in
+    each of them — per-row figures are "demand that could land here",
+    not disjoint slices — while ``__total__`` counts each included
+    physical job exactly once (rows sum to more than it; per-type rows
+    are never additive cluster-wide). ``gpus`` attributes each GPU job's
     ``gpus * nodes`` (%b / TresPerNode is a per-node request) to every
-    requested partition on the same basis, so each row answers "how many
-    GPUs are being asked of this partition", at the cost that a
-    multi-partition job's request appears in each of its rows — the
-    ``__total__`` entry is the de-duplicated cluster-wide view. When a
-    GPU job's node count is missing (Slurm's ``N/A`` %D) the exact GPU
-    total becomes ``None``: the per-node request is real demand, so a
-    fabricated 0 would understate the queue, and the one-node lower
-    bound stays in ``gpus_min``. A job naming no GPUs (CPU jobs, N/A
-    TRES) contributes nothing to the GPU figures.
+    eligible type on the same basis, so each row answers "how many GPUs
+    are being asked of this type", at the cost that a multi-type job's
+    request appears in each of its rows. When a GPU job's node count is
+    missing (Slurm's ``N/A`` %D) the exact GPU total becomes ``None``:
+    the per-node request is real demand, so a fabricated 0 would
+    understate the queue, and the one-node lower bound stays in
+    ``gpus_min``.
+
+    Each ``waiting_jobs`` record carries the parsed squeue fields plus
+    ``groups`` (the eligible GPU types above, for client-side type
+    filtering), ``wait_s`` — ``max(0, now - submit)`` in seconds when
+    the submit time parses, else ``null`` — and ``gpu_total``:
+    ``gpus * nodes`` when both are known, ``null`` for a GPU request
+    with unknown nodes, and ``0`` for a CPU-only job. The list holds
+    each included physical job once; the client filters by ``groups``.
     """
     out = defaultdict(lambda: {"jobs": 0, "gpus": 0, "gpus_unknown": 0,
                                "gpus_min": 0})
+    waiting = []
     for job in jobs:
-        groups = _pending_partitions(job)
+        groups = _pending_gpu_types(job, partition_types)
+        if not groups:
+            continue  # CPU-only: no GPU type it could run on
         for g in groups:
             out[g]["jobs"] += 1
         out["__total__"]["jobs"] += 1
         if not job["gpus"]:
-            continue
-        gpu_total = job["gpus"] * job["nodes"] if job["nodes"] else None
+            gpu_total = 0
+        else:
+            gpu_total = job["gpus"] * job["nodes"] if job["nodes"] else None
         gpu_min = job["gpus"] * max(1, job["nodes"])
         for key in groups + ["__total__"]:
+            if not job["gpus"]:
+                continue
             if gpu_total is None:
                 out[key]["gpus_unknown"] += 1
             else:
                 out[key]["gpus"] += gpu_total
             out[key]["gpus_min"] += gpu_min
+        submitted = _sacct_epoch(job["submit"])
+        waiting.append({
+            "jobid": job["jobid"],
+            "user": job["user"],
+            "partition": job["partition"],
+            "state": job["state"],
+            "submit": job["submit"],
+            "start": job["start"],
+            "reason": job["reason"],
+            "nodes": job["nodes"],
+            "gpus": job["gpus"],
+            "gpu_type": job["gpu_type"],
+            "groups": groups,
+            "wait_s": (max(0, int(now - submitted))
+                       if submitted is not None else None),
+            "gpu_total": gpu_total,
+        })
     for g in out.values():
         if g["gpus_unknown"]:
             # a per-node request is real demand even when %D is N/A:
@@ -338,4 +445,52 @@ def pending_queue_summary(jobs):
             # (the one-node lower bound stays in gpus_min)
             g["gpus"] = None
         del g["gpus_unknown"]
-    return dict(out)
+    return dict(out), waiting
+
+
+def started_wait_summary(job_groups, window_start, window_end):
+    """Actual Submit → Start wait averaged per group over started jobs.
+
+    ``job_groups`` maps each Prometheus-observed job ID to its canonical
+    group(s) — the same pairing that built the partition rows. The union
+    of IDs is enriched through the cached explicit-ID ``sacct`` lookup
+    (``squeue`` cannot see jobs after they leave the controller); only
+    records whose ``submit`` and ``start`` both parse, whose start falls
+    inclusively inside ``[window_start, window_end]``, and whose start is
+    not before submit contribute. Invalid or missing times are excluded
+    from numerator and denominator alike, never read as 0. Returns
+    ``{group: {started_jobs, avg_wait_s}, "__total__": {...}}`` with
+    ``avg_wait_s`` integer-rounded, or ``None`` when no valid job exists;
+    an empty valid set yields ``started_jobs: 0, avg_wait_s: None``.
+    """
+    ids = sorted(set(job_groups))
+    default_total = {"started_jobs": 0, "avg_wait_s": None}
+    if not ids:
+        return {"__total__": dict(default_total)}
+    records = deps.route_cache.get_or_set(
+        cache.sacct_key(ids), 300,
+        lambda: deps.sacct_jobs(ids))
+    waits = defaultdict(list)
+    # Iterate the REQUESTED ids, not records.items(): sacct indexes an
+    # array task under both its JobID notation and its raw numeric
+    # JobIDRaw, so scanning the response would count one physical job's
+    # wait twice. job_groups is keyed by the raw slurmjobid label only.
+    for jobid in ids:
+        rec = records.get(jobid)
+        if not rec:
+            continue
+        started = _sacct_epoch(rec.get("start"))
+        submitted = _sacct_epoch(rec.get("submit"))
+        if (started is None or submitted is None
+                or not (window_start <= started <= window_end)
+                or started < submitted):
+            continue
+        wait = int(started - submitted)
+        for g in job_groups[jobid]:
+            waits[g].append(wait)
+        waits["__total__"].append(wait)
+    if not waits:
+        return {"__total__": dict(default_total)}
+    return {g: {"started_jobs": len(samples),
+                "avg_wait_s": round(sum(samples) / len(samples))}
+            for g, samples in waits.items()}

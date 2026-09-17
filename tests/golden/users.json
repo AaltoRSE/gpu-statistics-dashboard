@@ -3,7 +3,7 @@
   "users": [
     {
       "gpu_types": [
-        "h200"
+        "h100"
       ],
       "jobs": 1,
       "mean_util": 92.5,
@@ -25,7 +25,7 @@
     },
     {
       "gpu_types": [
-        "h100"
+        "NVIDIA H200"
       ],
       "jobs": 1,
       "mean_util": 50.0,
@@ -36,7 +36,7 @@
     },
     {
       "gpu_types": [
-        "h100"
+        "h200"
       ],
       "jobs": 1,
       "mean_util": 10.0,

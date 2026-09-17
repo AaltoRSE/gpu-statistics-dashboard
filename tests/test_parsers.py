@@ -229,14 +229,15 @@ PartitionName=interactive
 def test_parse_sacct_row():
     row = _parse_sacct_row(
         "19807768|19807768|train.sh|gomeze1|aalto_users|gpu-v100-32g|RUNNING"
-        "|2026-08-25T14:32:59|Unknown|3-03:59:44"
+        "|2026-08-25T14:32:59|2026-08-25T12:00:00|Unknown|3-03:59:44"
         "|billing=64,cpu=8,gres/gpu:v100=2|gpu3|8".split("|")
     )
     assert row["JobID"] == "19807768"
     assert row["JobIDRaw"] == "19807768"
     assert row["User"] == "gomeze1"
+    assert row["Submit"] == "2026-08-25T12:00:00"
     assert row["AllocTRES"] == "billing=64,cpu=8,gres/gpu:v100=2"
-    assert len(SACCT_FIELDS) == 13
+    assert len(SACCT_FIELDS) == 14
 
 
 def test_read_jobgraph_conf_bare(tmp_path):
@@ -295,11 +296,11 @@ def test_sacct_batch_indexes_array_task_by_raw_id_too(monkeypatch):
     def fake_run(cmd, timeout=30):
         return "\n".join([
             "20001465_47|20008872|job_loop.sh|olkkonj1|aalto_users|"
-            "gpu-v100-32g|COMPLETED|2026-08-31T11:43:55|2026-09-01T02:50:54|"
-            "15:06:59|gres/gpu:v100=1|gpu5|2",
+            "gpu-v100-32g|COMPLETED|2026-08-31T11:43:55|2026-08-31T11:00:00|"
+            "2026-09-01T02:50:54|15:06:59|gres/gpu:v100=1|gpu5|2",
             # Step rows carry the same JobIDRaw split with a dot suffix —
             # must still be filtered out, not indexed under a bogus key.
-            "20001465_47.batch|20008872.batch|batch|||||||||1",
+            "20001465_47.batch|20008872.batch|batch|||||||||||1",
         ])
 
     monkeypatch.setattr(slurm, "_run", fake_run)
@@ -307,6 +308,7 @@ def test_sacct_batch_indexes_array_task_by_raw_id_too(monkeypatch):
     assert set(jobs) == {"20001465_47", "20008872"}
     assert jobs["20008872"] is jobs["20001465_47"]
     assert jobs["20008872"]["User"] == "olkkonj1"
+    assert jobs["20008872"]["Submit"] == "2026-08-31T11:00:00"
 
 
 def test_sacct_batch_non_array_job_id_equals_raw_no_duplicate_key(monkeypatch):
@@ -314,11 +316,13 @@ def test_sacct_batch_non_array_job_id_equals_raw_no_duplicate_key(monkeypatch):
 
     def fake_run(cmd, timeout=30):
         return ("20015894|20015894|train.sh|alice|acc|gpu-h100|RUNNING|"
-                "2026-08-30T10:00:00|Unknown|01:00:00|gres/gpu:h100=1|gpu1|8")
+                "2026-08-30T10:00:00|2026-08-30T09:30:00|Unknown|01:00:00|"
+                "gres/gpu:h100=1|gpu1|8")
 
     monkeypatch.setattr(slurm, "_run", fake_run)
     jobs = slurm._sacct_batch(["20015894"])
     assert set(jobs) == {"20015894"}
+    assert jobs["20015894"]["Submit"] == "2026-08-30T09:30:00"
 
 
 def test_sacct_jobs_default_no_date(monkeypatch):
@@ -440,25 +444,29 @@ def test_parse_tres_per_node_both_gres_forms():
 
 def test_parse_squeue_queue_rows():
     lines = (
-        "20276510|gpu-a100-80g|PENDING|2026-09-16T10:00:00"
+        "20276510|jdoe|gpu-a100-80g|PENDING|2026-09-16T10:00:00"
         "|2026-09-17T21:00:00|(Resources)|2|gres/gpu:a100:4\n"
-        "20291030|batch-bdw|PENDING|2026-09-16T17:38:14|N/A"
+        "20291030|jsmith|batch-bdw|PENDING|2026-09-16T17:38:14|N/A"
         "|(Dependency)|1|N/A\n"
-        "18162157|gpu-a100-80g|PENDING|2026-06-01T14:20:39"
+        "18162157|jdoe|gpu-a100-80g|PENDING|2026-06-01T14:20:39"
         "|2026-09-16T23:19:23|(DependencyNeverSatisfied)|1|gres/gpu:1\n"
     )
     rows = parse_squeue_queue(lines)
     assert [r["jobid"] for r in rows] == ["20276510", "20291030", "18162157"]
     assert rows[0] == {
-        "jobid": "20276510", "partition": "gpu-a100-80g", "state": "PENDING",
+        "jobid": "20276510", "user": "jdoe", "partition": "gpu-a100-80g",
+        "state": "PENDING",
         "submit": "2026-09-16T10:00:00", "start": "2026-09-17T21:00:00",
         "reason": "(Resources)", "nodes": 2, "gpus": 4, "gpu_type": "a100"}
     # N/A start parses empty; N/A TRES parses zero GPUs
     assert rows[1]["start"] == "" and rows[1]["gpus"] == 0
+    assert rows[1]["user"] == "jsmith"
     # the untyped GRES form parses count without a type
     assert rows[2]["gpus"] == 1 and rows[2]["gpu_type"] == ""
     assert parse_squeue_queue("") == []
     assert parse_squeue_queue("garbage|line") == []
+    # a 9-field row is required: an 8-field remnant (pre-%u format) is skipped
+    assert len(parse_squeue_queue(lines.replace("jsmith|", "", 1))) == 2
 
 
 def test_queue_pending_command(monkeypatch):
@@ -472,8 +480,10 @@ def test_queue_pending_command(monkeypatch):
 
     monkeypatch.setattr(slurm, "_run", fake_run)
     assert slurm.queue_pending() == []
-    assert cmds["cmd"] == ["squeue", "-t", "PD", "--noheader", "-o",
-                           SQUEUE_QUEUE_FMT]
+    assert cmds["cmd"] == ["squeue", "--all", "--states=PENDING", "--noheader",
+                           "-o", SQUEUE_QUEUE_FMT]
+
+
 
 
 def test_sacct_jobs_invalid_elapsed(monkeypatch):
@@ -483,13 +493,15 @@ def test_sacct_jobs_invalid_elapsed(monkeypatch):
         return {
             "401": {
                 "JobID": "401", "JobName": "c", "User": "erin", "Account": "acc",
-                "Partition": "batch", "State": "PENDING", "Start": "Unknown",
+                "Partition": "batch", "State": "PENDING",
+                "Submit": "2026-08-30T08:00:00", "Start": "Unknown",
                 "End": "Unknown", "Elapsed": "INVALID",
                 "AllocTRES": "cpu=4", "NodeList": "", "NCPUS": "4",
             },
             "402": {
                 "JobID": "402", "JobName": "d", "User": "frank", "Account": "acc",
                 "Partition": "gpu-h100", "State": "RUNNING",
+                "Submit": "2026-08-30T09:00:00",
                 "Start": "2026-08-30T10:00:00", "End": "2026-08-31T10:00:00",
                 "Elapsed": "00:05:06",
                 "AllocTRES": "cpu=8,gres/gpu:h100=1", "NodeList": "gpu1", "NCPUS": "8",
@@ -500,4 +512,6 @@ def test_sacct_jobs_invalid_elapsed(monkeypatch):
     jobs = slurm.sacct_jobs(["401", "402"])
     assert set(jobs) == {"401", "402"}
     assert jobs["401"]["elapsed_s"] == 0
+    assert jobs["401"]["submit"] == "2026-08-30T08:00:00"
     assert jobs["402"]["elapsed_s"] == 5 * 60 + 6
+    assert jobs["402"]["submit"] == "2026-08-30T09:00:00"
