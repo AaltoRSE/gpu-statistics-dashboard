@@ -122,11 +122,12 @@ def completed_jobs_key(start, end):
 
 
 def completed_progress_key(since_hours, running_only):
-    """Stable progress-store key shared by the queue and progress routes.
+    """The stable progress-store key shared by the queue and progress routes.
 
     Both routes derive it from the same query parameters, so a poll finds
-    the in-flight fetch's entry even though each request computes its own
-    epoch window.
+    the in-flight fetch's entry: the accounting fetch publishes under this
+    key (and its epoch cache key) while it runs, regardless of each
+    request's own captured epoch window.
     """
     return ("completed_progress", since_hours, bool(running_only))
 

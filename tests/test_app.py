@@ -92,6 +92,16 @@ NODES = [
      "partitions": "gpu-gh200", "cpus": 128, "gpus": 4,
      "gpu_type": "gh200", "gres": [("gh200", 4)],
      "gpus_alloc": 0, "cpus_alloc": 0, "free_mem": 900, "real_mem": 5000},
+    # V100 memory pools: scontrol reports plain typed GRES v100 for both;
+    # only the partitions (and min-vram GRES) distinguish the pools.
+    {"name": "dgx1a", "state": "IDLE", "state_full": "IDLE", "reason": "",
+     "partitions": "gpu-v100-16g", "cpus": 96, "gpus": 4,
+     "gpu_type": "v100_16gb", "gres": [("v100_16gb", 4)],
+     "gpus_alloc": 0, "cpus_alloc": 0, "free_mem": 900, "real_mem": 5000},
+    {"name": "dgx1b", "state": "IDLE", "state_full": "IDLE", "reason": "",
+     "partitions": "gpu-v100-32g", "cpus": 96, "gpus": 4,
+     "gpu_type": "v100_32gb", "gres": [("v100_32gb", 4)],
+     "gpus_alloc": 0, "cpus_alloc": 0, "free_mem": 900, "real_mem": 5000},
     # CPU-only node: its partition must never appear as a GPU queue
     {"name": "csl1", "state": "IDLE", "state_full": "IDLE", "reason": "",
      "partitions": "batch", "cpus": 40, "gpus": 0, "gpu_type": "",
@@ -722,7 +732,8 @@ def test_partitions_group_by_gpu_type(client):
     # job 4's MIG profile stay their own groups. A configured GH200 pool
     # with no samples remains visible as explicit no-data across the table
     # and graphs rather than disappearing from the API response.
-    assert set(by_name) == {"gh200", "h200", "h100", "h200_3g.71gb"}
+    assert set(by_name) == {"gh200", "h200", "h100", "h200_3g.71gb",
+                            "v100_16gb", "v100_32gb"}
     assert by_name["h200"]["job_count"] == 2
     assert by_name["h200"]["mean_util"] == pytest.approx(36.67, abs=0.01)
     assert by_name["h100"]["mean_util"] == pytest.approx(92.5)
@@ -735,7 +746,8 @@ def test_partitions_group_by_gpu_type(client):
     }
     for p in data["partitions"]:
         assert p["mean_util"] is None or 0 <= p["mean_util"] <= 100
-    assert {"gh200", "h100", "h200", "h200_3g.71gb"} <= set(data["trend"])
+    assert {"gh200", "h100", "h200", "h200_3g.71gb",
+            "v100_16gb", "v100_32gb"} <= set(data["trend"])
     assert data["trend"]["gh200"] == []
 
 
@@ -890,6 +902,28 @@ def test_partitions_queue_summary(client, fake_prom, monkeypatch):
     assert waiting["14"]["gpu_total"] == 1
     # the raw partition string survives as metadata
     assert waiting["10"]["partition"] == "gpu-h200,gpu-h200-ellis"
+
+
+def test_pending_v100_request_maps_to_eligible_memory_pools(
+        client, fake_prom, monkeypatch):
+    # scontrol reports plain v100 for both memory pools; a typed v100
+    # request whose partitions could land in either pool must count toward
+    # both real pool rows instead of a capacity-less synthetic v100 row.
+    monkeypatch.setattr(deps, "queue_pending", lambda: [
+        {"jobid": "30", "user": "eve",
+         "partition": "gpu-v100-16g,gpu-v100-32g", "state": "PENDING",
+         "submit": "2026-08-30T12:26:40", "start": "",
+         "reason": "(Resources)", "nodes": 1, "gpus": 2,
+         "gpu_type": "v100"},
+    ])
+    data = client.get("/api/partitions/queue",
+                      params={"since_hours": 24}).json()
+    q = data["queue"]
+    assert "v100" not in q
+    assert q["v100_16gb"]["eligible_jobs"] == 1
+    assert q["v100_32gb"]["eligible_jobs"] == 1
+    assert q["v100_16gb"]["eligible_gpus"] == 2
+    assert q["v100_32gb"]["eligible_gpus"] == 2
 
 
 def test_wait_statistics_percentiles():
@@ -1274,7 +1308,8 @@ def test_nodes_endpoint(client):
     r = client.get("/api/nodes")
     assert r.status_code == 200
     data = r.json()
-    assert data["count"] == 5  # gpu_only=True: gpu1, gpu2, gpu3, gpu49, gpu50
+    assert data["count"] == 7  # gpu_only: gpu1, gpu2, gpu3, gpu49, gpu50,
+    #                              dgx1a, dgx1b
     by_name = {n["name"]: n for n in data["nodes"]}
     assert by_name["gpu1"]["current_util"] == 55.5
     assert by_name["gpu1"]["current_vram"] == 41.2

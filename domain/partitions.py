@@ -349,9 +349,13 @@ def _pending_gpu_types(job, partition_types):
 
     a. a typed request (``gres/gpu:a100:1`` in %b) is canonicalized
        against the configured GRES types (MIG profiles resolve to their
-       profile) and belongs only to that type — its eventual nodes are
-       unknowable pre-scheduling, so the named type is the one place the
-       demand is certainly wanted, regardless of %P;
+       profile). Its eventual nodes are unknowable pre-scheduling, so the
+       named type is the one place the demand is certainly wanted,
+       regardless of %P — unless the label is a base name that split into
+       several configured pools (plain v100 behind v100_16gb/v100_32gb):
+       that request is ambiguous and counts toward every pool its
+       requested partitions could land on, exactly like an untyped
+       request, instead of stranding in a capacity-less synthetic row;
     b. an untyped GPU request (``gres/gpu:N``), an ``N/A``/absent %b with
        a GPU count, or a constraints-only request belongs to the
        deduplicated union of GPU types mapped from all its requested
@@ -369,11 +373,29 @@ def _pending_gpu_types(job, partition_types):
     """
     typed = (job.get("gpu_type") or "").strip()
     if typed:
-        # A typed request belongs only to its canonical type, even when %P
+        # A typed request belongs to its canonical type(s), even when %P
         # lists several partitions: the named type is the one place the
-        # demand is certainly wanted.
-        return sorted({gpu_groups.canonical_gpu_type(
-            typed, _all_types(partition_types))})
+        # demand is certainly wanted. A base label that split into several
+        # configured memory pools (scontrol reports plain v100 for both
+        # V100 pool sizes) is ambiguous — it maps to every eligible pool
+        # behind the requested partitions, exactly like an untyped
+        # request, instead of stranding in a capacity-less synthetic row.
+        eligible = set()
+        for p in (job["partition"] or "").split(","):
+            eligible |= partition_types.get(p.strip(), set())
+        configured = sorted(eligible) or _all_types(partition_types)
+        tokens = gpu_groups._tokens(typed)
+        matches = [t for t in configured
+                   if tokens and gpu_groups._tokens(t) <= tokens]
+        if len(matches) > 1:
+            return sorted(matches)
+        target = gpu_groups.canonical_gpu_type(typed, configured)
+        if target == typed.casefold():
+            # Still ambiguous (or absorbed) after canonicalization: keep
+            # every eligible pool the request could land in rather than a
+            # synthetic base group.
+            return sorted(eligible) or [target]
+        return sorted({target})
     # Untyped %b (bare gres/gpu:N, N/A, or constraints-only) or no GPU
     # request at all: eligibility comes from the requested partitions'
     # GPU-type union. An explicit GPU count with no resolvable partition

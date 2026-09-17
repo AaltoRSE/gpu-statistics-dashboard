@@ -35,6 +35,24 @@
       "mean_occupancy": null,
       "mean_util": null,
       "name": "gh200"
+    },
+    {
+      "gpus_alloc": 0,
+      "gpus_total": 4,
+      "job_count": 0,
+      "max_util": null,
+      "mean_occupancy": null,
+      "mean_util": null,
+      "name": "v100_16gb"
+    },
+    {
+      "gpus_alloc": 0,
+      "gpus_total": 4,
+      "job_count": 0,
+      "max_util": null,
+      "mean_occupancy": null,
+      "mean_util": null,
+      "name": "v100_32gb"
     }
   ],
   "step": 120,
@@ -69,7 +87,9 @@
         1120.0,
         90.0
       ]
-    ]
+    ],
+    "v100_16gb": [],
+    "v100_32gb": []
   },
   "window": {
     "end": 1788100000,

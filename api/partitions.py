@@ -111,14 +111,21 @@ def api_partition_queue(since_hours: float = Query(24, gt=0, le=168),
         progress_key = cache.completed_progress_key(since_hours, running_only)
 
         def fetch():
-            progress_store[progress_key] = {"done": 0, "total": 0,
-                                            "failed_batches": 0}
+            # Publish under every joining request's lookup key: accounting
+            # itself single-flights on the epoch cache_key, but a follower
+            # with a different running_only polls its own parameter-derived
+            # progress key and must still see the shared fetch's state.
+            for key in (cache_key, progress_key):
+                progress_store[key] = {"done": 0, "total": 0,
+                                       "failed_batches": 0}
 
             def report(state):
-                progress_store[progress_key] = state
+                for key in (cache_key, progress_key):
+                    progress_store[key] = state
 
             result = deps.completed_jobs(start_iso, end_iso, report)
-            progress_store.pop(progress_key, None)
+            for key in (cache_key, progress_key):
+                progress_store.pop(key, None)
             return result
 
         records, accounting_coverage = deps.route_cache.get_or_set(
@@ -196,6 +203,7 @@ def api_partition_queue_progress(since_hours: float = Query(24, gt=0, le=168),
     """
     key = cache.completed_progress_key(since_hours, running_only)
     return progress_store.get(key, None)
+
 
 @router.get("/api/partitions/vram", response_model=VramResponse)
 def api_part_vram(since_hours: float = Query(24, gt=0, le=168),

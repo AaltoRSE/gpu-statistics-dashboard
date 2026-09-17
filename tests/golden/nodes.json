@@ -1,5 +1,5 @@
 {
-  "count": 5,
+  "count": 7,
   "nodes": [
     {
       "active_jobs": [
@@ -107,6 +107,42 @@
       "gpus_alloc": 0,
       "name": "gpu50",
       "partitions": "gpu-gh200",
+      "real_mem": 5000,
+      "reason": "",
+      "state": "IDLE",
+      "state_full": "IDLE"
+    },
+    {
+      "active_jobs": [],
+      "cpus": 96,
+      "cpus_alloc": 0,
+      "current_util": null,
+      "current_vram": null,
+      "free_mem": 900,
+      "gpu_group": "v100_16gb",
+      "gpu_type": "v100_16gb",
+      "gpus": 4,
+      "gpus_alloc": 0,
+      "name": "dgx1a",
+      "partitions": "gpu-v100-16g",
+      "real_mem": 5000,
+      "reason": "",
+      "state": "IDLE",
+      "state_full": "IDLE"
+    },
+    {
+      "active_jobs": [],
+      "cpus": 96,
+      "cpus_alloc": 0,
+      "current_util": null,
+      "current_vram": null,
+      "free_mem": 900,
+      "gpu_group": "v100_32gb",
+      "gpu_type": "v100_32gb",
+      "gpus": 4,
+      "gpus_alloc": 0,
+      "name": "dgx1b",
+      "partitions": "gpu-v100-32g",
       "real_mem": 5000,
       "reason": "",
       "state": "IDLE",

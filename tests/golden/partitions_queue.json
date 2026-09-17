@@ -51,6 +51,32 @@
       "wait_p90_s": null,
       "wait_per_gpu_hour_p50": null,
       "wait_samples": 0
+    },
+    "v100_16gb": {
+      "eligible_gpus": 0,
+      "eligible_jobs": 0,
+      "exclusive_gpus": 0,
+      "exclusive_jobs": 0,
+      "flexible_gpus": 0,
+      "flexible_jobs": 0,
+      "wait_avg_s": null,
+      "wait_p50_s": null,
+      "wait_p90_s": null,
+      "wait_per_gpu_hour_p50": null,
+      "wait_samples": 0
+    },
+    "v100_32gb": {
+      "eligible_gpus": 0,
+      "eligible_jobs": 0,
+      "exclusive_gpus": 0,
+      "exclusive_jobs": 0,
+      "flexible_gpus": 0,
+      "flexible_jobs": 0,
+      "wait_avg_s": null,
+      "wait_p50_s": null,
+      "wait_p90_s": null,
+      "wait_per_gpu_hour_p50": null,
+      "wait_samples": 0
     }
   },
   "queue_available": true,
