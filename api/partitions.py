@@ -1,5 +1,8 @@
 """Routes: GET /api/partitions, GET /api/partitions/vram."""
 
+from datetime import datetime
+from zoneinfo import ZoneInfo
+
 from fastapi import APIRouter, Query
 
 import cache
@@ -9,11 +12,11 @@ from api.schemas import PartitionQueueResponse, PartitionsResponse, VramResponse
 from domain.common import window
 from domain.partitions import (
     WAIT_TOTAL_KEY,
+    completed_wait_summary,
     gpu_capacity,
     node_current,
     partition_window,
     pending_queue_status,
-    started_wait_summary,
     wait_empty,
 )
 from domain.vram import vram_job_records
@@ -52,7 +55,6 @@ def api_partitions(since_hours: float = Query(24, gt=0, le=168),
                    running_only: bool = Query(False)):
     nodes = deps.route_cache.get_or_set(cache.scontrol_nodes_key(), 30, deps.show_nodes)
     node_types = gpu_groups.build_node_index(nodes)
-    partition_types = gpu_groups.partition_gpu_types(nodes)
     groups, trend, instances, occupancy, job_groups, start, now, step = \
         partition_window(since_hours, running_only, node_gpu_types=node_types)
     _, _, allocs_by_node, allocs_by_group = node_current(node_types)
@@ -94,17 +96,26 @@ def api_partition_queue(since_hours: float = Query(24, gt=0, le=168),
                                         deps.show_nodes)
     node_types = gpu_groups.build_node_index(nodes)
     partition_types = gpu_groups.partition_gpu_types(nodes)
-    groups, _, _, _, job_groups, start, now, _ = partition_window(
+    groups, _, _, _, _, start, now, _ = partition_window(
         since_hours, running_only, node_gpu_types=node_types)
     queue, totals, waiting_jobs, queue_available = _queue_snapshot(
         now, partition_types)
     try:
-        wait_history = started_wait_summary(job_groups, start, now)
-        wait_history_available = True
+        tz = ZoneInfo("Europe/Helsinki")
+        start_iso = datetime.fromtimestamp(start, tz).replace(
+            tzinfo=None).isoformat(timespec="seconds")
+        end_iso = datetime.fromtimestamp(now, tz).replace(
+            tzinfo=None).isoformat(timespec="seconds")
+        records, accounting_coverage = deps.route_cache.get_or_set(
+            cache.completed_jobs_key(start, now), 300,
+            lambda: deps.completed_jobs(start_iso, end_iso))
+        wait_history, wait_history_coverage = completed_wait_summary(
+            records, node_types, start, now, accounting_coverage)
+        wait_history_available = bool(accounting_coverage["successful_batches"])
     except SlurmError:
-        # sacct down: every wait statistic must read as unknown, never
-        # as "zero samples" — pending figures stay independently valid.
+        # An unexpected accounting failure leaves live queue data usable.
         wait_history = {}
+        wait_history_coverage = None
         wait_history_available = False
 
     # One summary entry per visible name: the union of live pending
@@ -148,7 +159,7 @@ def api_partition_queue(since_hours: float = Query(24, gt=0, le=168),
             entry.update({
                 "wait_p50_s": None, "wait_p90_s": None,
                 "wait_avg_s": None, "wait_samples": None,
-                "wait_buckets": None,
+                "wait_per_gpu_hour_p50": None,
             })
         merged[name] = entry
     return {
@@ -157,6 +168,7 @@ def api_partition_queue(since_hours: float = Query(24, gt=0, le=168),
         "queue_available": queue_available,
         "waiting_jobs": waiting_jobs,
         "wait_history_available": wait_history_available,
+        "wait_history_coverage": wait_history_coverage,
     }
 
 

@@ -23,13 +23,23 @@
       "gpus_total": 20,
       "job_count": 2,
       "max_util": 60.0,
-      "mean_occupancy": 7.5,
+      "mean_occupancy": 12.5,
       "mean_util": 36.67,
       "name": "h200"
+    },
+    {
+      "gpus_alloc": 0,
+      "gpus_total": 4,
+      "job_count": 0,
+      "max_util": null,
+      "mean_occupancy": null,
+      "mean_util": null,
+      "name": "gh200"
     }
   ],
   "step": 120,
   "trend": {
+    "gh200": [],
     "h100": [
       [
         1000.0,
@@ -43,11 +53,11 @@
     "h200": [
       [
         1000.0,
-        25.0
+        16.666666666666668
       ],
       [
         1120.0,
-        60.0
+        30.0
       ]
     ],
     "h200_3g.71gb": [

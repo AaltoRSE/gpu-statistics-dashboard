@@ -12,8 +12,7 @@ import gpu_groups
 from domain.common import job_window, running_gpu_job_ids, series_values, step_for_range
 from prom import PrometheusError
 from promql import label_eq, label_in, selector
-from slurm import SlurmError
-
+from slurm import SlurmError, expand_node_list
 
 CLUSTER_TZ = ZoneInfo("Europe/Helsinki")
 """sacct prints naive cluster-local (Europe/Helsinki) strings; interpret
@@ -52,10 +51,11 @@ def partition_window(since_hours, running_only=False, now=None,
     the same hardware share one group. Summary data keeps the
     ``slurmjobid`` label (per-job/per-node max, so the job identity
     survives for running-only matching); the trend/occupancy queries are
-    ``sum``/``count`` ``by (gpu_type)`` — per-timestamp sum / count gives
-    the utilization trend, the count itself is the occupancy series —
-    and have no job identity, so the matcher must be injected into the
-    metric selector before the aggregation.
+    ``sum``/``count`` ``by (instance, gpu_type)`` so each raw exporter
+    label resolves against its own scontrol node before canonical types
+    merge. Per-timestamp sum / count gives the utilization trend, the
+    count itself is the occupancy series, and the matcher must be injected
+    into the metric selector before aggregation.
 
     Also returns ``job_groups`` — the canonical group(s) each observed job
     belongs to — for the historical wait join in ``started_wait_summary``.
@@ -75,16 +75,16 @@ def partition_window(since_hours, running_only=False, now=None,
             "(slurm_job_utilization_gpu%s)" % sel,
             start, now, step,
         )
-        # Utilization numerators and per-timestamp series counts, both
-        # keyed by the raw exporter gpu_type label: per-timestamp
-        # sum/count is the utilization trend and the count series is the
-        # occupancy series (same selector so running-only matches both).
+        # Preserve the source instance through aggregation: a raw label
+        # resolves against that node's scontrol GRES list before aliases
+        # merge into canonical GPU types. Per-timestamp sum/count is the
+        # utilization trend; the count series is occupancy.
         util_sums = deps.get_prom().query_range(
-            "sum by (gpu_type) (slurm_job_utilization_gpu%s)" % sel,
+            "sum by (instance, gpu_type) (slurm_job_utilization_gpu%s)" % sel,
             start, now, step,
         )
         gpu_counts = deps.get_prom().query_range(
-            "count by (gpu_type) (slurm_job_utilization_gpu%s)" % sel,
+            "count by (instance, gpu_type) (slurm_job_utilization_gpu%s)" % sel,
             start, now, step,
         )
         return stats, util_sums, gpu_counts, start, now, step
@@ -95,6 +95,9 @@ def partition_window(since_hours, running_only=False, now=None,
     out = aggregate_partition_stats(stats, node_gpu_types)
     trend_out, occupancy = aggregate_gpu_type_series(
         util_sums, gpu_counts, node_gpu_types)
+    if not running_only:
+        out, trend_out, occupancy = _include_configured_gpu_types(
+            out, trend_out, occupancy, node_gpu_types)
     # Observed instances per group, for the capacity join in api_partitions.
     instances = {}
     for s in stats:
@@ -119,39 +122,23 @@ def partition_window(since_hours, running_only=False, now=None,
 
 
 def aggregate_gpu_type_series(util_sums, gpu_counts, node_gpu_types=None):
-    """Utilization trend and mean occupancy from raw-label sum/count series.
+    """Utilization trend and mean occupancy from instance-aware series.
 
-    ``util_sums`` (``sum by (gpu_type)``) and ``gpu_counts`` (``count by
-    (gpu_type)``) are keyed by the exporter's raw ``gpu_type`` label, which
-    aliases one hardware type under several spellings (``NVIDIA H200`` /
-    ``h200``; several V100 model labels). Canonicalize every label against
-    the configured scontrol types, sum numerators and counts per canonical
-    group at each timestamp, and divide only where the merged count is
-    positive — that per-timestamp sum/count IS the utilization trend. The
-    count series itself is the occupancy series: a group's value is the
-    mean of its merged per-timestamp counts (window-average concurrent
-    allocated GPUs). Trend timestamps are sorted. Returns
-    ``({group: [(ts, util)], ...}, {group: mean_count})``.
+    ``util_sums`` and ``gpu_counts`` preserve each raw exporter label's
+    ``instance``. Resolve it against that node's configured scontrol GRES
+    types, then merge aliases into canonical groups per timestamp. The
+    resulting sum/count is the utilization trend; mean merged count is
+    occupancy.
     """
     node_gpu_types = node_gpu_types or {}
-    configured = sorted({t for types in node_gpu_types.values()
-                         for t in types})
-
-    def canonical(label):
-        # Same resolution gpu_group_name applies to the per-series labels:
-        # exact/aliased/MIG-profile labels canonicalize against the
-        # configured scontrol types; anything unresolvable keeps its
-        # normalized own identity.
-        return gpu_groups.canonical_gpu_type(label, configured)
-
     sums = defaultdict(dict)   # group -> {ts: numerator}
     counts = defaultdict(dict)  # group -> {ts: series count}
     for s in util_sums:
-        group = canonical(s["metric"].get("gpu_type", ""))
+        group = gpu_groups.gpu_group_name(s["metric"], node_gpu_types)
         for ts, v in series_values(s):
             sums[group][ts] = sums[group].get(ts, 0.0) + v
     for s in gpu_counts:
-        group = canonical(s["metric"].get("gpu_type", ""))
+        group = gpu_groups.gpu_group_name(s["metric"], node_gpu_types)
         for ts, v in series_values(s):
             counts[group][ts] = counts[group].get(ts, 0.0) + v
     trend = {}
@@ -165,6 +152,22 @@ def aggregate_gpu_type_series(util_sums, gpu_counts, node_gpu_types=None):
         for group, by_ts in counts.items() if by_ts
     }
     return trend, occupancy
+
+
+def _include_configured_gpu_types(groups, trend, occupancy, node_gpu_types):
+    """Add configured but unmeasured scontrol GPU types as explicit no-data rows."""
+    configured = sorted({gpu_type for types in (node_gpu_types or {}).values()
+                         for gpu_type in types if gpu_type})
+    existing = {group["name"] for group in groups}
+    missing = [
+        {"name": gpu_type, "mean_util": None, "max_util": None,
+         "job_count": 0}
+        for gpu_type in configured if gpu_type not in existing
+    ]
+    for group in missing:
+        trend[group["name"]] = []
+        occupancy[group["name"]] = None
+    return groups + missing, trend, occupancy
 
 
 def aggregate_partition_stats(stats, node_gpu_types=None):
@@ -456,43 +459,44 @@ def pending_queue_status(jobs, now, partition_types):
     return dict(out), totals, waiting
 
 
-_WAIT_BUCKETS = (
-    ("lt_5m", 300),
-    ("m5_to_30m", 1800),
-    ("m30_to_2h", 7200),
-    ("h2_to_12h", 43200),
-)
+def _median(values):
+    """Ordinary median of a numeric list, empty input yielding None.
+
+    Odd count: the middle value. Even count: the mean of the two middle
+    values, rounded to an integer ONLY for integer inputs ([1, 2] -> 2,
+    not 1); float lists keep the exact mean (display rounding happens at
+    the caller).
+    """
+    ordered = sorted(values)
+    if not ordered:
+        return None
+    middle = len(ordered) // 2
+    if len(ordered) % 2:
+        return ordered[middle]
+    a, b = ordered[middle - 1], ordered[middle]
+    mean = (a + b) / 2
+    return round(mean) if isinstance(a, int) and isinstance(b, int) else mean
 
 
 def _wait_statistics(samples):
-    """Completed-job wait summary: percentiles, average, and buckets.
+    """Completed-job wait summary: percentiles, average, sample count.
 
     P50 is the ordinary median (mean of the two middle waits when the
-    sample count is even). P90 is nearest-rank (ceil(0.90 * n)), so the
-    reported percentile is always an observed wait. Buckets are
-    half-open: <5m, 5-30m, 30m-2h, 2-12h, >=12h.
+    sample count is even, integer-rounded). P90 is nearest-rank
+    (ceil(0.90 * n)), so the reported percentile is always an observed
+    wait. ``wait_samples`` counts the valid Submit->Start records behind
+    those figures.
     """
     ordered = sorted(samples)
-    buckets = {name: 0 for name, _ in _WAIT_BUCKETS}
-    buckets["gte_12h"] = 0
-    for wait in ordered:
-        for name, upper in _WAIT_BUCKETS:
-            if wait < upper:
-                buckets[name] += 1
-                break
-        else:
-            buckets["gte_12h"] += 1
     if not ordered:
         return {"wait_p50_s": None, "wait_p90_s": None,
                 "wait_avg_s": None, "wait_samples": 0,
-                "wait_buckets": buckets}
-    middle = len(ordered) // 2
-    p50 = (ordered[middle] if len(ordered) % 2
-           else round((ordered[middle - 1] + ordered[middle]) / 2))
+                "wait_per_gpu_hour_p50": None}
     p90 = ordered[-(-9 * len(ordered) // 10) - 1]
-    return {"wait_p50_s": p50, "wait_p90_s": p90,
+    return {"wait_p50_s": _median(ordered), "wait_p90_s": p90,
             "wait_avg_s": round(sum(ordered) / len(ordered)),
-            "wait_samples": len(ordered), "wait_buckets": buckets}
+            "wait_samples": len(ordered),
+            "wait_per_gpu_hour_p50": None}
 
 
 def wait_empty():
@@ -500,45 +504,67 @@ def wait_empty():
     return _wait_statistics([])
 
 
-def started_wait_summary(job_groups, window_start, window_end):
-    """Completed-job Submit → Start wait statistics per group.
+def completed_wait_summary(records, node_gpu_types, window_start, window_end,
+                           accounting_coverage=None):
+    """Completed-job wait metrics grouped from bounded sacct records.
 
-    ``job_groups`` maps each Prometheus-observed job ID to its canonical
-    group(s) — the same pairing that built the partition rows. The union
-    of IDs is enriched through the cached explicit-ID ``sacct`` lookup
-    (``squeue`` cannot see jobs after they leave the controller); only
-    records whose ``submit`` and ``start`` both parse, whose start falls
-    inclusively inside ``[window_start, window_end]``, and whose start is
-    not before submit contribute. Invalid or missing times are excluded
-    from every statistic, never read as 0. Returns
-    ``{group: {"wait_p50_s", "wait_p90_s", "wait_avg_s",
-    "wait_samples", "wait_buckets"}, "__total__": {...}}``.
+    Each accepted record is a completed allocation that started inside the
+    requested window and has valid Submit, Start, positive elapsed time, and
+    a positive *typed* GPU allocation. The normalized median is calculated
+    per job as ``wait_s / (elapsed_s * gpus)``; its units are wait-hours per
+    GPU-hour because the seconds cancel. Prometheus is deliberately absent:
+    short jobs need not survive a scrape to be counted.
     """
-    ids = sorted(set(job_groups))
-    default_total = wait_empty()
-    if not ids:
-        return {"__total__": dict(default_total)}
-    records = deps.route_cache.get_or_set(
-        cache.sacct_key(ids), 300,
-        lambda: deps.sacct_jobs(ids))
     waits = defaultdict(list)
-    # Iterate the REQUESTED ids, not records.items(): sacct indexes an
-    # array task under both its JobID notation and its raw numeric
-    # JobIDRaw, so scanning the response would count one physical job's
-    # wait twice. job_groups is keyed by the raw slurmjobid label only.
-    for jobid in ids:
-        rec = records.get(jobid)
-        if not rec:
+    ratios = defaultdict(list)
+    excluded = defaultdict(int)
+    examined = 0
+    for rec in records:
+        examined += 1
+        if rec.get("state") != "COMPLETED":
+            excluded["state"] += 1
             continue
         started = _sacct_epoch(rec.get("start"))
         submitted = _sacct_epoch(rec.get("submit"))
-        if (started is None or submitted is None
-                or not (window_start <= started <= window_end)
-                or started < submitted):
+        if started is None or submitted is None:
+            excluded["timestamps"] += 1
             continue
+        if not window_start <= started <= window_end:
+            excluded["start_outside_window"] += 1
+            continue
+        if started < submitted:
+            excluded["negative_wait"] += 1
+            continue
+        if (rec.get("elapsed_s") or 0) <= 0:
+            excluded["nonpositive_elapsed"] += 1
+            continue
+        if (rec.get("gpus") or 0) <= 0 or not rec.get("gpu_type"):
+            excluded["missing_typed_gpu_allocation"] += 1
+            continue
+        group = gpu_groups.job_gpu_group({
+            "nodes": sorted(expand_node_list(rec.get("node_list", ""))),
+            "gpu_type": rec["gpu_type"],
+        }, node_gpu_types)
         wait = int(started - submitted)
-        for g in job_groups[jobid]:
-            waits[g].append(wait)
-        waits[WAIT_TOTAL_KEY].append(wait)
-    names = set(waits) | {WAIT_TOTAL_KEY}
-    return {name: _wait_statistics(waits.get(name, [])) for name in names}
+        ratio = wait / (rec["elapsed_s"] * rec["gpus"])
+        for name in (group, WAIT_TOTAL_KEY):
+            waits[name].append(wait)
+            ratios[name].append(ratio)
+
+    summary = {}
+    for name in set(waits) | {WAIT_TOTAL_KEY}:
+        entry = _wait_statistics(waits.get(name, []))
+        group_ratios = ratios.get(name, [])
+        entry["wait_per_gpu_hour_p50"] = (
+            round(_median(group_ratios), 2) if group_ratios else None)
+        summary[name] = entry
+    accounting_coverage = accounting_coverage or {}
+    coverage = {
+        "records_examined": examined,
+        "valid_samples": {name: len(samples) for name, samples in ratios.items()
+                          if name != WAIT_TOTAL_KEY},
+        "excluded": dict(excluded),
+        "failed_batches": accounting_coverage.get("failed_batches", 0),
+        "complete": accounting_coverage.get("complete", True),
+    }
+    return summary, coverage

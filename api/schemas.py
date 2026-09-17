@@ -176,9 +176,13 @@ class PartitionRow(BaseModel):
                       "GRES type; MIG profiles keep their profile name) "
                       "— partitions over the same hardware share one "
                       "row.")
-    mean_util: float = Field(
-        description="Time-weighted mean utilization over the window.")
-    max_util: float
+    mean_util: Optional[float] = Field(
+        description="Time-weighted mean utilization over the window; null "
+                    "when this configured GPU type has no utilization "
+                    "samples.")
+    max_util: Optional[float] = Field(
+        description="Peak utilization over the window; null when this "
+                    "configured GPU type has no utilization samples.")
     job_count: int
     gpus_alloc: int = Field(description="Live allocated GPU count.")
     gpus_total: int = Field(description="Total scontrol GPU capacity of "
@@ -186,20 +190,8 @@ class PartitionRow(BaseModel):
     mean_occupancy: Optional[float] = Field(
         default=None,
         description="Window-average share of gpus_total with an active "
-                    "job (%); null when capacity is unknown.")
-
-
-class WaitBuckets(BaseModel):
-    """Completed-job wait-time histogram, in fixed ranges."""
-    lt_5m: int = Field(default=0, description="Waits under 5 minutes.")
-    m5_to_30m: int = Field(default=0, description="Waits from 5 minutes "
-                         "up to (not including) 30 minutes.")
-    m30_to_2h: int = Field(default=0, description="Waits from 30 minutes "
-                           "up to (not including) 2 hours.")
-    h2_to_12h: int = Field(default=0, description="Waits from 2 hours up "
-                           "to (not including) 12 hours.")
-    gte_12h: int = Field(default=0, description="Waits of 12 hours or "
-                         "more.")
+                    "job (%); null when utilization-count samples or "
+                    "capacity are unavailable.")
 
 
 class QueueGroup(BaseModel):
@@ -256,11 +248,13 @@ class QueueGroup(BaseModel):
         description="Number of valid completed-job waits behind the "
                     "percentile/average figures; null when the sacct "
                     "enrichment failed (distinct from a genuine 0).")
-    wait_buckets: Optional[WaitBuckets] = Field(
-        default_factory=WaitBuckets,
-        description="Valid completed-job waits bucketed <5m, 5-30m, "
-                    "30m-2h, 2-12h, >=12h; null when the sacct "
-                    "enrichment failed.")
+    wait_per_gpu_hour_p50: Optional[float] = Field(
+        default=None,
+        description="Median completed-job queue-wait hours per "
+                    "allocated GPU-hour (wait_hours / (elapsed_hours × "
+                    "GPUs)); lower is better. Null when no completed "
+                    "job has valid positive elapsed time and GPU "
+                    "allocation, or when wait history is unavailable.")
 
 
 class PendingJob(BaseModel):
@@ -325,6 +319,15 @@ class QueueTotals(BaseModel):
                     "squeue is unavailable.")
 
 
+class WaitHistoryCoverage(BaseModel):
+    """Completeness and exclusions behind completed-job wait metrics."""
+    records_examined: int = 0
+    valid_samples: Dict[str, int] = Field(default_factory=dict)
+    excluded: Dict[str, int] = Field(default_factory=dict)
+    failed_batches: int = 0
+    complete: bool = True
+
+
 class PartitionQueueResponse(BaseModel):
     queue: Dict[str, QueueGroup] = Field(
         default_factory=dict,
@@ -356,6 +359,10 @@ class PartitionQueueResponse(BaseModel):
                     "statistics failed — queue current-pending figures "
                     "stay valid; must not be read as 'no jobs started "
                     "in the window'.")
+    wait_history_coverage: Optional[WaitHistoryCoverage] = Field(
+        default=None,
+        description="Accounting coverage behind completed-job wait metrics; "
+                    "null when sacct could not be queried.")
 
 
 class VramRecord(BaseModel):

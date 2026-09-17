@@ -1,5 +1,5 @@
 {
-  "count": 4,
+  "count": 5,
   "nodes": [
     {
       "active_jobs": [
@@ -93,6 +93,24 @@
       "reason": "",
       "state": "ALLOCATED",
       "state_full": "ALLOCATED"
+    },
+    {
+      "active_jobs": [],
+      "cpus": 128,
+      "cpus_alloc": 0,
+      "current_util": null,
+      "current_vram": null,
+      "free_mem": 900,
+      "gpu_group": "gh200",
+      "gpu_type": "gh200",
+      "gpus": 4,
+      "gpus_alloc": 0,
+      "name": "gpu50",
+      "partitions": "gpu-gh200",
+      "real_mem": 5000,
+      "reason": "",
+      "state": "IDLE",
+      "state_full": "IDLE"
     }
   ],
   "time": 1788100000

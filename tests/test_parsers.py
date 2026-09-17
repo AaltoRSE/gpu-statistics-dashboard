@@ -1,5 +1,6 @@
 """Parser unit tests. Run: .venv/bin/python -m pytest tests/ -q"""
 
+import json
 import os
 import sys
 
@@ -20,8 +21,6 @@ from slurm import (  # noqa: E402
     parse_squeue_json,
     parse_tres_per_node,
 )
-
-import json
 
 
 def test_expand_node_list_range_and_list():
@@ -99,10 +98,11 @@ NodeName=csl1 Arch=x86_64 CoresPerSocket=20
     assert gpu3["state"] == "MIXED"
     assert gpu3["state_full"] == "MIXED+PLANNED"
     assert gpu3["gpus"] == 4
-    assert gpu3["gpu_type"] == "v100"
+    assert gpu3["gpu_type"] == "v100_32gb"
     assert gpu3["cpus"] == 8
     assert gpu3["cpus_alloc"] == 2
     assert gpu3["free_mem"] == 150000
+    assert gpu3["gres"] == [("v100_32gb", 4)]
     assert gpu3["partitions"] == "gpu-v100-32g,gpu-debug"
     csl1 = nodes[1]
     assert csl1["gpus"] == 0
@@ -338,6 +338,56 @@ def test_sacct_jobs_default_no_date(monkeypatch):
     monkeypatch.setattr(slurm, "_sacct_batch", fake_batch)
     slurm.sacct_jobs(["7"])
     assert seen["start_iso"] is None
+
+
+def test_completed_jobs_retries_chunks_and_retains_array_tasks(monkeypatch):
+    import slurm
+
+    commands, attempts = [], {}
+
+    def fake_run(cmd, timeout=30):
+        commands.append(cmd)
+        start = cmd[cmd.index("-S") + 1]
+        attempts[start] = attempts.get(start, 0) + 1
+        if start == "2026-09-11T14:40:57" and attempts[start] == 1:
+            raise slurm.SlurmError("temporary sacct timeout")
+        return ("20001465_47|20008872|short|alice|acc|gpu-h200|COMPLETED|"
+                "2026-09-17T14:40:57|2026-09-17T14:35:57|"
+                "2026-09-17T14:45:57|00:05:00|gres/gpu:h200=1|gpu49|8")
+
+    monkeypatch.setattr(slurm, "_run", fake_run)
+    records, coverage = slurm.completed_jobs("2026-09-10T14:40:57",
+                                             "2026-09-17T14:40:57")
+    assert commands[0][:4] == ["sacct", "--allusers", "-X", "--state=COMPLETED"]
+    assert attempts["2026-09-11T14:40:57"] == 2
+    assert coverage == {"failed_batches": 0, "successful_batches": 7,
+                        "complete": True}
+    assert records == [{"jobid": "20001465_47", "name": "short",
+                        "user": "alice", "account": "acc",
+                        "partition": "gpu-h200", "state": "COMPLETED",
+                        "submit": "2026-09-17T14:35:57",
+                        "start": "2026-09-17T14:40:57",
+                        "end": "2026-09-17T14:45:57", "elapsed_s": 300,
+                        "gpus": 1, "gpu_type": "h200", "node_list": "gpu49",
+                        "ncpus": 8}]
+
+
+def test_completed_jobs_keeps_successful_chunks_after_failure(monkeypatch):
+    import slurm
+
+    def fake_run(cmd, timeout=30):
+        if cmd[cmd.index("-S") + 1] == "2026-09-11T14:40:57":
+            raise slurm.SlurmError("sacct timeout")
+        return ("1|1|job|alice|acc|gpu-h200|COMPLETED|"
+                "2026-09-10T15:00:00|2026-09-10T14:00:00|"
+                "2026-09-10T16:00:00|01:00:00|gres/gpu:h200=1|gpu1|8")
+
+    monkeypatch.setattr(slurm, "_run", fake_run)
+    records, coverage = slurm.completed_jobs("2026-09-10T14:40:57",
+                                             "2026-09-12T14:40:57")
+    assert [r["jobid"] for r in records] == ["1"]
+    assert coverage == {"failed_batches": 1, "successful_batches": 1,
+                        "complete": False}
 
 
 SCTRL_JOB_SAMPLE = (

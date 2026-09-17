@@ -1,8 +1,8 @@
 """Slurm integration: sacct job enrichment and scontrol node/partition state.
 
-Cluster note: ``sacct`` without ``-j`` is ACL-restricted to the caller's own
-jobs, so job discovery comes from Prometheus labels and ``sacct -j <id>`` is
-used for per-job metadata. All calls are read-only.
+Explicit ``sacct -j`` lookups enrich Prometheus-discovered jobs. Completed-job
+wait metrics use one bounded ``sacct --allusers -X -S … -E …`` query, avoiding
+scrape-sampling gaps and large concurrent ID batches. All calls are read-only.
 """
 
 import datetime
@@ -35,6 +35,8 @@ _PART_BLOCK = re.compile(r"^PartitionName=(\S+)")
 _KV = re.compile(r"^(\w+)=([^\s]*)")
 _GPU_RES = re.compile(r"gpu:([\w.-]+):(\d+)|(?:^|,)gpu:(\d+)(?:,|$)")
 _TRES_GPU = re.compile(r"gres/gpu(?::([\w.-]+))?=(\d+)")
+
+_V100_VRAM_RE = re.compile(r"min-vram:no_consume:(16|32)G", re.IGNORECASE)
 
 
 class SlurmError(Exception):
@@ -178,6 +180,14 @@ def _int(value, default=0):
 _REASON_RE = re.compile(r"(?:^|\s)Reason=(.*)$")
 _STATE_RE = re.compile(r"(?:^|\s)State=(.*?)(?=\s+\w+=|$)")
 
+
+
+def _v100_vram_gres(gres_text, gpus):
+    """Name a homogeneous V100 pool by its configured VRAM capacity."""
+    match = _V100_VRAM_RE.search(gres_text or "")
+    if not match or not gpus or any(gpu_type != "v100" for gpu_type, _ in gpus):
+        return gpus
+    return [("v100_%sgb" % match.group(1), count) for _, count in gpus]
 def parse_scontrol_nodes(output):
     """Parse ``scontrol show nodes`` into a list of node dicts."""
     nodes, current = [], None
@@ -205,7 +215,7 @@ def parse_scontrol_nodes(output):
                 current["reason_full"] = "" if reason == "(null)" else reason
     parsed = []
     for node in nodes:
-        gpus = parse_gres(node.get("Gres"))
+        gpus = _v100_vram_gres(node.get("Gres"), parse_gres(node.get("Gres")))
         gpus_alloc, _ = parse_alloc_tres(node.get("AllocTRES"))
         state = node.get("State", "UNKNOWN")
         # ``scontrol show node -o`` appends the drain reason to the state
@@ -496,6 +506,82 @@ def _sacct_batch(job_ids, start_iso=None):
     return jobs
 
 
+def _enrich_sacct_row(row):
+    """Convert one sacct row into the dashboard's job record shape."""
+    gpus, gpu_type = parse_alloc_tres(row.get("AllocTRES"))
+    return {
+        "jobid": row.get("JobID") or "",
+        "name": row.get("JobName") or "",
+        "user": row.get("User") or "",
+        "account": row.get("Account") or "",
+        "partition": row.get("Partition") or "",
+        "state": row.get("State") or "",
+        "submit": row.get("Submit") or "",
+        "start": row.get("Start") or "",
+        "end": row.get("End") if row.get("End") != "Unknown" else "",
+        "elapsed_s": parse_elapsed(row.get("Elapsed")),
+        "gpus": gpus,
+        "gpu_type": gpu_type,
+        "node_list": row.get("NodeList") or "",
+        "ncpus": _int(row.get("NCPUS")),
+    }
+
+
+def _completed_jobs_batch(start_iso, end_iso):
+    """Completed allocation records from one bounded sacct interval."""
+    cmd = [
+        "sacct", "--allusers", "-X", "--state=COMPLETED",
+        "-S", start_iso, "-E", end_iso,
+        "-o", ",".join(SACCT_FIELDS), "--parsable2", "--noheader",
+    ]
+    out = _run(cmd, timeout=120)
+    records = []
+    for line in out.splitlines():
+        row = _parse_sacct_row(line.strip().split("|"))
+        if not line.strip() or "." in row.get("JobID", ""):
+            continue
+        records.append(_enrich_sacct_row(row))
+    return records
+
+
+def completed_jobs(start_iso, end_iso):
+    """Completed records plus bounded-query completeness metadata.
+
+    Daily chunks keep a seven-day all-user query bounded. Each chunk retries
+    once; successful chunks survive another chunk's failure, and inclusive
+    boundary duplicates are removed by sacct JobID (array task IDs remain
+    distinct).
+    """
+    start = datetime.datetime.fromisoformat(start_iso)
+    end = datetime.datetime.fromisoformat(end_iso)
+    records, seen = [], set()
+    failed_batches = successful_batches = 0
+    cursor = start
+    while cursor < end:
+        chunk_end = min(cursor + datetime.timedelta(days=1), end)
+        chunk_start_iso = cursor.isoformat(timespec="seconds")
+        chunk_end_iso = chunk_end.isoformat(timespec="seconds")
+        try:
+            for attempt in range(2):
+                try:
+                    chunk = _completed_jobs_batch(chunk_start_iso, chunk_end_iso)
+                    break
+                except SlurmError:
+                    if attempt:
+                        raise
+            successful_batches += 1
+            for record in chunk:
+                if record["jobid"] not in seen:
+                    seen.add(record["jobid"])
+                    records.append(record)
+        except SlurmError:
+            failed_batches += 1
+        cursor = chunk_end
+    return records, {"failed_batches": failed_batches,
+                     "successful_batches": successful_batches,
+                     "complete": failed_batches == 0}
+
+
 def sacct_jobs(job_ids, start_iso=None, workers=8):
     """Fetch metadata for many jobs. Returns {jobid: enriched dict}.
 
@@ -517,25 +603,5 @@ def sacct_jobs(job_ids, start_iso=None, workers=8):
             results.update(chunk)
     enriched = {}
     for jobid, row in results.items():
-        gpus, gpu_type = parse_alloc_tres(row.get("AllocTRES"))
-        try:
-            ncpus = int(row.get("NCPUS") or 0)
-        except ValueError:
-            ncpus = 0
-        enriched[jobid] = {
-            "jobid": jobid,
-            "name": row.get("JobName") or "",
-            "user": row.get("User") or "",
-            "account": row.get("Account") or "",
-            "partition": row.get("Partition") or "",
-            "state": row.get("State") or "",
-            "submit": row.get("Submit") or "",
-            "start": row.get("Start") or "",
-            "end": row.get("End") if row.get("End") != "Unknown" else "",
-            "elapsed_s": parse_elapsed(row.get("Elapsed")),
-            "gpus": gpus,
-            "gpu_type": gpu_type,
-            "node_list": row.get("NodeList") or "",
-            "ncpus": ncpus,
-        }
+        enriched[jobid] = _enrich_sacct_row(row)
     return enriched

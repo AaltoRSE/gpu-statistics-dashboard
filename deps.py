@@ -23,6 +23,7 @@ from cache import TtlCache
 from config import ConfigError, load_config
 from prom import PromClient
 from slurm import (  # noqa: F401 (re-exported)
+    completed_jobs,
     queue_pending,
     sacct_jobs,
     show_jobs,

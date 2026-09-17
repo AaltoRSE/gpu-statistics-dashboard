@@ -117,6 +117,10 @@ def vram_key(since_hours, running_only):
     return ("vram_gb", since_hours, running_only)
 
 
+def completed_jobs_key(start, end):
+    return ("completed_jobs", start, end)
+
+
 def node_current_key():
     return "node_current"
 

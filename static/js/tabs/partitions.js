@@ -8,7 +8,7 @@
 "use strict";
 
 import { $, isPlainClick } from "../core/dom.js";
-import { escapeHtml, fmtInt, pctBar, html, raw, compareStrings, tsToDate, partitionLink, fmtDuration, fmtSacctTime, jobLink, userLink } from "../core/format.js";
+import { escapeHtml, fmt, fmtInt, pctBar, html, raw, compareStrings, tsToDate, partitionLink, fmtDuration, fmtSacctTime, jobLink, userLink } from "../core/format.js";
 import { setResultsLoading, showPanelError, panelOk } from "../core/panel.js";
 import { renderPlot, plotTheme, partBarColor } from "../core/plot.js";
 import { api } from "../core/api.js";
@@ -155,7 +155,8 @@ function renderPartBar() {
     x: rows.map((p) => p.name),
     y: rows.map((p) => p.mean_util),
     marker: {
-      color: rows.map((p) => partBarColor(p.mean_util)),
+      color: rows.map((p) => p.mean_util === null || p.mean_util === undefined
+        ? th.idle : partBarColor(p.mean_util)),
       // Selecting a GPU type already scopes the trend and VRAM charts
       // below; outlining its bar here too (T-27) is the only place these
       // two charts show which type that is.
@@ -164,7 +165,9 @@ function renderPartBar() {
         color: th.font.color,
       },
     },
-    hovertemplate: "<b>%{x}</b><br>mean %{y:.1f}%<extra></extra>",
+    hovertemplate: rows.map((p) => p.mean_util === null || p.mean_util === undefined
+      ? "<b>%{x}</b><br>no utilization data<extra></extra>"
+      : "<b>%{x}</b><br>mean %{y:.1f}%<extra></extra>"),
   }], {
     margin: { l: 46, r: 20, t: 10, b: 60 },
     paper_bgcolor: "rgba(0,0,0,0)", plot_bgcolor: "rgba(0,0,0,0)",
@@ -185,9 +188,10 @@ function renderPartOccupancy() {
   renderPlot("partOccupancyPlot", [{
     type: "bar",
     x: rows.map((p) => p.name),
-    y: rows.map((p) => (p.mean_occupancy === null ? 0 : p.mean_occupancy)),
+    y: rows.map((p) => p.mean_occupancy),
     marker: {
-      color: th.acc,
+      color: rows.map((p) => p.mean_occupancy === null
+        || p.mean_occupancy === undefined ? th.idle : th.acc),
       line: {
         width: rows.map((p) => p.name === selectedPartition ? 2 : 0),
         color: th.font.color,
@@ -195,7 +199,8 @@ function renderPartOccupancy() {
     },
     customdata: rows.map((p) => p.mean_util),
     hovertemplate: rows.map((p) => p.mean_occupancy === null
-      ? "<b>%{x}</b><br>no capacity data<extra></extra>"
+      || p.mean_occupancy === undefined
+      ? "<b>%{x}</b><br>no occupancy data<extra></extra>"
       : "<b>%{x}</b><br>occupancy %{y:.1f}%<br>mean util %{customdata:.1f}%<extra></extra>"),
   }], {
     margin: { l: 46, r: 20, t: 10, b: 60 },
@@ -208,17 +213,6 @@ function renderPartOccupancy() {
 }
 
 function queueRowHtml(q) {
-  let bucketText;
-  if (q.wait_buckets === null || q.wait_buckets === undefined) {
-    // sacct enrichment failed: unknown, not "all buckets empty"
-    bucketText = "—";
-  } else {
-    bucketText = [
-      ["lt_5m", "<5m"], ["m5_to_30m", "5–30m"], ["m30_to_2h", "30m–2h"],
-      ["h2_to_12h", "2–12h"], ["gte_12h", "≥12h"],
-    ].map(([key, label]) => label + " " + fmtInt(q.wait_buckets[key] || 0))
-      .join(" · ");
-  }
   return html`
     <tr class="row" data-partition="${q.name}">
       <td>${raw(partitionLink(q.name))}</td>
@@ -236,7 +230,9 @@ function queueRowHtml(q) {
         ? "—" : fmtDuration(q.wait_avg_s)}</td>
       <td class="num">${q.wait_samples === null || q.wait_samples === undefined
         ? "—" : fmtInt(q.wait_samples)}</td>
-      <td>${bucketText}</td>
+      <td class="num">${q.wait_per_gpu_hour_p50 === null
+        || q.wait_per_gpu_hour_p50 === undefined
+        ? "—" : fmt(q.wait_per_gpu_hour_p50, 2) + " h/GPU-h"}</td>
     </tr>`;
 }
 // Centered rolling mean over a fixed WALL-CLOCK window (not a fixed point
@@ -268,6 +264,10 @@ function renderPartTrend(trend) {
   const entries = selectedPartition
     ? Object.entries(trend).filter(([name]) => name === selectedPartition)
     : Object.entries(trend);
+  const emptyNames = entries
+    .filter(([, values]) => !values || !values.length)
+    .map(([name]) => name)
+    .sort(compareStrings);
   const withData = entries.filter(([, values]) => values && values.length);
   // Rank by each GPU type's mean utilization (computed from the series
   // actually plotted) so the busiest types sit first and get the
@@ -300,8 +300,16 @@ function renderPartTrend(trend) {
     layout.annotations = [{
       text: selectedPartition
         ? "No trend data for " + selectedPartition + " in this window"
-        : "No GPU type trend data in this window",
+        : emptyNames.length
+          ? "No trend data: " + emptyNames.join(", ")
+          : "No GPU type trend data in this window",
       showarrow: false, xref: "paper", yref: "paper", x: 0.5, y: 0.5,
+      font: { color: th.font.color, size: 12 },
+    }];
+  } else if (emptyNames.length) {
+    layout.annotations = [{
+      text: "No trend data: " + emptyNames.join(", "),
+      showarrow: false, xref: "paper", yref: "paper", x: 0.5, y: 1.08,
       font: { color: th.font.color, size: 12 },
     }];
   }
@@ -314,7 +322,8 @@ function partRowHtml(p) {
       <td>${raw(partitionLink(p.name))}</td>
       <td class="num" title="allocated / total GPUs">${p.gpus_alloc}/${p.gpus_total}</td>
       <td class="num">${fmtInt(p.job_count)}</td>
-      <td class="num">${raw(pctBar(p.mean_util))}</td>
+      <td class="num">${p.mean_util === null || p.mean_util === undefined
+        ? "—" : raw(pctBar(p.mean_util))}</td>
     </tr>`;
 }
 
@@ -363,7 +372,7 @@ const partQueueTable = createTable({
     { key: "wait_p90_s", type: "number" },
     { key: "wait_avg_s", type: "number" },
     { key: "wait_samples", type: "number" },
-    { key: "wait_buckets", type: "text" },
+    { key: "wait_per_gpu_hour_p50", type: "number" },
   ],
   defaultSort: { key: "eligible_jobs", dir: "desc" },
   renderRow: queueRowHtml,

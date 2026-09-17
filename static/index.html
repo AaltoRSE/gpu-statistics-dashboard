@@ -206,13 +206,13 @@
                 <th class="num" data-k="wait_p90_s" title="nearest-rank P90 completed-job wait; an observed wait, not an interpolation">P90 wait</th>
                 <th class="num" data-k="wait_avg_s" title="mean completed-job wait over the same samples as P50/P90">Average wait</th>
                 <th class="num" data-k="wait_samples" title="number of valid completed-job waits behind P50/P90/average">Samples</th>
-                <th data-k="wait_buckets" title="completed-job waits bucketed: under 5m, 5&ndash;30m, 30m&ndash;2h, 2&ndash;12h, and 12h or more (each bucket holds waits below its upper edge, 12h+ holds the rest)">Wait buckets</th>
+                <th class="num" data-k="wait_per_gpu_hour_p50" title="Median completed-job queue wait per allocated job size: wait hours divided by runtime hours &times; GPUs. Lower is better; jobs without positive runtime and GPU allocation are excluded.">Median wait / GPU-hour</th>
               </tr></thead>
               <tbody></tbody>
             </table>
           </div>
           <div class="hint">Rows are per GPU type: a job eligible for several types appears in each, so &ldquo;Eligible jobs&rdquo; / &ldquo;Eligible GPUs&rdquo; are exclusive&nbsp;+&nbsp;flexible within a row and must not be summed across rows. Eligibility is where demand could land &mdash; not a claim that a job could start right now. The unique cluster-wide figure above counts every GPU-eligible pending job once.</div>
-          <div class="hint">Wait statistics describe completed jobs that started on this GPU type inside the selected window (Submit &rarr; Start), not the current waiting age and not Slurm&rsquo;s estimated start. &ldquo;&mdash;&rdquo; with 0 samples means no valid starts, not a zero wait.</div>
+          <div class="hint">Wait statistics describe completed jobs that started on this GPU type inside the selected window (Submit &rarr; Start), not the current waiting age and not Slurm&rsquo;s estimated start. &ldquo;&mdash;&rdquo; with 0 samples means no valid starts, not a zero wait. Median wait / GPU-hour normalizes by job size: 4 hours waiting for 2 GPUs running 1 hour = 2.00 h/GPU-h.</div>
           <div class="hint" id="pQueueHint" hidden>Queue status unavailable &mdash; squeue could not be reached (this is not an empty queue).</div>
           <div class="hint" id="pWaitHistoryHint" hidden>Historical wait data unavailable &mdash; sacct enrichment failed; pending counts above are still live.</div>
         </div>
