@@ -309,6 +309,10 @@ export async function loadJobDetail(jobid, from) {
   // the broad explorer behind its "Browse jobs" control unless the click
   // came from the table itself (where it is already the context).
   if (!jobDetailOpenedFromTable) setJobExplorerCollapsed(true);
+  // Scroll to the detail immediately, while the graph fetch is still in
+  // flight: the click should land on the panel right away, not only once
+  // its data has arrived.
+  detail.scrollIntoView({ behavior: "smooth", block: "start" });
   try {
     const data = await api("/api/jobs/" + jobid + "?since_hours=" + $("jWindow").value);
     if (token !== jobDetailToken) return;
@@ -317,12 +321,12 @@ export async function loadJobDetail(jobid, from) {
     jobDetailData = data;
     renderJobDetail(data);
     if (jobDetailOpenedFromTable) highlightJobRow(jobid);
-    // Land on the detail only once its real content (stats row, chart)
-    // has rendered: scrolling before the fetch targets the loading
-    // skeleton's height, and the panel's own size change on render then
-    // pushes the view back down to the jobs table (PLAN-1 2.2's fix for
-    // the Nodes tab, applied here). The row highlight is a plain marker
-    // now — the single scroll is the panel's.
+    // Re-anchor after the content (stats row, chart) has rendered
+    // (PLAN-1 2.2): the early scroll above computed its target from the
+    // loading skeleton's layout, and the panel's own size change on render
+    // can displace the view — this second pass lands it on the rendered
+    // panel. When the early scroll already landed exactly here, this is a
+    // no-op; it only corrects a view the render has displaced.
     detail.scrollIntoView({ behavior: "smooth", block: "start" });
   } catch (e) {
     if (token === jobDetailToken)
@@ -394,10 +398,11 @@ function toggleJobExplorer() {
 function highlightJobRow(jobid) {
   clearJobTableHighlight();
   const tr = $("jobTable").querySelector('tr.row[data-job="' + jobid + '"]');
-  // No scrollIntoView here: the detail panel's own scroll (in
-  // loadJobDetail, after its content renders) is the navigation target —
-  // this is just a visual marker for whoever scrolls back up to the
-  // table, not a second place to land (same as highlightNodeRow).
+  // No scrollIntoView here: loadJobDetail scrolls the detail panel into
+  // view at click time (before its fetch resolves), and that early scroll
+  // is the navigation target — this is just a visual marker for whoever
+  // scrolls back up to the table, not a second place to land (same as
+  // highlightNodeRow).
   if (tr) tr.classList.add("sel");
 }
 
