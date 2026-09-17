@@ -546,6 +546,8 @@ export let vramJobs = [];
 let vramTotal = 0; // candidates in the window, before the backend cap
 let vramToken = 0;
 let vramGpuType = "";
+let vramEnrichedFrac = 1.0; // sacct enrichment coverage of the returned records
+let vramFailedBatches = 0; // sacct batches that failed after retrying
 
 export async function loadVram() {
   const token = ++vramToken;
@@ -565,6 +567,8 @@ export async function loadVram() {
     panelOk("vramResults");
     vramJobs = data.jobs;
     vramTotal = data.total || data.jobs.length;
+    vramEnrichedFrac = data.enriched_frac;
+    vramFailedBatches = data.failed_batches || 0;
     fillVramGpuTypes();
     renderVram();
   } catch (e) {
@@ -684,6 +688,13 @@ function renderVram() {
     totalEff.toFixed(0) + " effective",
   ];
   if (normalize) metaBits.push(totalAlloc.toFixed(0) + " allocated in scope");
+  if (vramEnrichedFrac < 1 || vramFailedBatches > 0) {
+    const pct = Math.round((vramEnrichedFrac || 0) * 100);
+    metaBits.push("GPU-hour enrichment partial: " + pct + "% resolved" +
+      (vramFailedBatches ? "; " + vramFailedBatches + " sacct batch"
+        + (vramFailedBatches === 1 ? "" : "es") + " failed" : "") +
+      " (dashes mean accounting data is missing, not zero)");
+  }
   if (excludedJobs)
     metaBits.push(excludedJobs + " jobs / " + excludedEff.toFixed(0) +
       " effective GPU-hours excluded — allocation unavailable");

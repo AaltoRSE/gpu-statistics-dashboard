@@ -385,6 +385,42 @@ test("progress polling stops after a 404 from a stale backend", async (t) => {
   releaseQueue();
 });
 
+test("partial VRAM enrichment renders a visible coverage hint", async (t) => {
+  const dom = new JSDOM(html, { url: "http://localhost/partitions" });
+  global.document = dom.window.document;
+  global.window = dom.window;
+  global.localStorage = dom.window.localStorage;
+  global.location = dom.window.location;
+  global.history = { pushState() {}, replaceState() {} };
+  global.setInterval = () => 0;
+  global.Plotly = { newPlot: () => {}, react: () => {} };
+  global.fetch = (url) => {
+    if (String(url).startsWith("/api/partitions/vram")) {
+      return Promise.resolve({ ok: true, json: () => Promise.resolve({
+        window: { start: 1000, end: 2000 }, step: 120, total: 4,
+        enriched_frac: 0.5, failed_batches: 2,
+        jobs: [{ jobid: "1", user: "ann", partition: "h200",
+                 gpu_type: "h200", mean_util: 50, vram_gb: 1,
+                 gpu_hours: 1, gpu_hours_eff: 0.5 }],
+      }) });
+    }
+    if (String(url).startsWith("/api/partitions/queue")) {
+      return Promise.resolve({ ok: true, json: () => Promise.resolve({
+        queue: {}, totals: TOTALS, queue_available: true, waiting_jobs: [],
+        wait_history_available: true,
+      }) });
+    }
+    return Promise.resolve({ ok: true, json: () => Promise.resolve({ ...CORE_BODY }) });
+  };
+  const mod = await import("../static/js/tabs/partitions.js?cb=16");
+  t.after(() => dom.window.close());
+  await mod.loadVram();
+  const meta = dom.window.document.getElementById("vramMeta").textContent;
+  assert.match(meta, /GPU-hour enrichment partial: 50% resolved/);
+  assert.match(meta, /2 sacct batches failed/);
+  assert.match(meta, /dashes mean accounting data is missing, not zero/);
+});
+
 test("selecting a GPU type filters the waiting list but keeps the unique headline", async (t) => {
   const { dom, mod } = await bootAndWait({
     queue: QUEUE,
