@@ -21,10 +21,12 @@ def vram_job_records(since_hours, running_only=False, partition="",
     slider can rebin without refetching. A non-empty ``partition`` keeps
     only jobs of that group, so the candidate ``total`` and the enrichment
     cap apply to the selected group.
-    Returns (records, total, start, now, step, enriched_frac) where
-    ``total`` counts candidates before the enrichment cap and
-    ``enriched_frac`` is the fraction of capped records whose allocated
-    GPU-hours the sacct enrichment resolved.
+    Returns (records, total, start, now, step, enriched_frac,
+    failed_batches) where ``total`` counts candidates before the
+    enrichment cap, ``enriched_frac`` is the fraction of capped records
+    whose allocated GPU-hours the sacct enrichment resolved, and
+    ``failed_batches`` counts 100-ID sacct batches that failed after
+    retrying (their records' gpu_hours stay null).
     """
     node_gpu_types = node_gpu_types or {}
     start, now = job_window(since_hours)
