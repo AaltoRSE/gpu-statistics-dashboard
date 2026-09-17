@@ -1,14 +1,17 @@
 """Slurm integration: sacct job enrichment and scontrol node/partition state.
 
-Cluster note: ``sacct`` without ``-j`` is ACL-restricted to the caller's own
-jobs, so job discovery comes from Prometheus labels and ``sacct -j <id>`` is
-used for per-job metadata. All calls are read-only.
+Explicit ``sacct -j`` lookups enrich Prometheus-discovered jobs. Completed-job
+wait metrics use one bounded ``sacct --allusers -X -S … -E …`` query, avoiding
+scrape-sampling gaps and large concurrent ID batches. All calls are read-only.
 """
 
+import datetime
+import json
 import re
 import shutil
 import subprocess
 from concurrent.futures import ThreadPoolExecutor
+from zoneinfo import ZoneInfo
 
 SACCT_FIELDS = [
     "JobID",
@@ -19,6 +22,7 @@ SACCT_FIELDS = [
     "Partition",
     "State",
     "Start",
+    "Submit",
     "End",
     "Elapsed",
     "AllocTRES",
@@ -31,6 +35,8 @@ _PART_BLOCK = re.compile(r"^PartitionName=(\S+)")
 _KV = re.compile(r"^(\w+)=([^\s]*)")
 _GPU_RES = re.compile(r"gpu:([\w.-]+):(\d+)|(?:^|,)gpu:(\d+)(?:,|$)")
 _TRES_GPU = re.compile(r"gres/gpu(?::([\w.-]+))?=(\d+)")
+
+_V100_VRAM_RE = re.compile(r"min-vram:no_consume:(16|32)G", re.IGNORECASE)
 
 
 class SlurmError(Exception):
@@ -174,6 +180,14 @@ def _int(value, default=0):
 _REASON_RE = re.compile(r"(?:^|\s)Reason=(.*)$")
 _STATE_RE = re.compile(r"(?:^|\s)State=(.*?)(?=\s+\w+=|$)")
 
+
+
+def _v100_vram_gres(gres_text, gpus):
+    """Name a homogeneous V100 pool by its configured VRAM capacity."""
+    match = _V100_VRAM_RE.search(gres_text or "")
+    if not match or not gpus or any(gpu_type != "v100" for gpu_type, _ in gpus):
+        return gpus
+    return [("v100_%sgb" % match.group(1), count) for _, count in gpus]
 def parse_scontrol_nodes(output):
     """Parse ``scontrol show nodes`` into a list of node dicts."""
     nodes, current = [], None
@@ -201,7 +215,7 @@ def parse_scontrol_nodes(output):
                 current["reason_full"] = "" if reason == "(null)" else reason
     parsed = []
     for node in nodes:
-        gpus = parse_gres(node.get("Gres"))
+        gpus = _v100_vram_gres(node.get("Gres"), parse_gres(node.get("Gres")))
         gpus_alloc, _ = parse_alloc_tres(node.get("AllocTRES"))
         state = node.get("State", "UNKNOWN")
         # ``scontrol show node -o`` appends the drain reason to the state
@@ -269,6 +283,124 @@ def show_nodes():
 
 def show_partitions():
     return parse_scontrol_partitions(_run(["scontrol", "show", "partitions"]))
+
+
+def parse_tres_per_node(text):
+    """A job's TresPerNode string (``squeue %b`` / scontrol's TresPerNode)
+    to (gpu_count_per_node, gpu_type).
+
+    This is the colon-form GRES syntax (``gres/gpu:a100:4``), not the
+    equals-form AllocTRES ``parse_alloc_tres`` handles (``gres/gpu=4``).
+    The untyped form (``gres/gpu:1``) and the typed form
+    (``gres/gpu:a100:4``) are distinguished by the type name starting with
+    a letter: a bare ``gres/gpu:1`` parses as count 1 with no type. This
+    makes the grammar ambiguous for a digit-initial type name (the bare
+    Prometheus MIG-profile form, ``gres/gpu:3g.40gb:2``): it cannot be
+    told apart from an untyped count and is unsupported here — it parses
+    as (0, "") rather than misreading the profile name as a number.
+    Non-GPU resources in the same string (``gres/min-vram:40g``,
+    ``gres/min-cuda-cc:80``) are ignored.
+    """
+    gpus, gpu_type = 0, ""
+    for m in re.finditer(r"gres/gpu(?::([A-Za-z][\w.-]*))?(?::(\d+))?(?=,|$)",
+                         text or ""):
+        count = int(m.group(2)) if m.group(2) else 0
+        if count > gpus:
+            gpus = count
+            gpu_type = m.group(1) or ""
+    return gpus, gpu_type
+
+
+def queue_pending():
+    """Pending (PD) jobs from ``squeue --json``, hidden partitions included.
+
+    JSON (not ``-o``/``-O`` text) because the GPU request can live in
+    either of two fields — ``tres_per_node`` (the classic ``%b``) or
+    ``tres_per_job`` (job-level, no ``-o`` short code; Slurm 25.11 keeps
+    a constraints-only ``gres/min-vram:...`` request there alongside the
+    real ``gres/gpu:1``) — and fixed-width text columns truncate long
+    partition lists, which would silently drop eligibility types.
+    ``--all`` is the code-side correction for a queue that is present
+    but absent from the default view. Raises ``SlurmError`` when squeue
+    is unavailable or fails; callers must surface that as an error
+    state, not an empty queue.
+    """
+    return parse_squeue_json(_run(
+        ["squeue", "--json", "--all", "--states=PENDING"], timeout=15))
+
+
+def _tres_epoch(ts):
+    """A squeue --json timestamp object to epoch seconds, or None."""
+    if not isinstance(ts, dict) or not ts.get("set") or ts.get("infinite"):
+        return None
+    return ts.get("number")
+
+
+def parse_squeue_json(payload):
+    """Parse ``squeue --json`` output into pending-job dicts.
+
+    The dict shape matches the historical ``-o`` parser exactly
+    (``jobid``, ``user``, ``partition``, ``state``, ``submit`` ISO
+    string, ``start`` ISO string or ``""``, ``reason``, ``nodes``,
+    ``gpus``, ``gpu_type``) so callers are format-agnostic.
+
+    GPU demand comes from BOTH TRES fields: a job may state its request
+    as TresPerNode (``%b``, ``gres/gpu:2``) or TresPerJob
+    (``gres/gpu:1``). Each is parsed with ``parse_tres_per_node`` (same
+    colon grammar) and the richer result wins — higher count first,
+    then the typed request at equal counts. Jobs naming no GPU anywhere
+    stay ``gpus=0`` so the queue depth stays exact. A missing/unset
+    start time stays ``""``.
+    """
+    data = json.loads(payload)
+    jobs = []
+    for j in data.get("jobs", []):
+        node_gpus, node_type = parse_tres_per_node(j.get("tres_per_node") or "")
+        job_gpus, job_type = parse_tres_per_node(j.get("tres_per_job") or "")
+        if job_gpus > node_gpus or (job_gpus == node_gpus
+                                    and job_type and not node_type):
+            gpus, gpu_type = job_gpus, job_type
+        else:
+            gpus, gpu_type = node_gpus, node_type
+        states = j.get("job_state") or [""]
+        submit = _tres_epoch(j.get("submit_time"))
+        start = _tres_epoch(j.get("start_time"))
+        jobs.append({
+            "jobid": str(j.get("job_id", "")),
+            "user": j.get("user_name") or "",
+            "partition": j.get("partition") or "",
+            "state": states[0] if states else "",
+            # squeue --json epochs are absolute; sacct and the dashboard
+            # header render Europe/Helsinki-local naive strings, so
+            # convert with the fixed cluster offset, never the process
+            # TZ (host TZ varies, sacct does not).
+            "submit": _cluster_iso(submit),
+            "start": _cluster_iso(start),
+            "reason": j.get("state_reason") or "",
+            "nodes": (j.get("node_count") or {}).get("number", 0) or 0,
+            "gpus": gpus,
+            "gpu_type": gpu_type,
+        })
+    return jobs
+
+
+CLUSTER_TZ = ZoneInfo("Europe/Helsinki")
+"""The dashboard's display timezone (see static/index.html header)."""
+
+
+def _cluster_iso(epoch):
+    """Epoch seconds to a naive Europe/Helsinki ISO string, or ``""``.
+
+    Matches sacct's output convention: sacct prints cluster-local
+    naive timestamps regardless of the caller's TZ, so the queue's
+    submit/estimated-start strings must use the same wall clock —
+    never the process's local zone (deployment hosts vary).
+    """
+    if not epoch:
+        return ""
+    return datetime.datetime.fromtimestamp(epoch, CLUSTER_TZ) \
+        .replace(tzinfo=None).isoformat()
+
 
 def parse_scontrol_jobs(output):
     """Parse ``scontrol show job -o`` output into a job metadata dict.
@@ -374,6 +506,95 @@ def _sacct_batch(job_ids, start_iso=None):
     return jobs
 
 
+def _enrich_sacct_row(row):
+    """Convert one sacct row into the dashboard's job record shape."""
+    gpus, gpu_type = parse_alloc_tres(row.get("AllocTRES"))
+    return {
+        "jobid": row.get("JobID") or "",
+        "name": row.get("JobName") or "",
+        "user": row.get("User") or "",
+        "account": row.get("Account") or "",
+        "partition": row.get("Partition") or "",
+        "state": row.get("State") or "",
+        "submit": row.get("Submit") or "",
+        "start": row.get("Start") or "",
+        "end": row.get("End") if row.get("End") != "Unknown" else "",
+        "elapsed_s": parse_elapsed(row.get("Elapsed")),
+        "gpus": gpus,
+        "gpu_type": gpu_type,
+        "node_list": row.get("NodeList") or "",
+        "ncpus": _int(row.get("NCPUS")),
+    }
+
+
+def _completed_jobs_batch(start_iso, end_iso):
+    """Completed allocation records from one bounded sacct interval."""
+    cmd = [
+        "sacct", "--allusers", "-X", "--state=COMPLETED",
+        "-S", start_iso, "-E", end_iso,
+        "-o", ",".join(SACCT_FIELDS), "--parsable2", "--noheader",
+    ]
+    out = _run(cmd, timeout=120)
+    records = []
+    for line in out.splitlines():
+        row = _parse_sacct_row(line.strip().split("|"))
+        if not line.strip() or "." in row.get("JobID", ""):
+            continue
+        records.append(_enrich_sacct_row(row))
+    return records
+
+
+def completed_jobs(start_iso, end_iso, progress=None):
+    """Completed records plus bounded-query completeness metadata.
+
+    Daily chunks keep a seven-day all-user query bounded. Each chunk retries
+    once; successful chunks survive another chunk's failure, and inclusive
+    boundary duplicates are removed by sacct JobID (array task IDs remain
+    distinct). ``progress`` receives a callback after every chunk so a caller
+    can surface batched progress instead of one opaque wait.
+    """
+    start = datetime.datetime.fromisoformat(start_iso)
+    end = datetime.datetime.fromisoformat(end_iso)
+    records, seen = [], set()
+    failed_batches = successful_batches = 0
+    cursor = start
+    chunks = []
+    while cursor < end:
+        chunk_end = min(cursor + datetime.timedelta(days=1), end)
+        chunks.append((cursor, chunk_end))
+        cursor = chunk_end
+    total = len(chunks)
+    for index, (chunk_start, chunk_end) in enumerate(chunks):
+        chunk_start_iso = chunk_start.isoformat(timespec="seconds")
+        chunk_end_iso = chunk_end.isoformat(timespec="seconds")
+        chunk = None
+        try:
+            for attempt in range(2):
+                try:
+                    chunk = _completed_jobs_batch(chunk_start_iso, chunk_end_iso)
+                    break
+                except SlurmError:
+                    if attempt:
+                        raise
+        except SlurmError:
+            failed_batches += 1
+            if progress:
+                progress({"done": index + 1, "total": total,
+                          "failed_batches": failed_batches})
+            continue
+        successful_batches += 1
+        for record in chunk:
+            if record["jobid"] not in seen:
+                seen.add(record["jobid"])
+                records.append(record)
+        if progress:
+            progress({"done": index + 1, "total": total,
+                      "failed_batches": failed_batches})
+    return records, {"failed_batches": failed_batches,
+                     "successful_batches": successful_batches,
+                     "complete": failed_batches == 0}
+
+
 def sacct_jobs(job_ids, start_iso=None, workers=8):
     """Fetch metadata for many jobs. Returns {jobid: enriched dict}.
 
@@ -381,39 +602,42 @@ def sacct_jobs(job_ids, start_iso=None, workers=8):
     bound the request, so callers may omit it to retrieve jobs that started
     before the visible window.
     """
+    enriched, _ = sacct_jobs_resilient(job_ids, start_iso, workers)
+    return enriched
+
+
+def sacct_jobs_resilient(job_ids, start_iso=None, workers=8):
+    """``sacct_jobs`` plus failed-batch accounting, for callers that
+    disclose partial coverage instead of failing the whole enrichment.
+
+    Each 100-ID batch retries once; a batch that still fails is counted in
+    the returned tuple instead of discarding every other batch's records
+    (one slow slurmdbd response must not 502 a 2000-job enrichment).
+    """
     job_ids = sorted(set(job_ids))
     if not job_ids:
-        return {}
+        return {}, 0
     batches = [job_ids[i : i + 100] for i in range(0, len(job_ids), 100)]
     results = {}
+    failed_batches = 0
 
     def fetch(batch):
-        return _sacct_batch(batch, start_iso)
+        nonlocal failed_batches
+        try:
+            for attempt in range(2):
+                try:
+                    return _sacct_batch(batch, start_iso)
+                except SlurmError:
+                    if attempt:
+                        raise
+        except SlurmError:
+            failed_batches += 1
+            return {}
 
     with ThreadPoolExecutor(max_workers=workers) as pool:
         for chunk in pool.map(fetch, batches):
             results.update(chunk)
-
     enriched = {}
     for jobid, row in results.items():
-        gpus, gpu_type = parse_alloc_tres(row.get("AllocTRES"))
-        try:
-            ncpus = int(row.get("NCPUS") or 0)
-        except ValueError:
-            ncpus = 0
-        enriched[jobid] = {
-            "jobid": jobid,
-            "name": row.get("JobName") or "",
-            "user": row.get("User") or "",
-            "account": row.get("Account") or "",
-            "partition": row.get("Partition") or "",
-            "state": row.get("State") or "",
-            "start": row.get("Start") or "",
-            "end": row.get("End") if row.get("End") != "Unknown" else "",
-            "elapsed_s": parse_elapsed(row.get("Elapsed")),
-            "gpus": gpus,
-            "gpu_type": gpu_type,
-            "node_list": row.get("NodeList") or "",
-            "ncpus": ncpus,
-        }
-    return enriched
+        enriched[jobid] = _enrich_sacct_row(row)
+    return enriched, failed_batches

@@ -2,12 +2,12 @@
   "partitions": [
     {
       "gpus_alloc": 3,
-      "gpus_total": 16,
+      "gpus_total": 8,
       "job_count": 1,
       "max_util": 95.0,
-      "mean_occupancy": 6.2,
+      "mean_occupancy": 12.5,
       "mean_util": 92.5,
-      "name": "gpu-h200"
+      "name": "h100"
     },
     {
       "gpus_alloc": 1,
@@ -20,30 +20,62 @@
     },
     {
       "gpus_alloc": 2,
-      "gpus_total": 16,
+      "gpus_total": 20,
       "job_count": 2,
       "max_util": 60.0,
       "mean_occupancy": 12.5,
       "mean_util": 36.67,
-      "name": "gpu-h100"
+      "name": "h200"
+    },
+    {
+      "gpus_alloc": 0,
+      "gpus_total": 4,
+      "job_count": 0,
+      "max_util": null,
+      "mean_occupancy": null,
+      "mean_util": null,
+      "name": "gh200"
+    },
+    {
+      "gpus_alloc": 0,
+      "gpus_total": 4,
+      "job_count": 0,
+      "max_util": null,
+      "mean_occupancy": null,
+      "mean_util": null,
+      "name": "v100_16gb"
+    },
+    {
+      "gpus_alloc": 0,
+      "gpus_total": 4,
+      "job_count": 0,
+      "max_util": null,
+      "mean_occupancy": null,
+      "mean_util": null,
+      "name": "v100_32gb"
     }
   ],
   "step": 120,
   "trend": {
-    "gpu-h100": [
+    "gh200": [],
+    "h100": [
       [
         1000.0,
-        25.0
+        90.0
       ],
       [
         1120.0,
-        35.0
+        95.0
       ]
     ],
-    "gpu-h200": [
+    "h200": [
       [
         1000.0,
-        92.5
+        16.666666666666668
+      ],
+      [
+        1120.0,
+        30.0
       ]
     ],
     "h200_3g.71gb": [
@@ -55,7 +87,9 @@
         1120.0,
         90.0
       ]
-    ]
+    ],
+    "v100_16gb": [],
+    "v100_32gb": []
   },
   "window": {
     "end": 1788100000,

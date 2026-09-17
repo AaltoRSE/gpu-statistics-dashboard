@@ -21,8 +21,12 @@ def vram_job_records(since_hours, running_only=False, partition="",
     slider can rebin without refetching. A non-empty ``partition`` keeps
     only jobs of that group, so the candidate ``total`` and the enrichment
     cap apply to the selected group.
-    Returns (records, total, start, now, step) where ``total`` counts
-    candidates before the enrichment cap.
+    Returns (records, total, start, now, step, enriched_frac,
+    failed_batches) where ``total`` counts candidates before the
+    enrichment cap, ``enriched_frac`` is the fraction of capped records
+    whose allocated GPU-hours the sacct enrichment resolved, and
+    ``failed_batches`` counts 100-ID sacct batches that failed after
+    retrying (their records' gpu_hours stay null).
     """
     node_gpu_types = node_gpu_types or {}
     start, now = job_window(since_hours)
@@ -31,7 +35,7 @@ def vram_job_records(since_hours, running_only=False, partition="",
     if running_only:
         live = running_gpu_job_ids()
         if not live:
-            return [], 0, start, now, step
+            return [], 0, start, now, step, 0.0, 0
     jobs, start, now, step = fetch_job_window(since_hours, include_vram=False)
     for j in jobs:
         j["gpu_group"] = gpu_groups.job_gpu_group(j, node_gpu_types)
@@ -81,13 +85,32 @@ def vram_job_records(since_hours, running_only=False, partition="",
     total = len(records)
     records = records[:deps.VRAM_RECORD_CAP]
     ids = sorted({r["jobid"] for r in records})
+    enriched_frac = 0.0
+    failed_batches = 0
     if ids:
-        meta = deps.route_cache.get_or_set(
-            cache.sacct_key(ids), 300, lambda: deps.sacct_jobs(ids))
+        meta, failed_batches = deps.route_cache.get_or_set(
+            # A distinct key: sacct_key holds the plain dict the Jobs
+            # paths consume; storing the (dict, failed) tuple under it
+            # would hand the other consumer the wrong shape for the TTL.
+            cache.sacct_resilient_key(ids), 300,
+            # Two workers: 2000 IDs mean 20 sequential 100-ID sacct calls
+            # per failed batch, so low concurrency keeps the load bounded
+            # instead of saturating slurmdbd with 8 parallel lookups.
+            lambda: deps.sacct_jobs_resilient(ids, workers=2))
+        enriched = 0
         for r in records:
             row = meta.get(r["jobid"]) or {}
-            if row.get("gpus") and row.get("elapsed_s"):
+            # Key presence, not truthiness: a valid row with elapsed 0
+            # (Slurm reports 00:00:00 for a just-started job) resolved
+            # fine and must count as coverage, emitting 0.0 GPU-hours.
+            # But elapsed data must be PRESENT: a row without it is an
+            # unresolved record, not a zero-hour one.
+            if row.get("gpus") and row.get("elapsed_s") is not None:
                 r["gpu_hours"] = round(row["gpus"] * row["elapsed_s"] / 3600.0, 2)
+                enriched += 1
+        # The client discloses enrichment coverage: gpu_hours nulls in the
+        # distribution mean sacct could not be queried for that record.
+        enriched_frac = enriched / len(records)
     wkey = "gpu_hours" if weight == "alloc" else "gpu_hours_eff"
     records.sort(key=lambda r: (r.get(wkey) or 0.0), reverse=True)
-    return records, total, start, now, step
+    return records, total, start, now, step, enriched_frac, failed_batches

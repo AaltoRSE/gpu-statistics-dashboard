@@ -39,6 +39,7 @@ CASES = [
     ("job_detail", "/api/jobs/1", {"since_hours": 24}),
     ("users", "/api/users", {"since_hours": 24}),
     ("partitions", "/api/partitions", {"since_hours": 24}),
+    ("partitions_queue", "/api/partitions/queue", {"since_hours": 24}),
     ("partitions_running_only", "/api/partitions",
      {"since_hours": 24, "running_only": "true"}),
     ("partitions_vram", "/api/partitions/vram", {"since_hours": 24}),

@@ -8,15 +8,16 @@
     "account": "acc",
     "elapsed_s": 3600,
     "end": "",
-    "gpu_type": "h100",
+    "gpu_type": "h200",
     "gpus": 2,
     "jobid": "1",
     "name": "train.sh",
     "ncpus": 8,
     "node_list": "gpu1",
-    "partition": "gpu-h100",
+    "partition": "gpu-h200-ellis",
     "start": "2026-08-28T00:00:00",
     "state": "RUNNING",
+    "submit": "2026-08-27T23:00:00",
     "user": "alice"
   },
   "series": {

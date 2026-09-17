@@ -43,7 +43,7 @@
           <option value="168">last 7 days</option>
         </select>
       </label>
-      <label>Partition
+      <label>GPU type
         <select id="jPartition"><option value="">all</option></select>
       </label>
       <label>Show top N by GPU-hours
@@ -80,10 +80,10 @@
     </div>
     <div id="jobExplorer" class="collapsible">
       <div class="explorer-head">
-        <button id="jobExplorerToggle" aria-expanded="true">&#9662; Browse jobs</button>
+        <button id="jobExplorerToggle" class="explorer-toggle" aria-expanded="true">&#9662; Browse jobs</button>
         <span class="hint" id="jobExplorerNote"></span>
       </div>
-      <div id="jobExplorerBody">
+      <div id="jobExplorerBody" class="collapsible-body">
     <div id="jobEfficiencyResults" class="results-panel">
       <div class="results-content">
         <div class="card">
@@ -108,7 +108,7 @@
             <table id="jobTable">
               <thead><tr>
                 <th data-k="jobid">Job</th><th data-k="name">Name</th><th data-k="user">User</th>
-                <th data-k="partition">Partition</th><th data-k="nodes">Node</th>
+                <th data-k="gpu_group">GPU type</th><th data-k="nodes">Node</th>
                 <th data-k="state">State</th>
                 <th data-k="start">Start</th><th data-k="gpus">GPUs</th>
                 <th class="num" data-k="mean_util">GPU utilization</th>
@@ -136,8 +136,8 @@
           <option value="168">last 7 days</option>
         </select>
       </label>
-      <label>Partition
-        <select id="pPartition"><option value="">all partitions</option></select>
+      <label>GPU type
+        <select id="pPartition"><option value="">all GPU types</option></select>
       </label>
       <label class="row"><input id="pRunning" type="checkbox"> Running only</label>
     </div>
@@ -145,7 +145,7 @@
       <div class="results-content">
       <div class="grid two">
         <div class="card">
-          <h2>Mean utilization by partition</h2>
+          <h2>Mean utilization by GPU type</h2>
           <div class="chart" id="partBarPlot"></div>
           <div class="legend">
             <span class="legend-key" style="background:var(--bad)"></span> &lt;40%
@@ -154,7 +154,7 @@
           </div>
         </div>
         <div class="card">
-          <h2>Mean occupancy by partition <button type="button" class="glossary-btn" data-glossary="mean-occupancy" title="What is this?">?</button></h2>
+          <h2>Mean occupancy by GPU type <button type="button" class="glossary-btn" data-glossary="mean-occupancy" title="What is this?">?</button></h2>
           <div class="chart" id="partOccupancyPlot"></div>
           <div class="legend neutral">
             <span class="legend-key" style="background:var(--acc)"></span> share of capacity with an active job
@@ -167,12 +167,12 @@
       </div>
 
       <div class="card" style="margin-top:14px">
-        <h2>Partition table <span class="small" id="pCount"></span>
+        <h2>GPU type table <span class="small" id="pCount"></span>
           <span class="small" data-fresh-for="partitionsResults"></span></h2>
         <div class="table-scroll">
           <table id="partTable">
             <thead><tr>
-              <th data-k="name">Partition</th>
+              <th data-k="name">GPU type</th>
               <th class="num" data-k="gpus_total" title="allocated / total GPUs">GPUs</th>
               <th class="num" data-k="job_count">Jobs</th>
               <th class="num" data-k="mean_util">Mean util %<button type="button" class="glossary-btn" data-glossary="mean-util" title="What is this?">?</button></th>
@@ -180,11 +180,72 @@
             <tbody></tbody>
           </table>
         </div>
-        <div class="hint">Mean utilization is time-weighted over the window; GPU devices are collapsed to a per-job/per-node max, so it measures &ldquo;how busy&rdquo; rather than aggregate GPU-hours. Mean occupancy is the window-average share of the partition&rsquo;s capacity with an active job. GPUs show allocated/total capacity of the partition&rsquo;s nodes. Select a partition to scope the trend and the VRAM distribution to it.</div>
+        <div class="hint">Mean utilization is time-weighted over the window; GPU devices are collapsed to a per-job/per-node max, so it measures &ldquo;how busy&rdquo; rather than aggregate GPU-hours. Mean occupancy is the window-average share of the type&rsquo;s capacity with an active job. GPUs show allocated/total capacity of every node carrying the type. Select a type to scope the trend and the VRAM distribution to it.</div>
       </div>
       </div>
       <div class="results-loading">Data is loading&hellip;</div>
     </div>
+
+
+    <div id="queueResults" class="results-panel loading">
+      <div class="results-content">
+        <div class="card" style="margin-top:14px">
+          <h2>Pending jobs by GPU type</h2>
+          <div class="queue-unique" id="pQueueUnique" aria-live="polite"></div>
+          <div class="table-scroll">
+            <table id="partQueueTable">
+              <thead><tr>
+                <th data-k="name">GPU type</th>
+                <th class="num" data-k="exclusive_jobs" title="pending jobs eligible only for this GPU type">Exclusive</th>
+                <th class="num" data-k="flexible_jobs" title="pending jobs eligible for this type and at least one other type; also counted in those rows">Flexible</th>
+                <th class="num" data-k="eligible_jobs" title="Jobs that could run on this GPU type. Flexible jobs appear in multiple GPU-type rows, so this column must not be summed.">Eligible jobs</th>
+                <th class="num" data-k="exclusive_gpus" title="GPUs requested by this type's exclusive pending jobs">Exclusive GPUs</th>
+                <th class="num" data-k="flexible_gpus" title="GPUs requested by this type's flexible pending jobs; also counted in their other rows">Flexible GPUs</th>
+                <th class="num" data-k="eligible_gpus" title="GPUs requested by all pending jobs eligible for this type; non-additive across rows">Eligible GPUs</th>
+                <th class="num" data-k="wait_p50_s" title="median completed-job Submit &rarr; Start wait over jobs actually started on this GPU type inside the selected window">P50 wait</th>
+                <th class="num" data-k="wait_p90_s" title="nearest-rank P90 completed-job wait; an observed wait, not an interpolation">P90 wait</th>
+                <th class="num" data-k="wait_avg_s" title="mean completed-job wait over the same samples as P50/P90">Average wait</th>
+                <th class="num" data-k="wait_samples" title="number of valid completed-job waits behind P50/P90/average">Samples</th>
+                <th class="num" data-k="wait_per_gpu_hour_p50" title="Median completed-job queue wait per allocated job size: wait hours divided by runtime hours &times; GPUs. Lower is better; jobs without positive runtime and GPU allocation are excluded.">Median wait / GPU-hour</th>
+              </tr></thead>
+              <tbody></tbody>
+            </table>
+          </div>
+          <div class="hint">Rows are per GPU type: a job eligible for several types appears in each, so &ldquo;Eligible jobs&rdquo; / &ldquo;Eligible GPUs&rdquo; are exclusive&nbsp;+&nbsp;flexible within a row and must not be summed across rows. Eligibility is where demand could land &mdash; not a claim that a job could start right now. The unique cluster-wide figure above counts every GPU-eligible pending job once.</div>
+          <div class="hint">Wait statistics describe completed jobs that started on this GPU type inside the selected window (Submit &rarr; Start), not the current waiting age and not Slurm&rsquo;s estimated start. &ldquo;&mdash;&rdquo; with 0 samples means no valid starts, not a zero wait. Median wait / GPU-hour normalizes by job size: 4 hours waiting for 2 GPUs running 1 hour = 2.00 h/GPU-h.</div>
+          <div class="hint" id="pQueueHint" hidden>Queue status unavailable &mdash; squeue could not be reached (this is not an empty queue).</div>
+          <div class="hint" id="pWaitHistoryHint" hidden>Historical wait data unavailable &mdash; sacct enrichment failed; pending counts above are still live.</div>
+        </div>
+
+        <div class="card collapsible collapsed" id="pWaitingExplorer" style="grid-column:1 / -1; margin-top:14px">
+          <div class="explorer-head">
+            <button type="button" class="explorer-toggle" id="pWaitingExplorerToggle" aria-expanded="false">&#9656; Waiting jobs</button>
+            <span class="small" id="pWaitingMeta"></span>
+          </div>
+          <div class="collapsible-body" id="pWaitingExplorerBody">
+          <div class="table-scroll">
+            <table id="pendingJobsTable">
+              <thead><tr>
+                <th data-k="jobid">Job</th>
+                <th data-k="user">User</th>
+                <th data-k="groups">GPU type</th>
+                <th data-k="submit" title="when the job was submitted">Submitted</th>
+                <th data-k="wait_s" title="the job's current age in the queue (now &minus; submit); completed-job wait statistics live in the table above, and Slurm's estimated start is a separate column">Waiting</th>
+                <th data-k="start" title="Slurm's projection of when the job might start, when it has one &mdash; not a measured wait">Estimated start</th>
+                <th data-k="reason">Reason</th>
+                <th class="num" data-k="gpu_total" title="GPUs the job requested">GPUs requested</th>
+              </tr></thead>
+              <tbody></tbody>
+            </table>
+          </div>
+          <div class="hint">Waiting is the job&rsquo;s current age in the queue (now &minus; submit); estimated start is Slurm&rsquo;s projection &mdash; neither is a completed-job wait. Each GPU-eligible job is listed once even when it could run on several GPU types; selecting a type filters this list.</div>
+          </div>
+        </div>
+      </div>
+      <div class="results-loading">Data is loading&hellip;</div>
+    </div>
+
+
     <div id="vramResults" class="results-panel">
       <div class="results-content">
         <div class="card" style="margin-top:14px">
@@ -276,7 +337,7 @@
             <table id="userJobsTable">
               <thead><tr>
                 <th data-k="jobid">Job</th><th data-k="name">Name</th>
-                <th data-k="partition">Partition</th><th data-k="nodes">Node</th>
+                <th data-k="gpu_group">GPU type</th><th data-k="nodes">Node</th>
                 <th data-k="state">State</th><th data-k="start">Start</th>
                 <th class="num" data-k="gpus">GPUs</th>
                 <th class="num" data-k="mean_util">GPU utilization</th>
@@ -362,12 +423,13 @@
     <dt id="glossary-mean-util">Mean utilization</dt>
     <dd>Time-weighted mean GPU utilization over the window. GPU devices are
       collapsed to a per-job/per-node max first, so this measures &ldquo;how
-      busy&rdquo; a job, node or partition was &mdash; not raw GPU-hours.</dd>
+      busy&rdquo; a job, node or GPU type was &mdash; not raw GPU-hours.</dd>
     <dt id="glossary-mean-occupancy">Mean occupancy</dt>
-    <dd>A partition's window-average share of its total GPU capacity that had
-      an active job on it, regardless of how busy that job's GPUs actually
-      were. A partition can have high occupancy and low utilization (jobs
-      running but idle) or the reverse.</dd>
+    <dd>A GPU type&rsquo;s window-average share of its total GPU capacity
+      (every node carrying that type, idle included) that had an active job
+      on it, regardless of how busy that job's GPUs actually were. A type
+      can have high occupancy and low utilization (jobs running but idle)
+      or the reverse.</dd>
     <dt id="glossary-util-gpu-hours">GPU-hours (Users table)</dt>
     <dd>Utilization-weighted GPU-hours: mean utilization &times; GPU time.
       Ranks users by how much they actually used, not how much they were

@@ -49,9 +49,11 @@ class Job(BaseModel):
     gpu_type: str
     gpu_group: str = Field(
         description="Canonical grouping used by the Partitions tab: the "
-                    "Slurm partition, except MIG GPUs, which group by their "
-                    "own profile so a MIG node's capacity never counts "
-                    "against the whole-GPU pool.")
+                    "job's GPU type (short scontrol GRES type; MIG GPUs "
+                    "group by their own profile so a MIG node's capacity "
+                    "never counts against the whole-GPU pool), resolved "
+                    "from the job's observed nodes — never the Slurm "
+                    "partition name.")
     nodes: List[str]
     mean_util: float = Field(
         description="Time-weighted mean GPU utilization over the window "
@@ -169,12 +171,18 @@ class UsersResponse(BaseModel):
 
 
 # ---- /api/partitions, /api/partitions/vram -----------------------------
-
 class PartitionRow(BaseModel):
-    name: str
-    mean_util: float = Field(
-        description="Time-weighted mean utilization over the window.")
-    max_util: float
+    name: str = Field(description="Canonical GPU type (short scontrol "
+                      "GRES type; MIG profiles keep their profile name) "
+                      "— partitions over the same hardware share one "
+                      "row.")
+    mean_util: Optional[float] = Field(
+        description="Time-weighted mean utilization over the window; null "
+                    "when this configured GPU type has no utilization "
+                    "samples.")
+    max_util: Optional[float] = Field(
+        description="Peak utilization over the window; null when this "
+                    "configured GPU type has no utilization samples.")
     job_count: int
     gpus_alloc: int = Field(description="Live allocated GPU count.")
     gpus_total: int = Field(description="Total scontrol GPU capacity of "
@@ -182,10 +190,114 @@ class PartitionRow(BaseModel):
     mean_occupancy: Optional[float] = Field(
         default=None,
         description="Window-average share of gpus_total with an active "
-                    "job (%); null when capacity is unknown.")
+                    "job (%); null when utilization-count samples or "
+                    "capacity are unavailable.")
+
+
+class QueueGroup(BaseModel):
+    """One GPU type's pending demand and completed-wait statistics.
+
+    Per-type figures overlap by design: a flexible (multi-type) pending
+    job appears in every eligible row, so columns must not be summed
+    across rows. The cluster-wide unique figures live in
+    ``PartitionQueueResponse.totals``.
+    """
+    exclusive_jobs: Optional[int] = Field(
+        default=0,
+        description="Pending (PD) jobs eligible only for this GPU "
+                    "type; null when squeue is unavailable.")
+    flexible_jobs: Optional[int] = Field(
+        default=0,
+        description="Pending jobs eligible for this type and at least "
+                    "one other; also counted in those rows; null when "
+                    "squeue is unavailable.")
+    eligible_jobs: Optional[int] = Field(
+        default=0,
+        description="Jobs that could run on this GPU type (exclusive + "
+                    "flexible); non-additive across rows; null when "
+                    "squeue is unavailable.")
+    exclusive_gpus: Optional[int] = Field(
+        default=0,
+        description="GPUs requested by this type's exclusive pending "
+                    "jobs; null when squeue is unavailable.")
+    flexible_gpus: Optional[int] = Field(
+        default=0,
+        description="GPUs requested by this type's flexible pending "
+                    "jobs; also counted in their other rows; null when "
+                    "squeue is unavailable.")
+    eligible_gpus: Optional[int] = Field(
+        default=0,
+        description="GPUs requested by all pending jobs eligible for "
+                    "this type (exclusive + flexible); non-additive "
+                    "across rows; null when squeue is unavailable.")
+    wait_p50_s: Optional[int] = Field(
+        default=None,
+        description="Median completed-job Submit → Start wait in "
+                    "seconds over this type's valid started jobs in "
+                    "the window; null with no samples.")
+    wait_p90_s: Optional[int] = Field(
+        default=None,
+        description="Nearest-rank P90 completed-job wait in seconds; "
+                    "null with no samples.")
+    wait_avg_s: Optional[int] = Field(
+        default=None,
+        description="Mean completed-job wait in seconds; null with no "
+                    "samples.")
+    wait_samples: Optional[int] = Field(
+        default=0,
+        description="Number of valid completed-job waits behind the "
+                    "percentile/average figures; null when the sacct "
+                    "enrichment failed (distinct from a genuine 0).")
+    wait_per_gpu_hour_p50: Optional[float] = Field(
+        default=None,
+        description="Median completed-job queue-wait hours per "
+                    "allocated GPU-hour (wait_hours / (elapsed_hours × "
+                    "GPUs)); lower is better. Null when no completed "
+                    "job has valid positive elapsed time and GPU "
+                    "allocation, or when wait history is unavailable.")
+
+
+class PendingJob(BaseModel):
+    jobid: str
+    user: str
+    partition: str = Field(
+        description="The job's raw squeue partition list (may be several, "
+                    "comma-separated) — scheduler metadata only; the "
+                    "Partitions tab groups and filters by GPU type, not "
+                    "by this string.")
+    state: str
+    submit: str = Field(description="Raw squeue submit time string.")
+    start: str = Field(
+        description="Slurm's estimated start time; empty when none.")
+    reason: str
+    nodes: int
+    gpus: int = Field(description="Per-node GPU request (0 for CPU jobs).")
+    gpu_type: str
+    groups: List[str] = Field(
+        description="Canonical GPU types this pending job counts toward "
+                    "(its typed %b request, else the GPU-type union of "
+                    "its requested partitions); client-side type "
+                    "filtering keys on this, not on the raw partition "
+                    "string.")
+    wait_s: Optional[int] = Field(
+        default=None,
+        description="Seconds since submit at response time; null when the "
+                    "submit time does not parse.")
+    gpu_total: Optional[int] = Field(
+        default=None,
+        description="The job's requested GPU count (0 for a "
+                    "constraints-only GPU-partition row).")
 
 
 class PartitionsResponse(BaseModel):
+    """Fast Prometheus-backed utilization payload.
+
+    Queue and wait-history fields deliberately live on
+    ``PartitionQueueResponse`` (``/api/partitions/queue``): squeue and
+    sacct are slower than Prometheus, so the Partitions tab fetches the
+    two endpoints concurrently and renders whichever arrives first
+    instead of blocking every chart on the slowest source.
+    """
     window: Window
     step: int
     partitions: List[PartitionRow]
@@ -194,10 +306,70 @@ class PartitionsResponse(BaseModel):
                     "name.")
 
 
+class QueueTotals(BaseModel):
+    """Unique cluster-wide pending demand; each physical job once."""
+    unique_pending_jobs: Optional[int] = Field(
+        default=None,
+        description="GPU-eligible pending jobs, each counted once "
+                    "regardless of how many type rows it is eligible "
+                    "for; null when squeue is unavailable.")
+    unique_gpus_requested: Optional[int] = Field(
+        default=None,
+        description="GPUs requested by those pending jobs; null when "
+                    "squeue is unavailable.")
+
+
+class WaitHistoryCoverage(BaseModel):
+    """Completeness and exclusions behind completed-job wait metrics."""
+    records_examined: int = 0
+    valid_samples: Dict[str, int] = Field(default_factory=dict)
+    excluded: Dict[str, int] = Field(default_factory=dict)
+    failed_batches: int = 0
+    complete: bool = True
+
+
+class PartitionQueueResponse(BaseModel):
+    queue: Dict[str, QueueGroup] = Field(
+        default_factory=dict,
+        description="Pending-job demand and completed-wait statistics "
+                    "per GPU-type group; includes zero-pending types so "
+                    "every visible group renders. Per-type columns "
+                    "overlap (flexible jobs) and must not be summed.")
+    totals: QueueTotals = Field(
+        default_factory=QueueTotals,
+        description="Cluster-wide unique pending figures: every "
+                    "GPU-eligible physical job once. Null fields when "
+                    "squeue is unavailable.")
+    queue_available: bool = Field(
+        default=True,
+        description="False when the squeue snapshot failed (squeue "
+                    "missing or erroring) — ``queue``'s pending figures "
+                    "are then unavailable and waiting_jobs is empty; must "
+                    "not be read as an empty queue.")
+    waiting_jobs: List[PendingJob] = Field(
+        default_factory=list,
+        description="GPU-eligible jobs still waiting, one record per "
+                    "physical pending job (each appears once even when "
+                    "it is eligible for several GPU types; CPU-only "
+                    "pending jobs are not listed). Empty when squeue is "
+                    "unavailable.")
+    wait_history_available: bool = Field(
+        default=True,
+        description="False when the sacct enrichment behind the wait "
+                    "statistics failed — queue current-pending figures "
+                    "stay valid; must not be read as 'no jobs started "
+                    "in the window'.")
+    wait_history_coverage: Optional[WaitHistoryCoverage] = Field(
+        default=None,
+        description="Accounting coverage behind completed-job wait metrics; "
+                    "null when sacct could not be queried.")
+
+
 class VramRecord(BaseModel):
     jobid: str
     user: str
-    partition: str = Field(description="The job's canonical GPU group.")
+    partition: str = Field(description="The job's canonical GPU type "
+                          "(same key as the Partitions tab's groups).")
     gpu_type: str
     mean_util: float
     vram_gb: float = Field(
@@ -218,6 +390,17 @@ class VramResponse(BaseModel):
     total: int = Field(
         description="Candidate job count before the sacct-enrichment cap; "
                     "jobs may hold fewer records than this.")
+    enriched_frac: float = Field(
+        default=0.0,
+        description="Fraction of the returned records whose allocated "
+                    "GPU-hours sacct resolved; below 1.0 discloses partial "
+                    "accounting coverage (some records' gpu_hours stay "
+                    "null) rather than a silent gap.")
+    failed_batches: int = Field(
+        default=0,
+        description="Number of 100-ID sacct enrichment batches that failed "
+                    "after retrying; those records' gpu_hours stay null. "
+                    "Zero means the enrichment is complete.")
     jobs: List[VramRecord]
 
 
@@ -244,11 +427,13 @@ class NodeRow(BaseModel):
     cpus: int
     gpus: int
     gpu_type: str
+    gpu_group: str = Field(
+        description="Canonical GPU-type group for this node's GPUs — "
+                    "its scalar gpu_type (the MIG profile for an all-MIG "
+                    "node); see Job.gpu_group.")
     cpus_alloc: int
     free_mem: int
     real_mem: int
-    gpu_group: str = Field(
-        description="Canonical group for this node's GPUs — see Job.gpu_group.")
     current_util: Optional[float] = Field(
         default=None, description="Instant GPU utilization (%); null when idle.")
     current_vram: Optional[float] = None

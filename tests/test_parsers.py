@@ -1,5 +1,6 @@
 """Parser unit tests. Run: .venv/bin/python -m pytest tests/ -q"""
 
+import json
 import os
 import sys
 
@@ -17,6 +18,8 @@ from slurm import (  # noqa: E402
     parse_scontrol_jobs,
     parse_scontrol_nodes,
     parse_scontrol_partitions,
+    parse_squeue_json,
+    parse_tres_per_node,
 )
 
 
@@ -95,10 +98,11 @@ NodeName=csl1 Arch=x86_64 CoresPerSocket=20
     assert gpu3["state"] == "MIXED"
     assert gpu3["state_full"] == "MIXED+PLANNED"
     assert gpu3["gpus"] == 4
-    assert gpu3["gpu_type"] == "v100"
+    assert gpu3["gpu_type"] == "v100_32gb"
     assert gpu3["cpus"] == 8
     assert gpu3["cpus_alloc"] == 2
     assert gpu3["free_mem"] == 150000
+    assert gpu3["gres"] == [("v100_32gb", 4)]
     assert gpu3["partitions"] == "gpu-v100-32g,gpu-debug"
     csl1 = nodes[1]
     assert csl1["gpus"] == 0
@@ -226,14 +230,15 @@ PartitionName=interactive
 def test_parse_sacct_row():
     row = _parse_sacct_row(
         "19807768|19807768|train.sh|gomeze1|aalto_users|gpu-v100-32g|RUNNING"
-        "|2026-08-25T14:32:59|Unknown|3-03:59:44"
+        "|2026-08-25T14:32:59|2026-08-25T12:00:00|Unknown|3-03:59:44"
         "|billing=64,cpu=8,gres/gpu:v100=2|gpu3|8".split("|")
     )
     assert row["JobID"] == "19807768"
     assert row["JobIDRaw"] == "19807768"
     assert row["User"] == "gomeze1"
+    assert row["Submit"] == "2026-08-25T12:00:00"
     assert row["AllocTRES"] == "billing=64,cpu=8,gres/gpu:v100=2"
-    assert len(SACCT_FIELDS) == 13
+    assert len(SACCT_FIELDS) == 14
 
 
 def test_read_jobgraph_conf_bare(tmp_path):
@@ -292,11 +297,11 @@ def test_sacct_batch_indexes_array_task_by_raw_id_too(monkeypatch):
     def fake_run(cmd, timeout=30):
         return "\n".join([
             "20001465_47|20008872|job_loop.sh|olkkonj1|aalto_users|"
-            "gpu-v100-32g|COMPLETED|2026-08-31T11:43:55|2026-09-01T02:50:54|"
-            "15:06:59|gres/gpu:v100=1|gpu5|2",
+            "gpu-v100-32g|COMPLETED|2026-08-31T11:43:55|2026-08-31T11:00:00|"
+            "2026-09-01T02:50:54|15:06:59|gres/gpu:v100=1|gpu5|2",
             # Step rows carry the same JobIDRaw split with a dot suffix —
             # must still be filtered out, not indexed under a bogus key.
-            "20001465_47.batch|20008872.batch|batch|||||||||1",
+            "20001465_47.batch|20008872.batch|batch|||||||||||1",
         ])
 
     monkeypatch.setattr(slurm, "_run", fake_run)
@@ -304,6 +309,7 @@ def test_sacct_batch_indexes_array_task_by_raw_id_too(monkeypatch):
     assert set(jobs) == {"20001465_47", "20008872"}
     assert jobs["20008872"] is jobs["20001465_47"]
     assert jobs["20008872"]["User"] == "olkkonj1"
+    assert jobs["20008872"]["Submit"] == "2026-08-31T11:00:00"
 
 
 def test_sacct_batch_non_array_job_id_equals_raw_no_duplicate_key(monkeypatch):
@@ -311,11 +317,13 @@ def test_sacct_batch_non_array_job_id_equals_raw_no_duplicate_key(monkeypatch):
 
     def fake_run(cmd, timeout=30):
         return ("20015894|20015894|train.sh|alice|acc|gpu-h100|RUNNING|"
-                "2026-08-30T10:00:00|Unknown|01:00:00|gres/gpu:h100=1|gpu1|8")
+                "2026-08-30T10:00:00|2026-08-30T09:30:00|Unknown|01:00:00|"
+                "gres/gpu:h100=1|gpu1|8")
 
     monkeypatch.setattr(slurm, "_run", fake_run)
     jobs = slurm._sacct_batch(["20015894"])
     assert set(jobs) == {"20015894"}
+    assert jobs["20015894"]["Submit"] == "2026-08-30T09:30:00"
 
 
 def test_sacct_jobs_default_no_date(monkeypatch):
@@ -330,6 +338,56 @@ def test_sacct_jobs_default_no_date(monkeypatch):
     monkeypatch.setattr(slurm, "_sacct_batch", fake_batch)
     slurm.sacct_jobs(["7"])
     assert seen["start_iso"] is None
+
+
+def test_completed_jobs_retries_chunks_and_retains_array_tasks(monkeypatch):
+    import slurm
+
+    commands, attempts = [], {}
+
+    def fake_run(cmd, timeout=30):
+        commands.append(cmd)
+        start = cmd[cmd.index("-S") + 1]
+        attempts[start] = attempts.get(start, 0) + 1
+        if start == "2026-09-11T14:40:57" and attempts[start] == 1:
+            raise slurm.SlurmError("temporary sacct timeout")
+        return ("20001465_47|20008872|short|alice|acc|gpu-h200|COMPLETED|"
+                "2026-09-17T14:40:57|2026-09-17T14:35:57|"
+                "2026-09-17T14:45:57|00:05:00|gres/gpu:h200=1|gpu49|8")
+
+    monkeypatch.setattr(slurm, "_run", fake_run)
+    records, coverage = slurm.completed_jobs("2026-09-10T14:40:57",
+                                             "2026-09-17T14:40:57")
+    assert commands[0][:4] == ["sacct", "--allusers", "-X", "--state=COMPLETED"]
+    assert attempts["2026-09-11T14:40:57"] == 2
+    assert coverage == {"failed_batches": 0, "successful_batches": 7,
+                        "complete": True}
+    assert records == [{"jobid": "20001465_47", "name": "short",
+                        "user": "alice", "account": "acc",
+                        "partition": "gpu-h200", "state": "COMPLETED",
+                        "submit": "2026-09-17T14:35:57",
+                        "start": "2026-09-17T14:40:57",
+                        "end": "2026-09-17T14:45:57", "elapsed_s": 300,
+                        "gpus": 1, "gpu_type": "h200", "node_list": "gpu49",
+                        "ncpus": 8}]
+
+
+def test_completed_jobs_keeps_successful_chunks_after_failure(monkeypatch):
+    import slurm
+
+    def fake_run(cmd, timeout=30):
+        if cmd[cmd.index("-S") + 1] == "2026-09-11T14:40:57":
+            raise slurm.SlurmError("sacct timeout")
+        return ("1|1|job|alice|acc|gpu-h200|COMPLETED|"
+                "2026-09-10T15:00:00|2026-09-10T14:00:00|"
+                "2026-09-10T16:00:00|01:00:00|gres/gpu:h200=1|gpu1|8")
+
+    monkeypatch.setattr(slurm, "_run", fake_run)
+    records, coverage = slurm.completed_jobs("2026-09-10T14:40:57",
+                                             "2026-09-12T14:40:57")
+    assert [r["jobid"] for r in records] == ["1"]
+    assert coverage == {"failed_batches": 1, "successful_batches": 1,
+                        "complete": False}
 
 
 SCTRL_JOB_SAMPLE = (
@@ -413,6 +471,137 @@ def test_parse_scontrol_jobs_invalid_runtime():
     assert jobs["302"]["elapsed_s"] == 2 * 3600 + 3 * 60 + 4
 
 
+def test_parse_tres_per_node_both_gres_forms():
+    # squeue %b is the COLON-form TresPerNode; the equals-form AllocTRES
+    # regex (parse_alloc_tres) cannot read it. Untyped and typed forms
+    # differ by the type name starting with a letter.
+    assert parse_tres_per_node("gres/gpu:1") == (1, "")          # untyped
+    assert parse_tres_per_node("gres/gpu:a100:4") == (4, "a100")  # typed
+    assert parse_tres_per_node("gres/gpu:h200:8") == (8, "h200")
+    # non-GPU resources in the same string are ignored
+    assert parse_tres_per_node("gres/gpu:1,gres/min-cuda-cc:80") == (1, "")
+    assert parse_tres_per_node("gres/min-vram:40g") == (0, "")
+    # a max-count entry's type wins
+    assert parse_tres_per_node("gres/gpu:v100:1,gres/gpu:a100:4") == (4, "a100")
+    # a digit-initial type name (the bare Prometheus MIG-profile form) is
+    # grammatically indistinguishable from an untyped count and is
+    # unsupported: it must NOT be misread as a count or a type
+    assert parse_tres_per_node("gres/gpu:3g.40gb:2") == (0, "")
+    # N/A / equals-form / empty parse as no GPU request
+    assert parse_tres_per_node("N/A") == (0, "")
+    assert parse_tres_per_node("gres/gpu=4") == (0, "")
+    assert parse_tres_per_node("") == (0, "")
+
+
+def _ts(epoch):
+    """A squeue --json timestamp object; None encodes unset."""
+    return ({"set": True, "infinite": False, "number": epoch}
+            if epoch is not None
+            else {"set": False, "infinite": False, "number": 0})
+
+
+def _queue_json(jobs):
+    return json.dumps({"jobs": jobs, "errors": [], "warnings": []})
+
+
+def _sjob(jid, user, part, tpn="", tpj="", submit=1789635165,
+          start=None, nodes=1, reason="Priority"):
+    return {
+        "job_id": jid, "user_name": user, "partition": part,
+        "job_state": ["PENDING"],
+        "submit_time": _ts(submit), "start_time": _ts(start),
+        "state_reason": reason,
+        "node_count": {"set": True, "infinite": False, "number": nodes},
+        "tres_per_node": tpn, "tres_per_job": tpj,
+    }
+
+
+def test_parse_squeue_json_rows():
+    # The four request shapes from the live cluster: typed tres-per-node,
+    # none, untyped tres-per-node, and the TresPerJob-only bug shape
+    # (constraints-only tres-per-node with the real gres/gpu:1 in
+    # tres-per-job). A long partition list must survive verbatim (JSON
+    # never truncates; fixed-width text columns did).
+    long_part = "gpu-h100-80g,gpu-a100-80g,gpu-h200-141g-short"
+    payload = _queue_json([
+        _sjob(20276510, "jdoe", "gpu-a100-80g", "gres/gpu:a100:4",
+              submit=1789632000, start=1789707600, nodes=2,
+              reason="Resources"),
+        _sjob(20291030, "jsmith", "batch-bdw", reason="Dependency"),
+        _sjob(18162157, "jdoe", "gpu-a100-80g", "gres/gpu:1",
+              submit=1780314039),
+        _sjob(20300658, "bperson", long_part,
+              "gres/min-vram:80g", "gres/gpu:1"),
+    ])
+    rows = parse_squeue_json(payload)
+    assert [r["jobid"] for r in rows] == ["20276510", "20291030",
+                                          "18162157", "20300658"]
+    assert rows[0] == {
+        "jobid": "20276510", "user": "jdoe", "partition": "gpu-a100-80g",
+        "state": "PENDING",
+        "submit": "2026-09-17T11:00:00", "start": "2026-09-18T08:00:00",
+        "reason": "Resources", "nodes": 2, "gpus": 4, "gpu_type": "a100"}
+    # unset start parses empty; no TRES anywhere parses zero GPUs
+    assert rows[1]["user"] == "jsmith"
+    # the untyped GRES form parses count without a type
+    assert rows[2]["gpus"] == 1 and rows[2]["gpu_type"] == ""
+    # the union: tres-per-node has no GPU, tres-per-job does — the
+    # richer result wins, so the job is counted as real GPU demand
+    assert rows[3]["gpus"] == 1 and rows[3]["gpu_type"] == ""
+    # the full partition list survives
+    assert rows[3]["partition"] == long_part
+    assert parse_squeue_json('{"jobs": []}') == []
+    assert parse_squeue_json("{}") == []
+
+
+def test_parse_squeue_json_tres_union_precedence():
+    # Both fields carry GPUs: higher count wins; equal counts prefer
+    # the typed request.
+    def row(tpn, tpj):
+        return parse_squeue_json(_queue_json(
+            [_sjob(100, "u", "gpu-h200", tpn, tpj)]))[0]
+    j = row("gres/gpu:1", "gres/gpu:4")
+    assert j["gpus"] == 4 and j["gpu_type"] == ""
+    j = row("gres/gpu:1", "gres/gpu:h200:1")
+    assert j["gpus"] == 1 and j["gpu_type"] == "h200"
+    j = row("gres/gpu:h200:2", "gres/gpu:1")
+    assert j["gpus"] == 2 and j["gpu_type"] == "h200"
+
+
+def test_parse_squeue_json_timestamps_are_cluster_local():
+    # squeue --json epochs are absolute; sacct prints Europe/Helsinki
+    # naive strings and the dashboard header promises that wall clock.
+    # The parse must be TZ-independent (no process-TZ leakage) and must
+    # NOT read the epoch as UTC.
+    # 1789635165 = 2026-09-17T08:52:45Z = 11:52:45 Helsinki.
+    row = parse_squeue_json(_queue_json(
+        [_sjob(20300658, "b", "gpu-h100", "gres/gpu:1",
+               submit=1789635165, start=1789665248)]))[0]
+    assert row["submit"] == "2026-09-17T11:52:45"
+    assert row["start"] == "2026-09-17T20:14:08"
+    # unset start stays ""
+    row = parse_squeue_json(_queue_json(
+        [_sjob(1, "b", "gpu-h100", "gres/gpu:1", start=None)]))[0]
+    assert row["start"] == ""
+
+
+def test_queue_pending_command(monkeypatch):
+    import slurm
+
+    cmds = {}
+
+    def fake_run(cmd, timeout=30):
+        cmds["cmd"] = cmd
+        return '{"jobs": []}'
+
+    monkeypatch.setattr(slurm, "_run", fake_run)
+    assert slurm.queue_pending() == []
+    assert cmds["cmd"] == ["squeue", "--json", "--all",
+                           "--states=PENDING"]
+
+
+
+
 def test_sacct_jobs_invalid_elapsed(monkeypatch):
     import slurm
 
@@ -420,13 +609,15 @@ def test_sacct_jobs_invalid_elapsed(monkeypatch):
         return {
             "401": {
                 "JobID": "401", "JobName": "c", "User": "erin", "Account": "acc",
-                "Partition": "batch", "State": "PENDING", "Start": "Unknown",
+                "Partition": "batch", "State": "PENDING",
+                "Submit": "2026-08-30T08:00:00", "Start": "Unknown",
                 "End": "Unknown", "Elapsed": "INVALID",
                 "AllocTRES": "cpu=4", "NodeList": "", "NCPUS": "4",
             },
             "402": {
                 "JobID": "402", "JobName": "d", "User": "frank", "Account": "acc",
                 "Partition": "gpu-h100", "State": "RUNNING",
+                "Submit": "2026-08-30T09:00:00",
                 "Start": "2026-08-30T10:00:00", "End": "2026-08-31T10:00:00",
                 "Elapsed": "00:05:06",
                 "AllocTRES": "cpu=8,gres/gpu:h100=1", "NodeList": "gpu1", "NCPUS": "8",
@@ -437,4 +628,6 @@ def test_sacct_jobs_invalid_elapsed(monkeypatch):
     jobs = slurm.sacct_jobs(["401", "402"])
     assert set(jobs) == {"401", "402"}
     assert jobs["401"]["elapsed_s"] == 0
+    assert jobs["401"]["submit"] == "2026-08-30T08:00:00"
     assert jobs["402"]["elapsed_s"] == 5 * 60 + 6
+    assert jobs["402"]["submit"] == "2026-08-30T09:00:00"

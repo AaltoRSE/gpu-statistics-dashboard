@@ -1,0 +1,98 @@
+{
+  "queue": {
+    "gh200": {
+      "eligible_gpus": 0,
+      "eligible_jobs": 0,
+      "exclusive_gpus": 0,
+      "exclusive_jobs": 0,
+      "flexible_gpus": 0,
+      "flexible_jobs": 0,
+      "wait_avg_s": null,
+      "wait_p50_s": null,
+      "wait_p90_s": null,
+      "wait_per_gpu_hour_p50": null,
+      "wait_samples": 0
+    },
+    "h100": {
+      "eligible_gpus": 0,
+      "eligible_jobs": 0,
+      "exclusive_gpus": 0,
+      "exclusive_jobs": 0,
+      "flexible_gpus": 0,
+      "flexible_jobs": 0,
+      "wait_avg_s": null,
+      "wait_p50_s": null,
+      "wait_p90_s": null,
+      "wait_per_gpu_hour_p50": null,
+      "wait_samples": 0
+    },
+    "h200": {
+      "eligible_gpus": 0,
+      "eligible_jobs": 0,
+      "exclusive_gpus": 0,
+      "exclusive_jobs": 0,
+      "flexible_gpus": 0,
+      "flexible_jobs": 0,
+      "wait_avg_s": null,
+      "wait_p50_s": null,
+      "wait_p90_s": null,
+      "wait_per_gpu_hour_p50": null,
+      "wait_samples": 0
+    },
+    "h200_3g.71gb": {
+      "eligible_gpus": 0,
+      "eligible_jobs": 0,
+      "exclusive_gpus": 0,
+      "exclusive_jobs": 0,
+      "flexible_gpus": 0,
+      "flexible_jobs": 0,
+      "wait_avg_s": null,
+      "wait_p50_s": null,
+      "wait_p90_s": null,
+      "wait_per_gpu_hour_p50": null,
+      "wait_samples": 0
+    },
+    "v100_16gb": {
+      "eligible_gpus": 0,
+      "eligible_jobs": 0,
+      "exclusive_gpus": 0,
+      "exclusive_jobs": 0,
+      "flexible_gpus": 0,
+      "flexible_jobs": 0,
+      "wait_avg_s": null,
+      "wait_p50_s": null,
+      "wait_p90_s": null,
+      "wait_per_gpu_hour_p50": null,
+      "wait_samples": 0
+    },
+    "v100_32gb": {
+      "eligible_gpus": 0,
+      "eligible_jobs": 0,
+      "exclusive_gpus": 0,
+      "exclusive_jobs": 0,
+      "flexible_gpus": 0,
+      "flexible_jobs": 0,
+      "wait_avg_s": null,
+      "wait_p50_s": null,
+      "wait_p90_s": null,
+      "wait_per_gpu_hour_p50": null,
+      "wait_samples": 0
+    }
+  },
+  "queue_available": true,
+  "totals": {
+    "unique_gpus_requested": 0,
+    "unique_pending_jobs": 0
+  },
+  "wait_history_available": true,
+  "wait_history_coverage": {
+    "complete": true,
+    "excluded": {
+      "start_outside_window": 4
+    },
+    "failed_batches": 0,
+    "records_examined": 4,
+    "valid_samples": {}
+  },
+  "waiting_jobs": []
+}

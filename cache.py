@@ -97,6 +97,16 @@ def sacct_key(job_ids):
     return ("sacct", tuple(sorted(job_ids)))
 
 
+def sacct_resilient_key(job_ids):
+    """Cache key for the resilient enrichment's (dict, failed) tuple.
+
+    Deliberately distinct from :func:`sacct_key`: that key holds the plain
+    dict the Jobs list/detail paths consume, and storing the tuple under it
+    would hand the other consumer the wrong shape for the cache's TTL.
+    """
+    return ("sacct_resilient", tuple(sorted(job_ids)))
+
+
 def scontrol_jobs_key():
     return "scontrol_jobs"
 
@@ -117,9 +127,36 @@ def vram_key(since_hours, running_only):
     return ("vram_gb", since_hours, running_only)
 
 
+def completed_jobs_key(since_hours):
+    """The accounting cache identity, keyed like the progress store.
+
+    ``since_hours`` (not the captured epoch window) is the identity: the
+    request's ``now`` changes every second, so an epoch key would never
+    hit the 300s TTL cache in production. Same ``since_hours`` requests
+    join one fetch and its shared progress state; ``running_only`` is
+    deliberately excluded for the same reason progress omits it.
+    """
+    return ("completed_jobs", since_hours)
+
+
+def completed_progress_key(since_hours):
+    """The stable progress-store key shared by the queue and progress routes.
+
+    It deliberately omits ``running_only``: the accounting cache single-
+    flights on ``(start, end)`` alone, so two same-window requests that
+    differ only in that flag join ONE fetch. Keying progress by the flag
+    would leave the follower polling a key the leader never publishes.
+    Progress is per-batch state of the shared fetch, not per-response
+    view, so the flag has no place in this identity.
+    """
+    return ("completed_progress", since_hours)
+
+
 def node_current_key():
     return "node_current"
 
 
 def node_detail_key(name, view, start):
     return ("nodedetail", name, view, start)
+
+

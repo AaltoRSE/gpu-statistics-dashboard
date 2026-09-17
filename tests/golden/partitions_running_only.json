@@ -11,24 +11,24 @@
     },
     {
       "gpus_alloc": 2,
-      "gpus_total": 16,
+      "gpus_total": 20,
       "job_count": 2,
       "max_util": 60.0,
       "mean_occupancy": 12.5,
       "mean_util": 36.67,
-      "name": "gpu-h100"
+      "name": "h200"
     }
   ],
   "step": 120,
   "trend": {
-    "gpu-h100": [
+    "h200": [
       [
         1000.0,
-        25.0
+        16.666666666666668
       ],
       [
         1120.0,
-        35.0
+        30.0
       ]
     ],
     "h200_3g.71gb": [
