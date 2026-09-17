@@ -1230,6 +1230,8 @@ def test_partitions_queue_cache_hit_filters_on_fetched_bounds(
     # a later cache hit must filter records against the bounds the records
     # were actually fetched for, not bounds recomputed from an advanced
     # clock (which would silently drop every recent record).
+    import cache as cache_module
+
     calls = []
 
     def fake_completed(start_iso, end_iso, progress=None):
@@ -1243,9 +1245,20 @@ def test_partitions_queue_cache_hit_filters_on_fetched_bounds(
                        params={"since_hours": 24}).json()
     first_examined = first["wait_history_coverage"]["records_examined"]
     # Advance the clock past the TTL window's tail, then reload: the
-    # cached entry must serve the original bounds untouched.
+    # accounting cache entry (300s TTL) must survive and serve the
+    # ORIGINAL fetched bounds, while the shorter partition-window cache
+    # (60s) expires so the queue recomputes its live window at the new
+    # time. If the accounting payload dropped its bounds, this hit would
+    # filter against the advanced window and lose every recent record.
     now_marker = _epoch("2026-09-06T00:00:00")
     monkeypatch.setattr(deps, "now", lambda: now_marker)
+    # Expire only the partition-window cache (60s TTL): advance the
+    # cache's monotonic clock by 120s (< the 300s accounting TTL) so the
+    # second request recomputes its live window at the advanced time
+    # while the accounting entry stays a hit serving its fetched bounds.
+    base_mono = cache_module.time.monotonic()
+    monkeypatch.setattr(cache_module.time, "monotonic",
+                        lambda: base_mono + 120)
     second = client.get("/api/partitions/queue",
                         params={"since_hours": 24}).json()
     assert len(calls) == 1  # served from the TTL cache, not refetched
