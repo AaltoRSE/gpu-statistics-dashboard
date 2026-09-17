@@ -21,8 +21,10 @@ def vram_job_records(since_hours, running_only=False, partition="",
     slider can rebin without refetching. A non-empty ``partition`` keeps
     only jobs of that group, so the candidate ``total`` and the enrichment
     cap apply to the selected group.
-    Returns (records, total, start, now, step) where ``total`` counts
-    candidates before the enrichment cap.
+    Returns (records, total, start, now, step, enriched_frac) where
+    ``total`` counts candidates before the enrichment cap and
+    ``enriched_frac`` is the fraction of capped records whose allocated
+    GPU-hours the sacct enrichment resolved.
     """
     node_gpu_types = node_gpu_types or {}
     start, now = job_window(since_hours)
@@ -31,7 +33,7 @@ def vram_job_records(since_hours, running_only=False, partition="",
     if running_only:
         live = running_gpu_job_ids()
         if not live:
-            return [], 0, start, now, step
+            return [], 0, start, now, step, 0.0, 0
     jobs, start, now, step = fetch_job_window(since_hours, include_vram=False)
     for j in jobs:
         j["gpu_group"] = gpu_groups.job_gpu_group(j, node_gpu_types)
@@ -81,13 +83,24 @@ def vram_job_records(since_hours, running_only=False, partition="",
     total = len(records)
     records = records[:deps.VRAM_RECORD_CAP]
     ids = sorted({r["jobid"] for r in records})
+    enriched_frac = 0.0
+    failed_batches = 0
     if ids:
-        meta = deps.route_cache.get_or_set(
-            cache.sacct_key(ids), 300, lambda: deps.sacct_jobs(ids))
+        meta, failed_batches = deps.route_cache.get_or_set(
+            cache.sacct_key(ids), 300,
+            # Two workers: 2000 IDs mean 20 sequential 100-ID sacct calls
+            # per failed batch, so low concurrency keeps the load bounded
+            # instead of saturating slurmdbd with 8 parallel lookups.
+            lambda: deps.sacct_jobs_resilient(ids, workers=2))
+        enriched = 0
         for r in records:
             row = meta.get(r["jobid"]) or {}
             if row.get("gpus") and row.get("elapsed_s"):
                 r["gpu_hours"] = round(row["gpus"] * row["elapsed_s"] / 3600.0, 2)
+                enriched += 1
+        # The client discloses enrichment coverage: gpu_hours nulls in the
+        # distribution mean sacct could not be queried for that record.
+        enriched_frac = enriched / len(records)
     wkey = "gpu_hours" if weight == "alloc" else "gpu_hours_eff"
     records.sort(key=lambda r: (r.get(wkey) or 0.0), reverse=True)
-    return records, total, start, now, step
+    return records, total, start, now, step, enriched_frac, failed_batches

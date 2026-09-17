@@ -1,4 +1,6 @@
 {
+  "enriched_frac": 1.0,
+  "failed_batches": 0,
   "jobs": [
     {
       "gpu_hours": 96.0,

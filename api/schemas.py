@@ -390,6 +390,17 @@ class VramResponse(BaseModel):
     total: int = Field(
         description="Candidate job count before the sacct-enrichment cap; "
                     "jobs may hold fewer records than this.")
+    enriched_frac: float = Field(
+        default=0.0,
+        description="Fraction of the returned records whose allocated "
+                    "GPU-hours sacct resolved; below 1.0 discloses partial "
+                    "accounting coverage (some records' gpu_hours stay "
+                    "null) rather than a silent gap.")
+    failed_batches: int = Field(
+        default=0,
+        description="Number of 100-ID sacct enrichment batches that failed "
+                    "after retrying; those records' gpu_hours stay null. "
+                    "Zero means the enrichment is complete.")
     jobs: List[VramRecord]
 
 

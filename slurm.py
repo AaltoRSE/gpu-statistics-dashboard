@@ -602,14 +602,37 @@ def sacct_jobs(job_ids, start_iso=None, workers=8):
     bound the request, so callers may omit it to retrieve jobs that started
     before the visible window.
     """
+    enriched, _ = sacct_jobs_resilient(job_ids, start_iso, workers)
+    return enriched
+
+
+def sacct_jobs_resilient(job_ids, start_iso=None, workers=8):
+    """``sacct_jobs`` plus failed-batch accounting, for callers that
+    disclose partial coverage instead of failing the whole enrichment.
+
+    Each 100-ID batch retries once; a batch that still fails is counted in
+    the returned tuple instead of discarding every other batch's records
+    (one slow slurmdbd response must not 502 a 2000-job enrichment).
+    """
     job_ids = sorted(set(job_ids))
     if not job_ids:
-        return {}
+        return {}, 0
     batches = [job_ids[i : i + 100] for i in range(0, len(job_ids), 100)]
     results = {}
+    failed_batches = 0
 
     def fetch(batch):
-        return _sacct_batch(batch, start_iso)
+        nonlocal failed_batches
+        try:
+            for attempt in range(2):
+                try:
+                    return _sacct_batch(batch, start_iso)
+                except SlurmError:
+                    if attempt:
+                        raise
+        except SlurmError:
+            failed_batches += 1
+            return {}
 
     with ThreadPoolExecutor(max_workers=workers) as pool:
         for chunk in pool.map(fetch, batches):
@@ -617,4 +640,4 @@ def sacct_jobs(job_ids, start_iso=None, workers=8):
     enriched = {}
     for jobid, row in results.items():
         enriched[jobid] = _enrich_sacct_row(row)
-    return enriched
+    return enriched, failed_batches

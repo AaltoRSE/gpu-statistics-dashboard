@@ -224,11 +224,14 @@ def api_part_vram(since_hours: float = Query(24, gt=0, le=168),
                   weight: str = Query("alloc", pattern="^(alloc|eff)$")):
     node_types = gpu_groups.build_node_index(
         deps.route_cache.get_or_set(cache.scontrol_nodes_key(), 30, deps.show_nodes))
-    records, total, start, now, step = vram_job_records(
-        since_hours, running_only, partition, node_types, weight)
+    records, total, start, now, step, enriched_frac, failed_batches = \
+        vram_job_records(since_hours, running_only, partition, node_types,
+                         weight)
     return {
         "window": window(start, now),
         "step": step,
         "total": total,
+        "enriched_frac": enriched_frac,
+        "failed_batches": failed_batches,
         "jobs": records,
     }

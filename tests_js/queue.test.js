@@ -82,7 +82,17 @@ async function boot(opts, importCacheBust) {
   // History object here keeps the runner's event loop alive after every
   // booted test (the leak that hung the suite).
   global.history = { pushState() {}, replaceState() {} };
-  global.setInterval = () => 0; // panel.js's freshness timer
+  // panel.js's freshness timer plus the queue poller: capture the
+  // callbacks so tests can drive ticks manually (jsdom timers are
+  // stubbed to keep the runner from hanging).
+  boot.clearedIds = boot.clearedIds || [];
+  boot.intervals = boot.intervals || [];
+  global.setInterval = opts.progress404
+    ? (fn) => { boot.intervals.push(fn); return boot.intervals.length; }
+    : () => 0;
+  global.clearInterval = opts.progress404
+    ? (id) => { boot.clearedIds.push(id); }
+    : () => {};
   global.Plotly = { newPlot: () => {}, react: () => {} };
 
   const queueBody = opts.queueError ? null : {
@@ -101,6 +111,12 @@ async function boot(opts, importCacheBust) {
 
   global.fetch = (url) => {
     urls.push(String(url));
+    if (String(url).startsWith("/api/partitions/queue/progress")) {
+      // A stale backend without the route: 404, recorded for the
+      // circuit-breaker test.
+      return Promise.resolve({ ok: false, status: 404,
+                               json: () => Promise.resolve({}) });
+    }
     if (String(url).startsWith("/api/partitions/queue")) {
       if (opts.queueError) return Promise.reject(new Error("squeue down"));
       if (opts.gateQueue) {
@@ -128,7 +144,8 @@ async function boot(opts, importCacheBust) {
   // object was built. Expose a live trampoline, not a by-value snapshot,
   // or the gated-queue test would invoke the initial no-op forever.
   return { dom, mod, urls,
-           releaseQueue: (...args) => releaseQueue(...args) };
+           releaseQueue: (...args) => releaseQueue(...args),
+           intervals: boot.intervals, clearedIds: boot.clearedIds };
 }
 
 function bootAndWait(opts, bust) {
@@ -324,6 +341,48 @@ test("a window change refetches both endpoints with the new window", async (t) =
   assert.ok(mod.selectedPartition !== undefined);
 });
 
+test("queue progress rewrites the loading chip while the request runs", async (t) => {
+  const ctx = await boot({
+    gateQueue: true,
+    queue: QUEUE,
+  }, 12);
+  const releaseQueue = ctx.releaseQueue;
+  t.after(() => ctx.dom.window.close());
+  await ctx.mod.loadPartitions(); // queue stays gated
+  const doc = ctx.dom.window.document;
+  const chip = doc.querySelector("#queueResults .results-loading");
+  assert.ok(chip, "the queue panel has its loading chip");
+  assert.match(chip.textContent, /Data is loading/i);
+  // A progress poll that returns batch state rewrites the chip in place:
+  // the user sees "batch N of M" instead of an opaque spinner.
+  ctx.mod.setQueueProgress(3, 7, 1);
+  assert.match(chip.innerHTML, /batch 3 of 7/);
+  assert.match(chip.innerHTML, /1 failed/);
+  // releasing the queue clears the overlay entirely
+  releaseQueue();
+  await new Promise((r) => setTimeout(r, 20));
+  assert.equal(doc.getElementById("queueResults")
+    .classList.contains("loading"), false);
+});
+
+test("progress polling stops after a 404 from a stale backend", async (t) => {
+  // A backend older than the progress route answers every poll with 404.
+  // The poller must clear its own interval on the first 404 tick instead
+  // of fetching once per second until the queue request lands.
+  const ctx = await boot(
+    { gateQueue: true, queue: QUEUE, progress404: true }, 14);
+  const releaseQueue = ctx.releaseQueue;
+  t.after(() => ctx.dom.window.close());
+  await ctx.mod.loadPartitions(); // queue stays gated; poller registered
+  // Drive one tick: the poller fetches, gets 404, clears itself.
+  // Drive the LAST registered interval: the poller (the freshness timer
+  // also registers an interval at import time).
+  await ctx.intervals.at(-1)();
+  assert.ok(ctx.clearedIds.length >= 1,
+    "the 404 cleared the poll interval (no per-second request storm)");
+  releaseQueue();
+});
+
 test("selecting a GPU type filters the waiting list but keeps the unique headline", async (t) => {
   const { dom, mod } = await bootAndWait({
     queue: QUEUE,
@@ -388,7 +447,7 @@ test("unavailable wait history shows its own hint, pending counts intact", async
       },
     },
     waitingJobs: WAITING,
-  }, 11);
+  }, 13);
   t.after(() => dom.window.close());
   const doc = dom.window.document;
   assert.equal(doc.getElementById("pQueueHint").hidden, true);
@@ -400,7 +459,7 @@ test("unavailable wait history shows its own hint, pending counts intact", async
 });
 
 test("reachable-but-empty queue reads 'No pending jobs', no warning", async (t) => {
-  const { dom } = await bootAndWait({ queueAvailable: true, queue: {} }, 12);
+  const { dom } = await bootAndWait({ queueAvailable: true, queue: {} }, 15);
   t.after(() => dom.window.close());
   const doc = dom.window.document;
   assert.equal(doc.getElementById("pQueueHint").hidden, true);

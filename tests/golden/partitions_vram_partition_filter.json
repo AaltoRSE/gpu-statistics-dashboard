@@ -1,4 +1,6 @@
 {
+  "enriched_frac": 0.0,
+  "failed_batches": 0,
   "jobs": [],
   "step": 120,
   "total": 0,

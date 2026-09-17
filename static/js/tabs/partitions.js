@@ -124,7 +124,16 @@ async function loadPartitionQueue() {
   // an opaque spinner. The poll stops when the queue response lands.
   const pollTimer = setInterval(async () => {
     try {
-      const prog = await api("/api/partitions/queue/progress?" + params);
+      const resp = await fetch("/api/partitions/queue/progress?" + params);
+      if (resp.status === 404) {
+        // A stale backend without the progress route: stop hammering it
+        // every second — the queue request itself still decides the
+        // panel's outcome.
+        clearInterval(pollTimer);
+        return;
+      }
+      if (!resp.ok) return;
+      const prog = await resp.json();
       if (token === queueToken && prog && prog.total) {
         setQueueProgress(prog.done, prog.total, prog.failed_batches);
       }
@@ -160,7 +169,7 @@ async function loadPartitionQueue() {
   setResultsLoading("queueResults", false);
 }
 
-function setQueueProgress(done, total, failed) {
+export function setQueueProgress(done, total, failed) {
   const panel = $("queueResults");
   const chip = panel.querySelector(".results-loading");
   if (!chip) return;

@@ -341,6 +341,10 @@ def fake_prom(monkeypatch):
                         lambda ids, start_iso=None, **kw: {j: SACCT[j] for j in ids
                                                            if j in SACCT})
     monkeypatch.setattr(
+        deps, "sacct_jobs_resilient",
+        lambda ids, start_iso=None, **kw: (
+            {j: SACCT[j] for j in ids if j in SACCT}, 0))
+    monkeypatch.setattr(
         deps, "completed_jobs",
         lambda start_iso, end_iso, progress=None: (COMPLETED_HISTORY, {
             "failed_batches": 0, "successful_batches": 1, "complete": True,
@@ -1394,17 +1398,38 @@ def test_partitions_vram_partition_filter(client):
     # unknown type: no candidates, empty payload
     data = client.get("/api/partitions/vram",
                       params={"since_hours": 24, "partition": "b300"}).json()
-    assert data["total"] == 0 and data["jobs"] == []
+
+
+def test_partitions_vram_discloses_partial_enrichment(
+        client, fake_prom, monkeypatch):
+    # One sacct batch failing must not 502 the whole VRAM endpoint or
+    # erase the other batches: the failed batch's records keep null
+    # gpu_hours and the response discloses the coverage fraction and the
+    # failed-batch count.
+    def partial(ids, start_iso=None, **kw):
+        meta = {j: SACCT[j] for j in ids if j == "1"}
+        return meta, 1  # one of the (single) batches failed
+
+    monkeypatch.setattr(deps, "sacct_jobs_resilient", partial)
+    data = client.get("/api/partitions/vram",
+                      params={"since_hours": 24}).json()
+    assert 0 < data["enriched_frac"] < 1
+    assert data["failed_batches"] == 1
+    by_job = {j["jobid"]: j for j in data["jobs"]}
+    assert by_job["1"]["gpu_hours"] is not None
+    assert by_job["2"]["gpu_hours"] is None
 
 
 def test_slurm_error_maps_to_502(client, fake_prom, monkeypatch):
-    def boom(ids, start_iso=None, **kw):
-        raise appmod.SlurmError("sacct timed out")
+    def boom():
+        raise appmod.SlurmError("scontrol is not available")
 
-    monkeypatch.setattr(deps, "sacct_jobs", boom)
+    # The VRAM pipeline's Prometheus half still raises SlurmError through
+    # running_gpu_job_ids/scontrol; the resilient sacct helper no longer
+    # propagates batch failures, so the 502 mapping is exercised on the
+    # scontrol call instead.
+    monkeypatch.setattr(deps, "show_nodes", boom)
     r = client.get("/api/partitions/vram", params={"since_hours": 24})
-    # the handler must produce the 502 itself; a reversed
-    # JSONResponse(status, body) call turns this into a 500.
     assert r.status_code == 502
     assert r.json()["error"] == "slurm_unreachable"
 

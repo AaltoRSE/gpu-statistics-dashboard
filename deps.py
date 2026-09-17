@@ -26,6 +26,7 @@ from slurm import (  # noqa: F401 (re-exported)
     completed_jobs,
     queue_pending,
     sacct_jobs,
+    sacct_jobs_resilient,
     show_jobs,
     show_nodes,
 )
