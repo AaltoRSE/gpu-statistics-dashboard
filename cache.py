@@ -121,15 +121,17 @@ def completed_jobs_key(start, end):
     return ("completed_jobs", start, end)
 
 
-def completed_progress_key(since_hours, running_only):
+def completed_progress_key(since_hours):
     """The stable progress-store key shared by the queue and progress routes.
 
-    Both routes derive it from the same query parameters, so a poll finds
-    the in-flight fetch's entry: the accounting fetch publishes under this
-    key (and its epoch cache key) while it runs, regardless of each
-    request's own captured epoch window.
+    It deliberately omits ``running_only``: the accounting cache single-
+    flights on ``(start, end)`` alone, so two same-window requests that
+    differ only in that flag join ONE fetch. Keying progress by the flag
+    would leave the follower polling a key the leader never publishes.
+    Progress is per-batch state of the shared fetch, not per-response
+    view, so the flag has no place in this identity.
     """
-    return ("completed_progress", since_hours, bool(running_only))
+    return ("completed_progress", since_hours)
 
 
 def node_current_key():

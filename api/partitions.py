@@ -108,13 +108,14 @@ def api_partition_queue(since_hours: float = Query(24, gt=0, le=168),
         end_iso = datetime.fromtimestamp(now, tz).replace(
             tzinfo=None).isoformat(timespec="seconds")
         cache_key = cache.completed_jobs_key(start, now)
-        progress_key = cache.completed_progress_key(since_hours, running_only)
+        progress_key = cache.completed_progress_key(since_hours)
 
         def fetch():
-            # Publish under every joining request's lookup key: accounting
-            # itself single-flights on the epoch cache_key, but a follower
-            # with a different running_only polls its own parameter-derived
-            # progress key and must still see the shared fetch's state.
+            # Publish under both identities: the epoch cache key (what this
+            # request can inspect locally) and the stable parameter key the
+            # browser polls. running_only is deliberately excluded — the
+            # accounting cache joins same-window requests regardless of the
+            # flag, so a follower's poll must find this fetch's state.
             for key in (cache_key, progress_key):
                 progress_store[key] = {"done": 0, "total": 0,
                                        "failed_batches": 0}
@@ -201,7 +202,7 @@ def api_partition_queue_progress(since_hours: float = Query(24, gt=0, le=168),
     accounting fetch records its daily-batch state into ``progress_store``
     (single-flighted through the same TTL cache as the accounting result).
     """
-    key = cache.completed_progress_key(since_hours, running_only)
+    key = cache.completed_progress_key(since_hours)
     return progress_store.get(key, None)
 
 

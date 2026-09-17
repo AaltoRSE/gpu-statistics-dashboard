@@ -1127,7 +1127,7 @@ def test_partitions_queue_progress_endpoint_serves_batch_state(
     # an epoch-derived or flag-mismatched key would return None here.
     import cache as cache_module
 
-    key = cache_module.completed_progress_key(24, False)
+    key = cache_module.completed_progress_key(24)
     domain.partitions.progress_store[key] = {
         "done": 4, "total": 7, "failed_batches": 1,
     }
@@ -1142,6 +1142,25 @@ def test_partitions_queue_progress_endpoint_serves_batch_state(
         assert client.get(
             "/api/partitions/queue/progress", params={"since_hours": 24},
         ).json() is None
+    finally:
+        domain.partitions.progress_store.pop(key, None)
+
+
+def test_partitions_queue_progress_shares_fetch_across_running_flag(
+        client, fake_prom, monkeypatch):
+    # The accounting cache joins same-window requests regardless of
+    # running_only, so both flags' polls must read the ONE shared fetch's
+    # state: the progress key omits the flag. If it leaked into the key,
+    # the opposite-flag poll would miss the leader's entry entirely.
+    key = cache.completed_progress_key(24)
+    domain.partitions.progress_store[key] = {
+        "done": 2, "total": 7, "failed_batches": 0}
+    try:
+        for flag in (False, True):
+            r = client.get("/api/partitions/queue/progress",
+                           params={"since_hours": 24, "running_only": flag})
+            assert r.status_code == 200
+            assert r.json() == {"done": 2, "total": 7, "failed_batches": 0}
     finally:
         domain.partitions.progress_store.pop(key, None)
 
