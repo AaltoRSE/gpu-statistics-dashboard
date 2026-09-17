@@ -17,7 +17,7 @@ import { createTable } from "../core/table.js";
 
 let partRows = [];
 let queueRows = [];
-let queueTotal = null;   // the backend's unique cluster-wide queue figure
+let queueTotals = null;  // the backend's unique cluster-wide pending figures
 let queueAvailable = true;
 let waitingJobs = [];    // raw waiting_jobs records from the API
 let waitHistoryAvailable = true;
@@ -30,8 +30,7 @@ export function setSelectedPartition(name) {
   selectedPartition = name || "";
 }
 
-export function applyPartitionSelection(name) {
-  selectedPartition = name || "";
+function refreshSelectorOptions() {
   const sel = $("pPartition");
   // Union of utilization rows and queue group names: a pending-only GPU
   // type (no utilization series in this window) stays selectable.
@@ -52,6 +51,11 @@ export function applyPartitionSelection(name) {
   sel.innerHTML = options.join("");
   sel.value = selectedPartition;
   if (!sel.value) selectedPartition = "";
+}
+export function applyPartitionSelection(name) {
+  selectedPartition = name || "";
+  refreshSelectorOptions();
+  const sel = $("pPartition");
   renderPartTrend(partTrendData);
   // Re-outline the selected type's bar in the two charts above the
   // trend (T-27) — previously only the trend/VRAM charts showed which
@@ -66,6 +70,10 @@ export function applyPartitionSelection(name) {
 export async function loadPartitions() {
   const token = ++partitionsToken;
   setResultsLoading("partitionsResults", true);
+  // The queue is a separate, slower endpoint (squeue + sacct): start it
+  // immediately so both requests are in flight together, and never let
+  // its completion gate the Prometheus-backed charts below.
+  loadPartitionQueue();
   let data;
   try {
     const params = new URLSearchParams({ since_hours: $("pWindow").value });
@@ -81,14 +89,6 @@ export async function loadPartitions() {
   if (token !== partitionsToken) return; // a newer request supersedes this one
   panelOk("partitionsResults");
   partRows = data.partitions;
-  const q = data.queue || {};
-  queueTotal = q.__total__ || null;
-  queueRows = Object.entries(q)
-    .filter(([name]) => name !== "__total__")
-    .map(([name, g]) => Object.assign({ name }, g));
-  queueAvailable = data.queue_available !== false;
-  waitingJobs = data.waiting_jobs || [];
-  waitHistoryAvailable = data.wait_history_available !== false;
   const w = data.window;
   $("pCount").textContent = data.partitions.length + " GPU types · " +
     ($("pRunning").checked
@@ -100,13 +100,51 @@ export async function loadPartitions() {
   partTrendStep = data.step;
   applyPartitionSelection(selectedPartition);
   renderPartTable();
-  renderPartQueue();
   loaded.partitions = true;
   // The summary panel is unblocked as soon as its response renders; the
   // VRAM distribution then fetches independently under its own panel.
   setResultsLoading("partitionsResults", false);
   if (token !== partitionsToken) return;
   await loadVram();
+}
+
+/* ---------------- Live queue (independent endpoint) ----------------
+ * /api/partitions/queue carries the squeue snapshot plus the sacct
+ * wait history. It is slower than the metrics endpoint, so it renders
+ * under its own loading overlay whenever its response lands. */
+let queueToken = 0;
+
+async function loadPartitionQueue() {
+  const token = ++queueToken;
+  setResultsLoading("queueResults", true);
+  let data;
+  try {
+    const params = new URLSearchParams({ since_hours: $("pWindow").value });
+    if ($("pRunning").checked) params.set("running_only", "true");
+    data = await api("/api/partitions/queue?" + params);
+  } catch (e) {
+    if (token === queueToken) {
+      setResultsLoading("queueResults", false);
+      showPanelError("queueResults", e, loadPartitionQueue, "the pending-jobs queue");
+    }
+    return;
+  }
+  if (token !== queueToken) return; // a newer request supersedes this one
+  panelOk("queueResults");
+  const q = data.queue || {};
+  queueTotals = data.totals || null;
+  queueRows = Object.entries(q)
+    .map(([name, g]) => Object.assign({ name }, g));
+  queueAvailable = data.queue_available !== false;
+  waitingJobs = data.waiting_jobs || [];
+  waitHistoryAvailable = data.wait_history_available !== false;
+  // Queue-only GPU types join the selector's union; the two queue
+  // tables re-render under the current type filter. The metrics charts
+  // are already rendered and are NOT redrawn here.
+  refreshSelectorOptions();
+  renderPartQueue();
+  renderWaitingJobs();
+  setResultsLoading("queueResults", false);
 }
 
 function renderPartBar() {
@@ -157,8 +195,8 @@ function renderPartOccupancy() {
     },
     customdata: rows.map((p) => p.mean_util),
     hovertemplate: rows.map((p) => p.mean_occupancy === null
-      ? "<b>%{x}</b><br>no occupancy data<br>mean util %{customdata:.1f}%<extra></extra>"
-      : "<b>%{x}</b><br>mean occupancy %{y:.1f}%<br>mean util %{customdata:.1f}%<extra></extra>"),
+      ? "<b>%{x}</b><br>no capacity data<extra></extra>"
+      : "<b>%{x}</b><br>occupancy %{y:.1f}%<br>mean util %{customdata:.1f}%<extra></extra>"),
   }], {
     margin: { l: 46, r: 20, t: 10, b: 60 },
     paper_bgcolor: "rgba(0,0,0,0)", plot_bgcolor: "rgba(0,0,0,0)",
@@ -169,6 +207,38 @@ function renderPartOccupancy() {
   });
 }
 
+function queueRowHtml(q) {
+  let bucketText;
+  if (q.wait_buckets === null || q.wait_buckets === undefined) {
+    // sacct enrichment failed: unknown, not "all buckets empty"
+    bucketText = "—";
+  } else {
+    bucketText = [
+      ["lt_5m", "<5m"], ["m5_to_30m", "5–30m"], ["m30_to_2h", "30m–2h"],
+      ["h2_to_12h", "2–12h"], ["gte_12h", "≥12h"],
+    ].map(([key, label]) => label + " " + fmtInt(q.wait_buckets[key] || 0))
+      .join(" · ");
+  }
+  return html`
+    <tr class="row" data-partition="${q.name}">
+      <td>${raw(partitionLink(q.name))}</td>
+      <td class="num">${fmtInt(q.exclusive_jobs)}</td>
+      <td class="num">${fmtInt(q.flexible_jobs)}</td>
+      <td class="num">${fmtInt(q.eligible_jobs)}</td>
+      <td class="num">${fmtInt(q.exclusive_gpus)}</td>
+      <td class="num">${fmtInt(q.flexible_gpus)}</td>
+      <td class="num">${fmtInt(q.eligible_gpus)}</td>
+      <td class="num">${q.wait_p50_s === null || q.wait_p50_s === undefined
+        ? "—" : fmtDuration(q.wait_p50_s)}</td>
+      <td class="num">${q.wait_p90_s === null || q.wait_p90_s === undefined
+        ? "—" : fmtDuration(q.wait_p90_s)}</td>
+      <td class="num">${q.wait_avg_s === null || q.wait_avg_s === undefined
+        ? "—" : fmtDuration(q.wait_avg_s)}</td>
+      <td class="num">${q.wait_samples === null || q.wait_samples === undefined
+        ? "—" : fmtInt(q.wait_samples)}</td>
+      <td>${bucketText}</td>
+    </tr>`;
+}
 // Centered rolling mean over a fixed WALL-CLOCK window (not a fixed point
 // count): the trend query's own step varies with the selected time range
 // (120s at 24h, up to 900s at 7d — domain/common.py's step_for_range), so
@@ -274,23 +344,6 @@ function renderPartTable() {
 }
 
 
-/* ---------------- Pending jobs (queue status) ----------------
- * One squeue -t PD snapshot per partitions fetch, aggregated by the
- * backend into the tab's GPU-type semantics. Unavailable (squeue
- * failed) renders as its own state — never as an empty queue. */
-
-function queueRowHtml(q) {
-  return html`
-    <tr class="row" data-partition="${q.name}">
-      <td>${raw(partitionLink(q.name))}</td>
-      <td class="num">${fmtInt(q.jobs)}</td>
-      <td class="num">${q.avg_wait_s === null || q.avg_wait_s === undefined
-        ? "—" : fmtDuration(q.avg_wait_s)}</td>
-      <td class="num">${fmtInt(q.started_jobs || 0)}</td>
-      <td class="num">${q.gpus === null ? "unknown" : fmtInt(q.gpus)}</td>
-      <td class="num">${fmtInt(q.gpus_min)}</td>
-    </tr>`;
-}
 
 function queueRowClick(e, tr) {
   openPartition(tr.dataset.partition);
@@ -299,12 +352,20 @@ function queueRowClick(e, tr) {
 const partQueueTable = createTable({
   el: $("partQueueTable"),
   columns: [
-    { key: "name", type: "text" }, { key: "jobs", type: "number" },
-    { key: "avg_wait_s", type: "number" },
-    { key: "started_jobs", type: "number" },
-    { key: "gpus", type: "number" }, { key: "gpus_min", type: "number" },
+    { key: "name", type: "text" },
+    { key: "exclusive_jobs", type: "number" },
+    { key: "flexible_jobs", type: "number" },
+    { key: "eligible_jobs", type: "number" },
+    { key: "exclusive_gpus", type: "number" },
+    { key: "flexible_gpus", type: "number" },
+    { key: "eligible_gpus", type: "number" },
+    { key: "wait_p50_s", type: "number" },
+    { key: "wait_p90_s", type: "number" },
+    { key: "wait_avg_s", type: "number" },
+    { key: "wait_samples", type: "number" },
+    { key: "wait_buckets", type: "text" },
   ],
-  defaultSort: { key: "jobs", dir: "desc" },
+  defaultSort: { key: "eligible_jobs", dir: "desc" },
   renderRow: queueRowHtml,
   onRowClick: queueRowClick,
   emptyMessage: () => ({ text: queueAvailable
@@ -313,31 +374,32 @@ const partQueueTable = createTable({
     resetLabel: null }),
 });
 
-
 function renderPartQueue() {
   partQueueTable.setRows(queueRows);
   $("pQueueHint").hidden = queueAvailable;
   $("pWaitHistoryHint").hidden = waitHistoryAvailable;
-  // All-types: the backend's unique cluster-wide figure (__total__).
-  // Filtered: the selected type's own placement count — rows are
-  // "demand that could land here", so that is the honest per-type
-  // number (the unique count is unknowable per type).
-  const selected = queueRows.find((q) => q.name === selectedPartition);
-  const total = selected ? selected.jobs
-    : queueTotal ? queueTotal.jobs
-    : queueRows.reduce((s, q) => s + q.jobs, 0);
-  $("pQueueMeta").textContent = total
-    ? total + " pending job" + (total === 1 ? "" : "s")
-    : "";
+  // The unique cluster-wide figure (totals from the backend) always
+  // stays cluster-wide: per-type rows overlap (flexible jobs count in
+  // each eligible row), so a type filter rewrites the waiting list
+  // below — never this headline.
+  const t = queueTotals || {};
+  const jobs = t.unique_pending_jobs;
+  const gpus = t.unique_gpus_requested;
+  $("pQueueUnique").textContent =
+    jobs === null || jobs === undefined
+      ? "Unique pending jobs unavailable — squeue could not be reached."
+      : fmtInt(jobs) + " unique pending job" + (jobs === 1 ? "" : "s") +
+        (gpus === null || gpus === undefined
+          ? "" : " requesting " + fmtInt(gpus) + " GPU" + (gpus === 1 ? "" : "s"));
 }
 
 
 /* -------------- Waiting jobs (the individual queue rows) --------------
  * Each GPU-eligible physical pending job once, filtered client-side by
  * the selected GPU type through its groups. Row/link opens the job
- * detail; user links keep their higher-priority navigation. The raw
- * partition column is plain text: a partition name is no longer a
- * selectable group and must not navigate to an empty type view. */
+ * detail; user links keep their higher-priority navigation. The table
+ * sits behind a "Waiting jobs" disclosure (the Browse-jobs pattern):
+ * collapsed by default, toggled open, state kept across refreshes. */
 
 function waitingRowHtml(j) {
   return html`
@@ -345,16 +407,13 @@ function waitingRowHtml(j) {
       <td>${raw(jobLink(j.jobid))}</td>
       <td>${raw(userLink(j.user))}</td>
       <td>${(j.groups || []).join(", ")}</td>
-      <td>${(j.partition || "").split(",").map((p) => p.trim())
-        .filter(Boolean).join(", ")}</td>
       <td>${fmtSacctTime(j.submit)}</td>
       <td class="num">${j.wait_s === null || j.wait_s === undefined
         ? "—" : fmtDuration(j.wait_s)}</td>
       <td>${j.start ? fmtSacctTime(j.start) : "—"}</td>
       <td>${j.reason}</td>
-      <td class="num">${j.nodes ? fmtInt(j.nodes) : "—"}</td>
       <td class="num">${j.gpu_total === null || j.gpu_total === undefined
-        ? "unknown" : fmtInt(j.gpu_total)}</td>
+        ? "—" : fmtInt(j.gpu_total)}</td>
     </tr>`;
 }
 
@@ -382,10 +441,10 @@ const pendingJobsTable = createTable({
   el: $("pendingJobsTable"),
   columns: [
     { key: "jobid", type: "text" }, { key: "user", type: "text" },
-    { key: "groups", type: "text" }, { key: "partition", type: "text" },
+    { key: "groups", type: "text" },
     { key: "submit", type: "text" },
     { key: "wait_s", type: "number" }, { key: "start", type: "text" },
-    { key: "reason", type: "text" }, { key: "nodes", type: "number" },
+    { key: "reason", type: "text" },
     { key: "gpu_total", type: "number" },
   ],
   defaultSort: { key: "wait_s", dir: "desc" },
@@ -413,6 +472,22 @@ function renderWaitingJobs() {
 }
 
 function partControlsChanged() { loadPartitions(); }
+
+/* ---- "Waiting jobs" disclosure (Browse-jobs pattern) ----
+ * Collapsed by default; the toggle only flips a class + ARIA state, so
+ * refreshes and GPU-type re-filters never lose the operator's choice. */
+
+function setWaitingJobsCollapsed(collapse) {
+  const ex = $("pWaitingExplorer");
+  ex.classList.toggle("collapsed", collapse);
+  $("pWaitingExplorerToggle").setAttribute("aria-expanded", String(!collapse));
+  $("pWaitingExplorerToggle").innerHTML =
+    (collapse ? "&#9656; " : "&#9662; ") + "Waiting jobs";
+}
+
+$("pWaitingExplorerToggle").addEventListener("click", () => {
+  setWaitingJobsCollapsed(!$("pWaitingExplorer").classList.contains("collapsed"));
+});
 $("pWindow").addEventListener("change", partControlsChanged);
 $("pPartition").addEventListener("change", () => {
   applyPartitionSelection($("pPartition").value);

@@ -172,6 +172,9 @@ td.chip-cell { white-space:normal; }
 .err { color: var(--bad); font-size: 12px; padding: 8px 10px; background:#2a1518; border:1px solid var(--bad);
   border-radius:6px; margin: 8px 0; display:none; }
 .small { font-size: 11px; color: var(--dim); }
+.queue-unique { font-size:15px; font-weight:700; color:var(--text);
+  margin:2px 0 10px; }
+.queue-unique .small { font-weight:400; }
 
 /* Panel-local loading: a small status chip plus a light dim — content stays
    readable (no blur) so a refresh never implies the shown data is gone. */
@@ -234,10 +237,9 @@ header .auto-refresh select { background:var(--panel2); color:var(--text); borde
   font-variant-numeric:tabular-nums; }
 #jobDetailClose:hover { color:var(--text); border-color:var(--dim); }
 .explorer-head { display:flex; align-items:center; gap:12px; margin:14px 0 0; }
-#jobExplorerToggle { background:none; border:none; color:var(--acc); cursor:pointer;
+.explorer-toggle { background:none; border:none; color:var(--acc); cursor:pointer;
   font-size:14px; font-weight:600; padding:2px 0; }
-#jobExplorerToggle:hover { text-decoration:underline; }
-#jobExplorer.collapsed #jobExplorerBody { display:none; }
+.collapsible.collapsed > .collapsible-body { display:none; }
 #jobExplorerNote { color:var(--dim); font-size:12px; }
 .legend { display:flex; align-items:center; gap:6px; flex-wrap:wrap;
   font-size:11px; color:var(--dim); margin-top:4px; }
