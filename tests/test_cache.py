@@ -118,6 +118,28 @@ def test_get_or_set_single_flights_concurrent_misses():
     assert results == ["value"] * 5
 
 
+
+def test_refresh_prevents_older_flight_from_overwriting_fresh_value():
+    started = threading.Event()
+    release = threading.Event()
+    c = cache.TtlCache()
+
+    def stale_fetch():
+        started.set()
+        assert release.wait(timeout=5)
+        return "stale"
+
+    stale_thread = threading.Thread(
+        target=lambda: c.get_or_set("k", 60, stale_fetch))
+    stale_thread.start()
+    assert started.wait(timeout=5)
+
+    assert c.refresh("k", 60, lambda: "fresh") == "fresh"
+    release.set()
+    stale_thread.join(timeout=5)
+
+    assert c.get_or_set("k", 60, lambda: "unexpected") == "fresh"
+
 def test_get_or_set_failed_leader_lets_the_next_call_retry():
     attempts = []
 

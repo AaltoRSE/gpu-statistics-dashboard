@@ -289,10 +289,12 @@ let jobDetailOpenedFromTable = false;
 let jobDetailWasCollapsed = false; // explorer visibility before the detail opened
 let jobDetailToken = 0;
 export let jobDetailData = null; // raw API payload; traces rebuild per theme
+let jobDetailId = null; // requested ID, including while its detail request is pending
 
-export async function loadJobDetail(jobid, from) {
+export async function loadJobDetail(jobid, from, force = false) {
   jobDetailFrom = from || null;
   jobDetailOpenedFromTable = !!(from && from.kind === "jobs");
+  jobDetailId = jobid;
   const token = ++jobDetailToken;
   const detail = $("jobDetailResults");
   const explorer = $("jobExplorer");
@@ -301,7 +303,9 @@ export async function loadJobDetail(jobid, from) {
     // job switch restores the operator's prior layout.
     jobDetailWasCollapsed = explorer.classList.contains("collapsed");
   }
-  setJobDetailHead(jobid);
+  // A refresh retains the successfully rendered detail until its replacement
+  // arrives, so a failed refresh cannot blank its metadata and summary.
+  if (!force || !jobDetailData || jobDetailData.jobid !== jobid) setJobDetailHead(jobid);
   detail.style.display = "block";
   setResultsLoading("jobDetailResults", true);
   clearJobTableHighlight();
@@ -310,20 +314,24 @@ export async function loadJobDetail(jobid, from) {
   // came from the table itself (where it is already the context).
   if (!jobDetailOpenedFromTable) setJobExplorerCollapsed(true);
   try {
-    const data = await api("/api/jobs/" + jobid + "?since_hours=" + $("jWindow").value);
+    const params = new URLSearchParams({ since_hours: $("jWindow").value });
+    if (force) params.set("refresh", "true");
+    const data = await api("/api/jobs/" + jobid + "?" + params);
     if (token !== jobDetailToken) return;
     panelOk("jobDetailResults");
     setUrl("/job/" + jobid);
     jobDetailData = data;
     renderJobDetail(data);
     if (jobDetailOpenedFromTable) highlightJobRow(jobid);
-    // Land on the detail only once its real content (stats row, chart)
-    // has rendered: scrolling before the fetch targets the loading
-    // skeleton's height, and the panel's own size change on render then
-    // pushes the view back down to the jobs table (PLAN-1 2.2's fix for
-    // the Nodes tab, applied here). The row highlight is a plain marker
-    // now — the single scroll is the panel's.
-    detail.scrollIntoView({ behavior: "smooth", block: "start" });
+    if (!force) {
+      // Land on the detail only once its real content (stats row, chart)
+      // has rendered: scrolling before the fetch targets the loading
+      // skeleton's height, and the panel's own size change on render then
+      // pushes the view back down to the jobs table (PLAN-1 2.2's fix for
+      // the Nodes tab, applied here). The row highlight is a plain marker
+      // now — the single scroll is the panel's.
+      detail.scrollIntoView({ behavior: "smooth", block: "start" });
+    }
   } catch (e) {
     if (token === jobDetailToken)
       showPanelError("jobDetailResults", e, () => loadJobDetail(jobid, jobDetailFrom), "job " + jobid);
@@ -502,7 +510,12 @@ $("jLimit").addEventListener("input", updateLimitBadge);
 // so typing doesn't fire a request per keystroke; partition filtering is
 // local because it only changes the table.
 $("jSearch").addEventListener("input", debounce(loadJobs, 250));
-$("jRefresh").addEventListener("click", () => { loadJobs(true); });
+$("jRefresh").addEventListener("click", () => {
+  loadJobs(true);
+  if (jobDetailId && $("jobDetailResults").style.display !== "none") {
+    loadJobDetail(jobDetailId, jobDetailFrom, true);
+  }
+});
 $("jPartition").addEventListener("change", renderJobsView);
 $("jobDetailClose").addEventListener("click", closeJobDetail);
 $("jobDetailBack").addEventListener("click", (e) => {

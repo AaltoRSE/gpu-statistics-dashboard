@@ -54,12 +54,12 @@
       <label>Search (job id / name)
         <input id="jSearch" type="text" placeholder="e.g. 19807768">
       </label>
-      <span class="control-meta">
+      <span class="controls-actions">
         <span class="meta-count" id="jMetaCount"></span>
         <span class="small" id="jMeta"></span>
         <span class="small" data-fresh-for="jobsResults"></span>
+        <button id="jRefresh" title="force a fresh Prometheus read"><span aria-hidden="true">&#8635;</span> refresh</button>
       </span>
-      <button id="jRefresh" title="force a fresh Prometheus read"><span aria-hidden="true">&#8635;</span> refresh</button>
     </div>
     <div id="jobDetailResults" class="results-panel" style="display:none">
       <div class="results-content">
@@ -292,11 +292,11 @@
                  placeholder="type to filter — Enter or click a row to select">
         </label>
         <label class="row"><input id="uRunning" type="checkbox"> Running only</label>
-        <button id="uRefresh" title="re-fetch the user list"><span aria-hidden="true">&#8635;</span> refresh</button>
-        <span class="control-meta">
+        <span class="controls-actions">
           <span class="meta-count" id="uMetaCount"></span>
           <span class="small" id="uMeta"></span>
           <span class="small" data-fresh-for="usersResults"></span>
+          <button id="uRefresh" title="re-fetch the user list"><span aria-hidden="true">&#8635;</span> refresh</button>
         </span>
       </div>
     </div>
