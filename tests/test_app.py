@@ -1119,23 +1119,31 @@ def test_partitions_partial_wait_history_keeps_successful_metrics(
     assert data["queue"]["h200"]["wait_samples"] == 2
 
 
-def test_partitions_queue_progress_endpoint_shares_fetch_state(
-        client, fake_prom, monkeypatch):
-    # A poll reads the in-flight fetch's latest batch state through the
-    # stable parameter-derived key, not a per-request epoch window; a
-    # finished fetch clears its entry.
-    def fake_completed(start_iso, end_iso, progress=None):
-        for done, total in ((1, 7), (4, 7), (7, 7)):
-            progress({"done": done, "total": total, "failed_batches": 0})
-        return (COMPLETED_HISTORY, {"failed_batches": 0,
-                                    "successful_batches": 7,
-                                    "complete": True})
+def test_partitions_queue_progress_endpoint_serves_batch_state(
+        client, fake_prom):
+    # The polling contract: /api/partitions/queue/progress must resolve
+    # the SAME stable key the in-flight accounting fetch publishes under.
+    # Seeding that exact key and GETting the route proves the lookup;
+    # an epoch-derived or flag-mismatched key would return None here.
+    import cache as cache_module
 
-    monkeypatch.setattr(deps, "completed_jobs", fake_completed)
-    data = client.get("/api/partitions/queue",
-                      params={"since_hours": 24}).json()
-    assert data["wait_history_available"] is True
-    assert domain.partitions.progress_store == {}
+    key = cache_module.completed_progress_key(24, False)
+    domain.partitions.progress_store[key] = {
+        "done": 4, "total": 7, "failed_batches": 1,
+    }
+    try:
+        r = client.get("/api/partitions/queue/progress",
+                       params={"since_hours": 24})
+        assert r.status_code == 200
+        assert r.json() == {"done": 4, "total": 7, "failed_batches": 1}
+        # A fetch that never published (cache hit, finished, or failed)
+        # reads as null progress rather than a fabricated batch.
+        domain.partitions.progress_store.clear()
+        assert client.get(
+            "/api/partitions/queue/progress", params={"since_hours": 24},
+        ).json() is None
+    finally:
+        domain.partitions.progress_store.pop(key, None)
 
 
 def test_partitions_queue_empty_when_nothing_pending(client, fake_prom):
