@@ -189,29 +189,78 @@ class PartitionRow(BaseModel):
                     "job (%); null when capacity is unknown.")
 
 
+class WaitBuckets(BaseModel):
+    """Completed-job wait-time histogram, in fixed ranges."""
+    lt_5m: int = Field(default=0, description="Waits under 5 minutes.")
+    m5_to_30m: int = Field(default=0, description="Waits from 5 minutes "
+                         "up to (not including) 30 minutes.")
+    m30_to_2h: int = Field(default=0, description="Waits from 30 minutes "
+                           "up to (not including) 2 hours.")
+    h2_to_12h: int = Field(default=0, description="Waits from 2 hours up "
+                           "to (not including) 12 hours.")
+    gte_12h: int = Field(default=0, description="Waits of 12 hours or "
+                         "more.")
+
+
 class QueueGroup(BaseModel):
-    jobs: int = Field(description="Pending (PD) job count eligible for "
-                      "this GPU type.")
-    gpus: Optional[int] = Field(
-        default=None,
-        description="Sum of per-node GPU requests times requested nodes; "
-                    "null when any GPU job in the group declares no node "
-                    "count (N/A %D), so the exact total is unknowable.")
-    gpus_min: int = Field(
-        description="Lower bound on gpus: per-node requests counted once "
-                    "each (times nodes where declared).")
-    started_jobs: int = Field(
+    """One GPU type's pending demand and completed-wait statistics.
+
+    Per-type figures overlap by design: a flexible (multi-type) pending
+    job appears in every eligible row, so columns must not be summed
+    across rows. The cluster-wide unique figures live in
+    ``PartitionQueueResponse.totals``.
+    """
+    exclusive_jobs: Optional[int] = Field(
         default=0,
-        description="Jobs of this group that actually started inside the "
-                    "requested window (Prometheus-observed set, sacct "
-                    "start/submit times).")
-    avg_wait_s: Optional[int] = Field(
+        description="Pending (PD) jobs eligible only for this GPU "
+                    "type; null when squeue is unavailable.")
+    flexible_jobs: Optional[int] = Field(
+        default=0,
+        description="Pending jobs eligible for this type and at least "
+                    "one other; also counted in those rows; null when "
+                    "squeue is unavailable.")
+    eligible_jobs: Optional[int] = Field(
+        default=0,
+        description="Jobs that could run on this GPU type (exclusive + "
+                    "flexible); non-additive across rows; null when "
+                    "squeue is unavailable.")
+    exclusive_gpus: Optional[int] = Field(
+        default=0,
+        description="GPUs requested by this type's exclusive pending "
+                    "jobs; null when squeue is unavailable.")
+    flexible_gpus: Optional[int] = Field(
+        default=0,
+        description="GPUs requested by this type's flexible pending "
+                    "jobs; also counted in their other rows; null when "
+                    "squeue is unavailable.")
+    eligible_gpus: Optional[int] = Field(
+        default=0,
+        description="GPUs requested by all pending jobs eligible for "
+                    "this type (exclusive + flexible); non-additive "
+                    "across rows; null when squeue is unavailable.")
+    wait_p50_s: Optional[int] = Field(
         default=None,
-        description="Actual Submit → Start wait in seconds, averaged "
-                    "over started_jobs — the real wait a job experienced, "
-                    "not its current pending age and not Slurm's estimated "
-                    "start; null when no valid started job exists in the "
-                    "window.")
+        description="Median completed-job Submit → Start wait in "
+                    "seconds over this type's valid started jobs in "
+                    "the window; null with no samples.")
+    wait_p90_s: Optional[int] = Field(
+        default=None,
+        description="Nearest-rank P90 completed-job wait in seconds; "
+                    "null with no samples.")
+    wait_avg_s: Optional[int] = Field(
+        default=None,
+        description="Mean completed-job wait in seconds; null with no "
+                    "samples.")
+    wait_samples: Optional[int] = Field(
+        default=0,
+        description="Number of valid completed-job waits behind the "
+                    "percentile/average figures; null when the sacct "
+                    "enrichment failed (distinct from a genuine 0).")
+    wait_buckets: Optional[WaitBuckets] = Field(
+        default_factory=WaitBuckets,
+        description="Valid completed-job waits bucketed <5m, 5-30m, "
+                    "30m-2h, 2-12h, >=12h; null when the sacct "
+                    "enrichment failed.")
 
 
 class PendingJob(BaseModel):
@@ -242,25 +291,52 @@ class PendingJob(BaseModel):
                     "submit time does not parse.")
     gpu_total: Optional[int] = Field(
         default=None,
-        description="gpus x nodes when both are known; null for a GPU "
-                    "request with unknown node count; 0 for a CPU-only "
-                    "job.")
+        description="The job's requested GPU count (0 for a "
+                    "constraints-only GPU-partition row).")
 
 
 class PartitionsResponse(BaseModel):
+    """Fast Prometheus-backed utilization payload.
+
+    Queue and wait-history fields deliberately live on
+    ``PartitionQueueResponse`` (``/api/partitions/queue``): squeue and
+    sacct are slower than Prometheus, so the Partitions tab fetches the
+    two endpoints concurrently and renders whichever arrives first
+    instead of blocking every chart on the slowest source.
+    """
     window: Window
     step: int
     partitions: List[PartitionRow]
     trend: Dict[str, List[Tuple[float, float]]] = Field(
         description="Per-group utilization trend series, keyed by group "
                     "name.")
+
+
+class QueueTotals(BaseModel):
+    """Unique cluster-wide pending demand; each physical job once."""
+    unique_pending_jobs: Optional[int] = Field(
+        default=None,
+        description="GPU-eligible pending jobs, each counted once "
+                    "regardless of how many type rows it is eligible "
+                    "for; null when squeue is unavailable.")
+    unique_gpus_requested: Optional[int] = Field(
+        default=None,
+        description="GPUs requested by those pending jobs; null when "
+                    "squeue is unavailable.")
+
+
+class PartitionQueueResponse(BaseModel):
     queue: Dict[str, QueueGroup] = Field(
         default_factory=dict,
-        description="Pending-job queue per GPU-type group (merged with "
-                    "historical wait data), plus __total__; includes "
-                    "zero-pending types so every visible group renders. "
-                    "__total__.jobs counts each GPU-eligible physical "
-                    "job once — CPU-only pending jobs are excluded.")
+        description="Pending-job demand and completed-wait statistics "
+                    "per GPU-type group; includes zero-pending types so "
+                    "every visible group renders. Per-type columns "
+                    "overlap (flexible jobs) and must not be summed.")
+    totals: QueueTotals = Field(
+        default_factory=QueueTotals,
+        description="Cluster-wide unique pending figures: every "
+                    "GPU-eligible physical job once. Null fields when "
+                    "squeue is unavailable.")
     queue_available: bool = Field(
         default=True,
         description="False when the squeue snapshot failed (squeue "
@@ -276,10 +352,10 @@ class PartitionsResponse(BaseModel):
                     "unavailable.")
     wait_history_available: bool = Field(
         default=True,
-        description="False when the sacct enrichment behind "
-                    "started_jobs/avg_wait_s failed — queue current-"
-                    "pending figures stay valid; must not be read as "
-                    "'no jobs started in the window'.")
+        description="False when the sacct enrichment behind the wait "
+                    "statistics failed — queue current-pending figures "
+                    "stay valid; must not be read as 'no jobs started "
+                    "in the window'.")
 
 
 class VramRecord(BaseModel):

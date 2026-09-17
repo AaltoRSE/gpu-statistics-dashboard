@@ -22,6 +22,14 @@ def _sacct_epoch(value):
         return None
 
 
+WAIT_TOTAL_KEY = "__total__"
+"""Cluster-wide sentinel key in ``started_wait_summary``'s result.
+
+The queue endpoint consumes it while building its unique totals; it is
+never a GPU type and must never leak into the public ``queue`` map.
+"""
+
+
 def partition_window(since_hours, running_only=False, now=None,
                      node_gpu_types=None):
     """GPU-type utilization window.
@@ -371,56 +379,51 @@ def _all_types(partition_types):
 def pending_queue_status(jobs, now, partition_types):
     """Aggregate pending jobs per GPU type and list the waiting ones.
 
-    Returns ``(summary, waiting_jobs)``. ``summary`` is
-    ``{type: {jobs, gpus, gpus_min}, "__total__": {...}}``. A job's
-    eligible types come from ``_pending_gpu_types`` (%b request first,
-    then the GPU-type union of its %P partitions); CPU-only jobs (no GPU
-    request, no GPU-backed partition) are omitted from the summary and
-    the waiting list entirely. A job eligible for several types shows in
-    each of them — per-row figures are "demand that could land here",
-    not disjoint slices — while ``__total__`` counts each included
-    physical job exactly once (rows sum to more than it; per-type rows
-    are never additive cluster-wide). ``gpus`` attributes each GPU job's
-    ``gpus * nodes`` (%b / TresPerNode is a per-node request) to every
-    eligible type on the same basis, so each row answers "how many GPUs
-    are being asked of this type", at the cost that a multi-type job's
-    request appears in each of its rows. When a GPU job's node count is
-    missing (Slurm's ``N/A`` %D) the exact GPU total becomes ``None``:
-    the per-node request is real demand, so a fabricated 0 would
-    understate the queue, and the one-node lower bound stays in
-    ``gpus_min``.
+    Returns ``(summary, totals, waiting_jobs)``. A job's eligible types
+    come from ``_pending_gpu_types`` (%b request first, then the
+    GPU-type union of its %P partitions); CPU-only jobs (no GPU request,
+    no GPU-backed partition) are omitted from the summary and the
+    waiting list entirely. Each included job is classified against its
+    complete eligibility set: one eligible type is exclusive to that
+    row; several make it flexible in every eligible row, so a row's
+    figures are "demand that could land here", never disjoint slices —
+    only ``totals`` counts each physical job exactly once. Per-row
+    ``eligible_*`` fields (exclusive + flexible) are therefore
+    deliberately non-additive across rows.
+
+    GPU demand follows this dashboard's stated cluster invariant: a GPU
+    job requests one node, so the demand a job contributes is its parsed
+    per-job GPU request (squeue ``gpus``, from %b / TresPerNode)
+    unchanged. ``totals`` carries ``unique_pending_jobs`` and
+    ``unique_gpus_requested``, each counted once per physical job.
 
     Each ``waiting_jobs`` record carries the parsed squeue fields plus
     ``groups`` (the eligible GPU types above, for client-side type
     filtering), ``wait_s`` — ``max(0, now - submit)`` in seconds when
-    the submit time parses, else ``null`` — and ``gpu_total``:
-    ``gpus * nodes`` when both are known, ``null`` for a GPU request
-    with unknown nodes, and ``0`` for a CPU-only job. The list holds
-    each included physical job once; the client filters by ``groups``.
+    the submit time parses, else ``null`` — and ``gpu_total``: the
+    job's parsed per-job GPU request (0 for a constraints-only GPU-
+    partition row). The list holds each included physical job once; the
+    client filters by ``groups``.
     """
-    out = defaultdict(lambda: {"jobs": 0, "gpus": 0, "gpus_unknown": 0,
-                               "gpus_min": 0})
+    out = defaultdict(lambda: {"exclusive_jobs": 0, "flexible_jobs": 0,
+                               "exclusive_gpus": 0, "flexible_gpus": 0})
+    totals = {"unique_pending_jobs": 0, "unique_gpus_requested": 0}
     waiting = []
     for job in jobs:
         groups = _pending_gpu_types(job, partition_types)
         if not groups:
             continue  # CPU-only: no GPU type it could run on
+        # Eligibility is complete before classification: one eligible
+        # type is exclusive; several make the job flexible in every
+        # eligible row. Rows overlap by design — the cluster totals are
+        # the only place each physical job counts exactly once.
+        kind = "exclusive" if len(groups) == 1 else "flexible"
+        gpu_demand = job["gpus"]
         for g in groups:
-            out[g]["jobs"] += 1
-        out["__total__"]["jobs"] += 1
-        if not job["gpus"]:
-            gpu_total = 0
-        else:
-            gpu_total = job["gpus"] * job["nodes"] if job["nodes"] else None
-        gpu_min = job["gpus"] * max(1, job["nodes"])
-        for key in groups + ["__total__"]:
-            if not job["gpus"]:
-                continue
-            if gpu_total is None:
-                out[key]["gpus_unknown"] += 1
-            else:
-                out[key]["gpus"] += gpu_total
-            out[key]["gpus_min"] += gpu_min
+            out[g][kind + "_jobs"] += 1
+            out[g][kind + "_gpus"] += gpu_demand
+        totals["unique_pending_jobs"] += 1
+        totals["unique_gpus_requested"] += gpu_demand
         submitted = _sacct_epoch(job["submit"])
         waiting.append({
             "jobid": job["jobid"],
@@ -436,20 +439,57 @@ def pending_queue_status(jobs, now, partition_types):
             "groups": groups,
             "wait_s": (max(0, int(now - submitted))
                        if submitted is not None else None),
-            "gpu_total": gpu_total,
+            "gpu_total": gpu_demand,
         })
-    for g in out.values():
-        if g["gpus_unknown"]:
-            # a per-node request is real demand even when %D is N/A:
-            # rather than a fabricated 0, the exact total becomes unknown
-            # (the one-node lower bound stays in gpus_min)
-            g["gpus"] = None
-        del g["gpus_unknown"]
-    return dict(out), waiting
+    return dict(out), totals, waiting
+
+
+_WAIT_BUCKETS = (
+    ("lt_5m", 300),
+    ("m5_to_30m", 1800),
+    ("m30_to_2h", 7200),
+    ("h2_to_12h", 43200),
+)
+
+
+def _wait_statistics(samples):
+    """Completed-job wait summary: percentiles, average, and buckets.
+
+    P50 is the ordinary median (mean of the two middle waits when the
+    sample count is even). P90 is nearest-rank (ceil(0.90 * n)), so the
+    reported percentile is always an observed wait. Buckets are
+    half-open: <5m, 5-30m, 30m-2h, 2-12h, >=12h.
+    """
+    ordered = sorted(samples)
+    buckets = {name: 0 for name, _ in _WAIT_BUCKETS}
+    buckets["gte_12h"] = 0
+    for wait in ordered:
+        for name, upper in _WAIT_BUCKETS:
+            if wait < upper:
+                buckets[name] += 1
+                break
+        else:
+            buckets["gte_12h"] += 1
+    if not ordered:
+        return {"wait_p50_s": None, "wait_p90_s": None,
+                "wait_avg_s": None, "wait_samples": 0,
+                "wait_buckets": buckets}
+    middle = len(ordered) // 2
+    p50 = (ordered[middle] if len(ordered) % 2
+           else round((ordered[middle - 1] + ordered[middle]) / 2))
+    p90 = ordered[-(-9 * len(ordered) // 10) - 1]
+    return {"wait_p50_s": p50, "wait_p90_s": p90,
+            "wait_avg_s": round(sum(ordered) / len(ordered)),
+            "wait_samples": len(ordered), "wait_buckets": buckets}
+
+
+def wait_empty():
+    """The zero-sample wait-statistics shape (all null / all zero)."""
+    return _wait_statistics([])
 
 
 def started_wait_summary(job_groups, window_start, window_end):
-    """Actual Submit → Start wait averaged per group over started jobs.
+    """Completed-job Submit → Start wait statistics per group.
 
     ``job_groups`` maps each Prometheus-observed job ID to its canonical
     group(s) — the same pairing that built the partition rows. The union
@@ -458,13 +498,12 @@ def started_wait_summary(job_groups, window_start, window_end):
     records whose ``submit`` and ``start`` both parse, whose start falls
     inclusively inside ``[window_start, window_end]``, and whose start is
     not before submit contribute. Invalid or missing times are excluded
-    from numerator and denominator alike, never read as 0. Returns
-    ``{group: {started_jobs, avg_wait_s}, "__total__": {...}}`` with
-    ``avg_wait_s`` integer-rounded, or ``None`` when no valid job exists;
-    an empty valid set yields ``started_jobs: 0, avg_wait_s: None``.
+    from every statistic, never read as 0. Returns
+    ``{group: {"wait_p50_s", "wait_p90_s", "wait_avg_s",
+    "wait_samples", "wait_buckets"}, "__total__": {...}}``.
     """
     ids = sorted(set(job_groups))
-    default_total = {"started_jobs": 0, "avg_wait_s": None}
+    default_total = wait_empty()
     if not ids:
         return {"__total__": dict(default_total)}
     records = deps.route_cache.get_or_set(
@@ -488,9 +527,6 @@ def started_wait_summary(job_groups, window_start, window_end):
         wait = int(started - submitted)
         for g in job_groups[jobid]:
             waits[g].append(wait)
-        waits["__total__"].append(wait)
-    if not waits:
-        return {"__total__": dict(default_total)}
-    return {g: {"started_jobs": len(samples),
-                "avg_wait_s": round(sum(samples) / len(samples))}
-            for g, samples in waits.items()}
+        waits[WAIT_TOTAL_KEY].append(wait)
+    names = set(waits) | {WAIT_TOTAL_KEY}
+    return {name: _wait_statistics(waits.get(name, [])) for name in names}

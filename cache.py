@@ -125,5 +125,3 @@ def node_detail_key(name, view, start):
     return ("nodedetail", name, view, start)
 
 
-def queue_pending_key():
-    return "queue_pending"
