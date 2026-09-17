@@ -1241,31 +1241,31 @@ def test_partitions_queue_cache_hit_filters_on_fetched_bounds(
                                     "complete": True})
 
     monkeypatch.setattr(deps, "completed_jobs", fake_completed)
+    # A 168-hour window contains the newest fixture records: with the
+    # cached bounds dropped, the recomputed (advanced-clock) window would
+    # start a day later and drop them, so the pre-fix route fails here.
     first = client.get("/api/partitions/queue",
-                       params={"since_hours": 24}).json()
+                       params={"since_hours": 168}).json()
+    first_samples = first["queue"]["h200"]["wait_samples"]
+    assert first_samples > 0
     first_examined = first["wait_history_coverage"]["records_examined"]
-    # Advance the clock past the TTL window's tail, then reload: the
-    # accounting cache entry (300s TTL) must survive and serve the
-    # ORIGINAL fetched bounds, while the shorter partition-window cache
-    # (60s) expires so the queue recomputes its live window at the new
-    # time. If the accounting payload dropped its bounds, this hit would
-    # filter against the advanced window and lose every recent record.
+
+    # Advance the live clock past the TTL window's tail, and expire the
+    # partition-window cache (60s) by advancing the cache's monotonic
+    # clock 120s (< the 300s accounting TTL): the second request's window
+    # recomputes at the advanced time while the accounting entry stays a
+    # hit serving its fetched bounds.
     now_marker = _epoch("2026-09-06T00:00:00")
     monkeypatch.setattr(deps, "now", lambda: now_marker)
-    # Expire only the partition-window cache (60s TTL): advance the
-    # cache's monotonic clock by 120s (< the 300s accounting TTL) so the
-    # second request recomputes its live window at the advanced time
-    # while the accounting entry stays a hit serving its fetched bounds.
     base_mono = cache_module.time.monotonic()
     monkeypatch.setattr(cache_module.time, "monotonic",
                         lambda: base_mono + 120)
     second = client.get("/api/partitions/queue",
-                        params={"since_hours": 24}).json()
+                        params={"since_hours": 168}).json()
     assert len(calls) == 1  # served from the TTL cache, not refetched
+    assert second["queue"]["h200"]["wait_samples"] == first_samples
     assert second["wait_history_coverage"]["records_examined"] == \
         first_examined
-    assert second["queue"]["h200"]["wait_samples"] == \
-        first["queue"]["h200"]["wait_samples"]
 
 
 def test_partitions_core_response_has_no_queue_fields(client, fake_prom):
