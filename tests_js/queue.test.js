@@ -82,16 +82,18 @@ async function boot(opts, importCacheBust) {
   // History object here keeps the runner's event loop alive after every
   // booted test (the leak that hung the suite).
   global.history = { pushState() {}, replaceState() {} };
-  // panel.js's freshness timer plus the queue poller: capture the
-  // callbacks so tests can drive ticks manually (jsdom timers are
-  // stubbed to keep the runner from hanging).
-  boot.clearedIds = boot.clearedIds || [];
-  boot.intervals = boot.intervals || [];
+  // Capture interval callbacks for opts.progress404 tests so they can
+  // drive ticks manually (jsdom timers are stubbed to keep the runner
+  // from hanging). Fresh arrays per boot: shared arrays would let a
+  // later test inherit a prior boot's captured clear and pass the
+  // circuit-breaker assertion without its own poller clearing anything.
+  const intervals = [];
+  const clearedIds = [];
   global.setInterval = opts.progress404
-    ? (fn) => { boot.intervals.push(fn); return boot.intervals.length; }
+    ? (fn) => { intervals.push(fn); return intervals.length; }
     : () => 0;
   global.clearInterval = opts.progress404
-    ? (id) => { boot.clearedIds.push(id); }
+    ? (id) => { clearedIds.push(id); }
     : () => {};
   global.Plotly = { newPlot: () => {}, react: () => {} };
 
@@ -145,7 +147,7 @@ async function boot(opts, importCacheBust) {
   // or the gated-queue test would invoke the initial no-op forever.
   return { dom, mod, urls,
            releaseQueue: (...args) => releaseQueue(...args),
-           intervals: boot.intervals, clearedIds: boot.clearedIds };
+           intervals, clearedIds };
 }
 
 function bootAndWait(opts, bust) {

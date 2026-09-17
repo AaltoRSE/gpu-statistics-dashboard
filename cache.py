@@ -97,6 +97,16 @@ def sacct_key(job_ids):
     return ("sacct", tuple(sorted(job_ids)))
 
 
+def sacct_resilient_key(job_ids):
+    """Cache key for the resilient enrichment's (dict, failed) tuple.
+
+    Deliberately distinct from :func:`sacct_key`: that key holds the plain
+    dict the Jobs list/detail paths consume, and storing the tuple under it
+    would hand the other consumer the wrong shape for the cache's TTL.
+    """
+    return ("sacct_resilient", tuple(sorted(job_ids)))
+
+
 def scontrol_jobs_key():
     return "scontrol_jobs"
 

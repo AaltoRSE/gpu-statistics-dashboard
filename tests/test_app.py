@@ -1434,6 +1434,29 @@ def test_slurm_error_maps_to_502(client, fake_prom, monkeypatch):
     assert r.json()["error"] == "slurm_unreachable"
 
 
+def test_partitions_vram_counts_zero_hour_rows_as_enriched(
+        client, fake_prom, monkeypatch):
+    # A sacct row with a valid allocation and elapsed 00:00:00 (Slurm's
+    # just-started report) is resolved accounting, not a gap: it must
+    # count as coverage and emit 0.0 GPU-hours, not null.
+    def zero_row(ids, start_iso=None, **kw):
+        meta = {}
+        if "1" in ids:
+            row = dict(SACCT["1"])
+            row["elapsed_s"] = 0
+            meta["1"] = row
+        return meta, 0
+
+    monkeypatch.setattr(deps, "sacct_jobs_resilient", zero_row)
+    data = client.get("/api/partitions/vram",
+                      params={"since_hours": 24}).json()
+    by_job = {j["jobid"]: j for j in data["jobs"]}
+    assert by_job["1"]["gpu_hours"] == 0.0
+    # Only the records the stub resolved count; others stay null gaps.
+    assert 0 < data["enriched_frac"] < 1
+    assert data["failed_batches"] == 0
+
+
 def test_prometheus_error_maps_to_502(client, fake_prom, monkeypatch):
     def boom():
         raise appmod.PrometheusError("prometheus down")

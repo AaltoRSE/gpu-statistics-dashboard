@@ -87,7 +87,10 @@ def vram_job_records(since_hours, running_only=False, partition="",
     failed_batches = 0
     if ids:
         meta, failed_batches = deps.route_cache.get_or_set(
-            cache.sacct_key(ids), 300,
+            # A distinct key: sacct_key holds the plain dict the Jobs
+            # paths consume; storing the (dict, failed) tuple under it
+            # would hand the other consumer the wrong shape for the TTL.
+            cache.sacct_resilient_key(ids), 300,
             # Two workers: 2000 IDs mean 20 sequential 100-ID sacct calls
             # per failed batch, so low concurrency keeps the load bounded
             # instead of saturating slurmdbd with 8 parallel lookups.
@@ -95,7 +98,12 @@ def vram_job_records(since_hours, running_only=False, partition="",
         enriched = 0
         for r in records:
             row = meta.get(r["jobid"]) or {}
-            if row.get("gpus") and row.get("elapsed_s"):
+            # Key presence, not truthiness: a valid row with elapsed 0
+            # (Slurm reports 00:00:00 for a just-started job) resolved
+            # fine and must count as coverage, emitting 0.0 GPU-hours.
+            # But elapsed data must be PRESENT: a row without it is an
+            # unresolved record, not a zero-hour one.
+            if row.get("gpus") and row.get("elapsed_s") is not None:
                 r["gpu_hours"] = round(row["gpus"] * row["elapsed_s"] / 3600.0, 2)
                 enriched += 1
         # The client discloses enrichment coverage: gpu_hours nulls in the
