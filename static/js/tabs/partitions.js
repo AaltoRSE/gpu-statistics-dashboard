@@ -113,11 +113,6 @@ export async function loadPartitions() {
  * wait history. It is slower than the metrics endpoint, so it renders
  * under its own loading overlay whenever its response lands. */
 let queueToken = 0;
-let queueProgressTimer = null;
-
-function stopPollTimer() {
-  clearInterval(queueProgressTimer);
-}
 
 async function loadPartitionQueue() {
   const token = ++queueToken;
@@ -127,7 +122,7 @@ async function loadPartitionQueue() {
   // Poll the accounting progress endpoint while the queue request runs, so
   // the seven-day wait-history fetch shows real batch progress instead of
   // an opaque spinner. The poll stops when the queue response lands.
-  queueProgressTimer = setInterval(async () => {
+  const pollTimer = setInterval(async () => {
     try {
       const prog = await api("/api/partitions/queue/progress?" + params);
       if (token === queueToken && prog && prog.total) {
@@ -139,14 +134,14 @@ async function loadPartitionQueue() {
   try {
     data = await api("/api/partitions/queue?" + params);
   } catch (e) {
-    stopPollTimer();
+    clearInterval(pollTimer);
     if (token === queueToken) {
       setResultsLoading("queueResults", false);
       showPanelError("queueResults", e, loadPartitionQueue, "the pending-jobs queue");
     }
     return;
   }
-  stopPollTimer();
+  clearInterval(pollTimer);
   if (token !== queueToken) return; // a newer request supersedes this one
   panelOk("queueResults");
   const q = data.queue || {};
