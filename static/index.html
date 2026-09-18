@@ -78,7 +78,7 @@
           <div id="jobDetailPlot" class="chart tall"></div>
         </div>
       </div>
-      <div class="results-loading">Data is loading&hellip;</div>
+      <div class="results-loading">Loading job detail history&hellip;</div>
     </div>
     <div id="jobExplorer" class="collapsible">
       <div class="explorer-head">
@@ -100,7 +100,7 @@
           <span class="legend-key" style="background:var(--ok)"></span> &ge;75%
         </div>
       </div>
-      <div class="results-loading">Data is loading&hellip;</div>
+      <div class="results-loading">Loading job history&hellip;</div>
     </div>
     <div id="jobsResults" class="results-panel loading">
       <div class="results-content">
@@ -122,7 +122,7 @@
           <div class="hint">GPU utilization = average utilization of the job&rsquo;s GPUs over the window (not biased by duration). Click a column header to sort.</div>
         </div>
       </div>
-      <div class="results-loading">Data is loading&hellip;</div>
+      <div class="results-loading">Loading job history&hellip;</div>
     </div>
       </div>
     </div>
@@ -187,7 +187,7 @@
         <div class="hint">Mean utilization is time-weighted over the window; GPU devices are collapsed to a per-job/per-node max, so it measures &ldquo;how busy&rdquo; rather than aggregate GPU-hours. Mean occupancy is the window-average share of the type&rsquo;s capacity with an active job. GPUs show allocated/total capacity of every node carrying the type. Select a type to scope the trend and the VRAM distribution to it.</div>
       </div>
       </div>
-      <div class="results-loading">Data is loading&hellip;</div>
+      <div class="results-loading">Loading GPU utilization history&hellip;</div>
     </div>
 
 
@@ -246,7 +246,7 @@
           </div>
         </div>
       </div>
-      <div class="results-loading">Data is loading&hellip;</div>
+      <div class="results-loading">Loading current queue and wait history&hellip;</div>
     </div>
 
 
@@ -275,7 +275,7 @@
         <div class="hint" id="vramMeta"></div>
         </div>
       </div>
-      <div class="results-loading">Data is loading&hellip;</div>
+      <div class="results-loading">Loading VRAM history&hellip;</div>
     </div>
   </section>
 
@@ -333,7 +333,7 @@
           <div class="hint">GPU-hours = utilization-weighted GPU-hours over the window (mean util &times; GPU time); the selected user&rsquo;s job table below shows allocation-based effective GPU-hours. The user box filters the list as you type (no fetch). Press Enter &mdash; or click a table row &mdash; to finalize the selection; only then are that user&rsquo;s jobs fetched below. Click a column header to sort.</div>
         </div>
       </div>
-      <div class="results-loading">Data is loading&hellip;</div>
+      <div class="results-loading">Loading user history&hellip;</div>
     </div>
     <div id="userJobsResults" class="results-panel" style="display:none">
       <div class="results-content">
@@ -355,7 +355,7 @@
           <div class="hint">Click a row for the job&rsquo;s detail chart.</div>
         </div>
       </div>
-      <div class="results-loading">Data is loading&hellip;</div>
+      <div class="results-loading">Loading selected-user job history&hellip;</div>
     </div>
   </section>
 
@@ -419,7 +419,7 @@
         <div id="nodeDetailVramPlot" class="chart"></div>
       </div>
       </div>
-      <div class="results-loading">Data is loading&hellip;</div>
+      <div class="results-loading">Loading node history&hellip;</div>
     </div>
   </section>
 </main>

@@ -152,6 +152,17 @@ def completed_progress_key(since_hours):
     return ("completed_progress", since_hours)
 
 
+def vram_progress_key(since_hours, running_only, partition):
+    """The stable VRAM enrichment progress-store key.
+
+    Like the accounting progress key, it must resolve to exactly one
+    in-flight fetch: the enrichment batches over distinct job-ID sets per
+    window/running/partition view, so a poll for one Partitions view must
+    never read another view's batch state.
+    """
+    return ("vram_progress", since_hours, bool(running_only), partition)
+
+
 def node_current_key():
     return "node_current"
 

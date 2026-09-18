@@ -32,7 +32,7 @@ let userJobsToken = 0;
 
 export async function loadUsers() {
   const token = ++usersToken;
-  setResultsLoading("usersResults", true);
+  setResultsLoading("usersResults", true, "Loading user history…");
   try {
     const data = await api("/api/users?since_hours=" + $("uWindow").value);
     if (token !== usersToken) return;
@@ -148,7 +148,7 @@ async function loadUserJobs(user) {
   $("userJobsResults").style.display = "block";
   $("userJobsTitle").textContent =
     "Jobs · " + user + " · last " + $("uWindow").value / 24 + " d";
-  setResultsLoading("userJobsResults", true);
+  setResultsLoading("userJobsResults", true, "Loading selected-user job history…");
   const params = new URLSearchParams({
     since_hours: $("uWindow").value, user, limit: "500",
   });

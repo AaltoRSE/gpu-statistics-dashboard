@@ -9,7 +9,7 @@
 
 import { $, isPlainClick } from "../core/dom.js";
 import { escapeHtml, fmt, fmtInt, pctBar, html, raw, compareStrings, tsToDate, partitionLink, fmtDuration, fmtSacctTime, jobLink, userLink } from "../core/format.js";
-import { setResultsLoading, showPanelError, panelOk } from "../core/panel.js";
+import { setResultsLoading, setResultsLoadingMessage, showPanelError, panelOk } from "../core/panel.js";
 import { renderPlot, plotTheme, partBarColor } from "../core/plot.js";
 import { api } from "../core/api.js";
 import { loaded, setUrl, openPartition, openJob, openUser } from "../core/router.js";
@@ -69,7 +69,7 @@ export function applyPartitionSelection(name) {
 
 export async function loadPartitions() {
   const token = ++partitionsToken;
-  setResultsLoading("partitionsResults", true);
+  setResultsLoading("partitionsResults", true, "Loading GPU utilization history…");
   // The queue is a separate, slower endpoint (squeue + sacct): start it
   // immediately so both requests are in flight together, and never let
   // its completion gate the Prometheus-backed charts below.
@@ -116,41 +116,28 @@ let queueToken = 0;
 
 async function loadPartitionQueue() {
   const token = ++queueToken;
-  setResultsLoading("queueResults", true);
+  setResultsLoading("queueResults", true, "Loading current queue and wait history…");
   const params = new URLSearchParams({ since_hours: $("pWindow").value });
   if ($("pRunning").checked) params.set("running_only", "true");
   // Poll the accounting progress endpoint while the queue request runs, so
   // the long-window wait-history fetch shows real batch progress instead of
   // an opaque spinner. The poll stops when the queue response lands.
-  const pollTimer = setInterval(async () => {
-    try {
-      const resp = await fetch("/api/partitions/queue/progress?" + params);
-      if (resp.status === 404) {
-        // A stale backend without the progress route: stop hammering it
-        // every second — the queue request itself still decides the
-        // panel's outcome.
-        clearInterval(pollTimer);
-        return;
-      }
-      if (!resp.ok) return;
-      const prog = await resp.json();
-      if (token === queueToken && prog && prog.total) {
-        setQueueProgress(prog.done, prog.total, prog.failed_batches);
-      }
-    } catch (_) { /* progress is best-effort; the queue result decides */ }
-  }, 1000);
+  const stopPolling = pollProgress("/api/partitions/queue/progress?" + params,
+    () => token === queueToken,
+    (prog) => setQueueProgress(prog.done, prog.total,
+                              prog.failed_batches));
   let data;
   try {
     data = await api("/api/partitions/queue?" + params);
   } catch (e) {
-    clearInterval(pollTimer);
+    stopPolling();
     if (token === queueToken) {
       setResultsLoading("queueResults", false);
       showPanelError("queueResults", e, loadPartitionQueue, "the pending-jobs queue");
     }
     return;
   }
-  clearInterval(pollTimer);
+  stopPolling();
   if (token !== queueToken) return; // a newer request supersedes this one
   panelOk("queueResults");
   const q = data.queue || {};
@@ -170,11 +157,38 @@ async function loadPartitionQueue() {
 }
 
 export function setQueueProgress(done, total, failed) {
-  const panel = $("queueResults");
-  const chip = panel.querySelector(".results-loading");
-  if (!chip) return;
-  chip.innerHTML = escapeHtml("Loading wait history: batch " + done + " of "
-    + total + (failed ? " (" + failed + " failed)" : "") + "&hellip;");
+  setResultsLoadingMessage("queueResults", batchText(
+    "Loading wait history", done, total, failed));
+}
+
+// Plain-text batch progress line. The ellipsis is the literal character:
+// an escaped "&hellip;" would render as the visible word "hellip".
+function batchText(prefix, done, total, failed) {
+  return prefix + ": batch " + done + " of " + total
+    + (failed ? " (" + failed + " failed)" : "") + "…";
+}
+
+// Best-effort once-a-second progress polling for a batched fetch: calls
+// onUpdate with each poll's batch state while isCurrent holds, stops
+// itself after a 404 (a stale backend without the progress route must
+// not be hammered every second), ignores any other error, and returns
+// the cleanup function every success/error/supersession path must call.
+// The token gate keeps a late poll from a superseded request from
+// overwriting the new request's reset label.
+function pollProgress(url, isCurrent, onUpdate) {
+  const pollTimer = setInterval(async () => {
+    try {
+      const resp = await fetch(url);
+      if (resp.status === 404) {
+        clearInterval(pollTimer);
+        return;
+      }
+      if (!resp.ok || !isCurrent()) return;
+      const prog = await resp.json();
+      if (isCurrent() && prog && prog.total) onUpdate(prog);
+    } catch (_) { /* progress is best-effort; the request decides */ }
+  }, 1000);
+  return () => clearInterval(pollTimer);
 }
 
 function renderPartBar() {
@@ -548,20 +562,25 @@ let vramToken = 0;
 let vramGpuType = "";
 let vramEnrichedFrac = 1.0; // sacct enrichment coverage of the returned records
 let vramFailedBatches = 0; // sacct batches that failed after retrying
-
 export async function loadVram() {
   const token = ++vramToken;
   // The VRAM fetch blurs only the VRAM panel (vramResults), never the whole
   // partitions tab: window / running-only / GPU-type changes here must not
   // freeze the other graphs.
   const origin = partitionsToken;
-  setResultsLoading("vramResults", true);
+  setResultsLoading("vramResults", true, "Loading VRAM history…");
+  const params = new URLSearchParams({ since_hours: $("pWindow").value });
+  if ($("pRunning").checked) params.set("running_only", "true");
+  if (selectedPartition) params.set("partition", selectedPartition);
+  // The chart shows allocated vs effective directly; the backend weight
+  // param (cap ordering) keeps its default.
+  const stopPolling = pollProgress(
+    "/api/partitions/vram/progress?" + params,
+    () => token === vramToken,
+    (prog) => setResultsLoadingMessage("vramResults", batchText(
+      "Enriching VRAM history", prog.done, prog.total,
+      prog.failed_batches)));
   try {
-    const params = new URLSearchParams({ since_hours: $("pWindow").value });
-    if ($("pRunning").checked) params.set("running_only", "true");
-    if (selectedPartition) params.set("partition", selectedPartition);
-    // The chart shows allocated vs effective directly; the backend weight
-    // param (cap ordering) keeps its default.
     const data = await api("/api/partitions/vram?" + params);
     if (token !== vramToken) return; // a newer VRAM request supersedes this one
     panelOk("vramResults");
@@ -575,6 +594,7 @@ export async function loadVram() {
     if (token === vramToken && origin === partitionsToken)
       showPanelError("vramResults", e, loadVram, "the VRAM distribution");
   } finally {
+    stopPolling();
     if (token === vramToken && origin === partitionsToken)
       setResultsLoading("vramResults", false);
   }

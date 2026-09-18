@@ -564,6 +564,8 @@ def completed_jobs(start_iso, end_iso, progress=None):
         chunks.append((cursor, chunk_end))
         cursor = chunk_end
     total = len(chunks)
+    if progress:
+        progress({"done": 0, "total": total, "failed_batches": 0})
     for index, (chunk_start, chunk_end) in enumerate(chunks):
         chunk_start_iso = chunk_start.isoformat(timespec="seconds")
         chunk_end_iso = chunk_end.isoformat(timespec="seconds")
@@ -606,38 +608,51 @@ def sacct_jobs(job_ids, start_iso=None, workers=8):
     return enriched
 
 
-def sacct_jobs_resilient(job_ids, start_iso=None, workers=8):
+def sacct_jobs_resilient(job_ids, start_iso=None, workers=8, progress=None):
     """``sacct_jobs`` plus failed-batch accounting, for callers that
     disclose partial coverage instead of failing the whole enrichment.
 
     Each 100-ID batch retries once; a batch that still fails is counted in
     the returned tuple instead of discarding every other batch's records
     (one slow slurmdbd response must not 502 a 2000-job enrichment).
+    ``progress`` receives ``{"done", "total", "failed_batches"}`` before
+    the first batch (``done=0``) and once per finished batch — the same
+    batched-progress contract as ``completed_jobs``.
     """
     job_ids = sorted(set(job_ids))
     if not job_ids:
         return {}, 0
     batches = [job_ids[i : i + 100] for i in range(0, len(job_ids), 100)]
-    results = {}
     failed_batches = 0
+    if progress:
+        progress({"done": 0, "total": len(batches),
+                  "failed_batches": 0})
 
     def fetch(batch):
-        nonlocal failed_batches
         try:
             for attempt in range(2):
                 try:
-                    return _sacct_batch(batch, start_iso)
+                    return _sacct_batch(batch, start_iso), 0
                 except SlurmError:
                     if attempt:
                         raise
         except SlurmError:
-            failed_batches += 1
-            return {}
+            return {}, 1
 
+    done = 0
+    # Count failures and merge rows in the collecting thread, never in the
+    # workers: the counter must stay exact under concurrent batches.
+    results = {}
     with ThreadPoolExecutor(max_workers=workers) as pool:
-        for chunk in pool.map(fetch, batches):
-            results.update(chunk)
+        for rows, failed in pool.map(fetch, batches):
+            done += 1
+            failed_batches += failed
+            results.update(rows)
+            if progress:
+                progress({"done": done, "total": len(batches),
+                          "failed_batches": failed_batches})
     enriched = {}
     for jobid, row in results.items():
         enriched[jobid] = _enrich_sacct_row(row)
     return enriched, failed_batches
+
