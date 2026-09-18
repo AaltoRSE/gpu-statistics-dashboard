@@ -15,6 +15,7 @@
 "use strict";
 
 import { $ } from "./dom.js";
+import { setActiveFreshnessPanel } from "./panel.js";
 import * as jobsTab from "../tabs/jobs.js";
 import * as usersTab from "../tabs/users.js";
 import * as partitionsTab from "../tabs/partitions.js";
@@ -29,12 +30,25 @@ export const loaded = { jobs: false, partitions: false, users: false, nodes: fal
 // here covers all of them in one place.
 const TAB_TITLES = { jobs: "Jobs", partitions: "Partitions", users: "Users", nodes: "Nodes" };
 
+// The header freshness stamp represents the ACTIVE tab's primary
+// panel (data is loaded once per window and shared server-side, so a
+// page-wide "when was this loaded" belongs in one place). A
+// background/detail panel (queue, VRAM, job detail, selected-user
+// jobs, node detail) never replaces the header identity.
+const MAIN_RESULTS_BY_TAB = {
+  jobs: "jobsResults",
+  partitions: "partitionsResults",
+  users: "usersResults",
+  nodes: "nodesResults",
+};
+
 export function showTab(name) {
   document.querySelectorAll("nav.tabs button").forEach((b) =>
     b.classList.toggle("active", b.dataset.tab === name));
   document.querySelectorAll(".tabpage").forEach((p) =>
     p.classList.toggle("active", p.id === "tab-" + name));
   document.title = (TAB_TITLES[name] || "Dashboard") + " — Triton GPU Efficiency Dashboard";
+  setActiveFreshnessPanel(MAIN_RESULTS_BY_TAB[name] || null);
   let p = Promise.resolve();
   if (name === "jobs" && !loaded.jobs) p = jobsTab.loadJobs();
   if (name === "partitions" && !loaded.partitions) p = partitionsTab.loadPartitions();
@@ -110,32 +124,45 @@ export function restoreFromUrl() {
   if (location.pathname === "/nodes") { showTab("nodes"); return; }
 }
 
-// Auto-refresh (T-22, main.js's onTick): re-fetch whichever tab is
-// currently visible. Skips the tick entirely while any of that tab's own
-// results panels is mid-load — a stricter reading of "never auto-refresh
-// while a detail panel is loading" that also avoids stacking a fresh fetch
-// on top of any in-flight one, detail or not — rather than queuing it; the
-// next tick (or the return-to-visibility catch-up) covers it. Only ever
-// touches the active tab's own list, never an open detail panel — the
-// freshness clock next to its own panel is what tells the operator a job/
-// node detail may be stale.
+// Re-fetch whichever tab is currently visible — the one entry point the
+// auto-refresh timer (force=false, cache-friendly) and the header's
+// global refresh button (force=true, bypass caches) share. Skips the
+// tick entirely while any of that tab's own results panels is mid-load —
+// a stricter reading of "never auto-refresh while a detail panel is
+// loading" that also avoids stacking a fresh fetch on top of any
+// in-flight one, detail or not — rather than queuing it; the next tick
+// (or the return-to-visibility catch-up) covers it. Only ever touches
+// the active tab's own list, never an open detail panel — the header
+// freshness stamp is what tells the operator a job/node detail may be
+// stale.
 //
 // The loading check is scoped to `active` (the tabpage element), not the
 // whole document: every tab's results panel starts with a static
 // class="results-panel loading" in the HTML, on the assumption that its
 // own loader clears it on first load — a tab that has never been visited
 // still carries that class, and a document-wide check would see it and
-// refuse to auto-refresh any OTHER tab, forever, until every tab had been
-// opened at least once.
-export function refreshActiveTab() {
+// refuse to auto-refresh any OTHER tab, forever, until every tab had
+// been opened at least once.
+//
+// force=true semantics per tab: Jobs sends refresh=true (backend
+// invalidates its shared utilization/VRAM source entries), Users sends
+// the same refresh parameter, Nodes keeps its refresh=true snapshot
+// semantics, and Partitions refreshes the core charts and VRAM (the
+// pending queue keeps its own 300 s accounting cadence — documented in
+// the button's title). Returns the loader promise so the header button
+// can stay disabled until the reload settles.
+export function refreshActiveTab(force = false) {
   const active = document.querySelector(".tabpage.active");
-  if (!active) return;
-  if (active.querySelector(".results-panel.loading")) return;
+  if (!active) return Promise.resolve();
+  if (active.querySelector(".results-panel.loading")) {
+    return Promise.resolve();
+  }
   const name = active.id.replace(/^tab-/, "");
-  if (name === "jobs") jobsTab.loadJobs();
-  else if (name === "partitions") partitionsTab.loadPartitions();
-  else if (name === "users") usersTab.loadUsers();
-  else if (name === "nodes") nodesTab.loadNodes();
+  if (name === "jobs") return jobsTab.loadJobs(force);
+  if (name === "partitions") return partitionsTab.loadPartitions(force);
+  if (name === "users") return usersTab.loadUsers(force);
+  if (name === "nodes") return nodesTab.loadNodes(force);
+  return Promise.resolve();
 }
 
 export function rerenderAllPlots() {

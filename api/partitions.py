@@ -57,12 +57,22 @@ def _queue_snapshot(now, partition_types):
 
 @router.get("/api/partitions", response_model=PartitionsResponse)
 def api_partitions(since_hours: float = Query(24, gt=0, le=168),
-                   running_only: bool = Query(False)):
+                   running_only: bool = Query(False),
+                   refresh: bool = Query(False)):
     # Three independent sources, fetched concurrently: the scontrol node
     # snapshot, the partition-window Prometheus series, and the live
     # node-current Prometheus snapshot. Each is cached on its own key
     # (TtlCache single-flights concurrent misses); aggregation needs
     # node types, so it runs after the futures resolve.
+    if refresh:
+        # Forced refresh (the header's global button) bypasses the core
+        # charts' window cache and the Prometheus client cache. The
+        # pending queue keeps its own accounting cadence — a forced
+        # charts refresh must not wipe a wait-history fetch another
+        # viewer is watching progress on.
+        deps.get_prom().clear_cache()
+        deps.route_cache.invalidate(cache.partition_window_key(
+            since_hours, running_only))
     with ThreadPoolExecutor(max_workers=3) as executor:
         nodes_future = executor.submit(
             deps.route_cache.get_or_set,
@@ -243,12 +253,17 @@ def api_partition_queue_progress(since_hours: float = Query(24, gt=0, le=168),
 def api_part_vram(since_hours: float = Query(24, gt=0, le=168),
                   running_only: bool = Query(False),
                   partition: str = "",
-                  weight: str = Query("alloc", pattern="^(alloc|eff)$")):
-    # Two independent sources, fetched concurrently: the scontrol node
-    # snapshot (for GPU-group resolution) and the VRAM raw records (the
-    # shared utilization window plus the VRAM peaks query). Finalization
-    # — grouping, live/partition filters, cap, sacct enrichment — needs
-    # node types, so it runs after both futures resolve.
+                  weight: str = Query("alloc", pattern="^(alloc|eff)$"),
+                  refresh: bool = Query(False)):
+    if refresh:
+        # Forced refresh (the header's global button) bypasses the VRAM
+        # peaks cache and the shared utilization window it builds on.
+        # job_vram_key is NOT invalidated here: the VRAM records route
+        # never consumes that source (its peaks live under vram_key).
+        deps.get_prom().clear_cache()
+        deps.route_cache.invalidate(
+            cache.vram_key(since_hours, running_only),
+            cache.job_utilization_key(since_hours, None))
     live = None
     if running_only:
         live = running_gpu_job_ids()

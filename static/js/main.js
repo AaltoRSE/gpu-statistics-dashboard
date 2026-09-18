@@ -48,6 +48,20 @@ document.querySelectorAll("nav.tabs button").forEach((b) =>
     setUrl("/" + b.dataset.tab);
   }));
 
+// The ONE refresh control (the per-tab buttons are gone): force-reload
+// the active tab's data, bypassing the server's window caches, and keep
+// the button disabled until the reload settles. Auto-refresh ticks call
+// refreshActiveTab() without force, so they stay cache-friendly.
+$("globalRefresh").addEventListener("click", async () => {
+  const button = $("globalRefresh");
+  button.disabled = true;
+  try {
+    await refreshActiveTab(true);
+  } finally {
+    button.disabled = false;
+  }
+});
+
 checkHealth();
 if (location.pathname === "/" || location.pathname === "") {
   // showTab (not loadJobs directly) so the root path also gets the

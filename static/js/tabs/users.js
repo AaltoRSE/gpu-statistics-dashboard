@@ -30,11 +30,16 @@ let userJobs = [];
 let usersToken = 0;
 let userJobsToken = 0;
 
-export async function loadUsers() {
+export async function loadUsers(force = false) {
   const token = ++usersToken;
-  setResultsLoading("usersResults", true);
+  setResultsLoading("usersResults", true, "Loading user history…");
   try {
-    const data = await api("/api/users?since_hours=" + $("uWindow").value);
+    // force=true (the header's global refresh) bypasses the server's
+    // shared window caches; the ordinary path renders whatever the
+    // 60 s TTL cache serves.
+    const refresh = force ? "&refresh=true" : "";
+    const data = await api(
+      "/api/users?since_hours=" + $("uWindow").value + refresh);
     if (token !== usersToken) return;
     panelOk("usersResults");
     userRows = data.users;
@@ -46,7 +51,7 @@ export async function loadUsers() {
     loaded.users = true;
   } catch (e) {
     if (token === usersToken)
-      showPanelError("usersResults", e, loadUsers, "the user list");
+      showPanelError("usersResults", e, () => loadUsers(), "the user list");
   } finally {
     if (token === usersToken) setResultsLoading("usersResults", false);
   }
@@ -246,7 +251,6 @@ $("uRunning").addEventListener("change", () => {
   renderUserTable();
   if (userSelected) loadUserJobs(userSelected);
 });
-$("uRefresh").addEventListener("click", loadUsers);
 $("userSelectedClear").addEventListener("click", () => finalizeUser(""));
 $("uSearch").addEventListener("input", renderUserTable);
 $("uSearch").addEventListener("keydown", (e) => {
