@@ -615,6 +615,30 @@ def test_jobs_refresh_scoped_to_requested_user(client, fake_prom):
     assert len(vram_new) == 1
 
 
+def test_cached_window_hit_reports_fetched_window(client, fake_prom,
+                                                  monkeypatch):
+    # A route_cache hit must report the window the cached samples were
+    # FETCHED for, not the caller's own recomputed envelope: advance the
+    # clock between the two calls and require the second response to keep
+    # the first (leader's) window instead of drifting with the clock.
+    r1 = client.get("/api/jobs", params={"since_hours": 24}).json()
+    monkeypatch.setattr(deps, "now", lambda: NOW + 30)
+    r2 = client.get("/api/jobs", params={"since_hours": 24}).json()
+    assert r2["window"] == r1["window"]
+    assert r2["window"]["end"] == NOW, (
+        "a cache hit's window drifted past the cached samples")
+
+
+def test_refresh_bypasses_window_cache_and_uses_new_clock(client, fake_prom,
+                                                          monkeypatch):
+    # Forced refresh invalidates the entry: the next response uses the
+    # caller's own (advanced) clock for its window.
+    client.get("/api/jobs", params={"since_hours": 24})
+    monkeypatch.setattr(deps, "now", lambda: NOW + 30)
+    r = client.get("/api/jobs",
+                   params={"since_hours": 24, "refresh": "true"}).json()
+    assert r["window"]["end"] == NOW + 30
+
 def test_users_refresh_invalidates_shared_sources(client, fake_prom):
     client.get("/api/users", params={"since_hours": 24})
     before = len([q for t, q in fake_prom.calls if t == "range"])

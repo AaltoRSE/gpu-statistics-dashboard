@@ -33,31 +33,39 @@ def fetch_job_window(since_hours, include_vram=True, user=None):
     sel = selector(label_eq("user", user)) if user else ""
 
     def fetch_utilization():
-        return deps.get_prom().query_range(
+        util = deps.get_prom().query_range(
             "max by (slurmjobid, instance, job, user, gpu_type) "
             "(slurm_job_utilization_gpu%s)" % sel,
             start, now, step,
         )
+        return util, start, now, step
+
+    # Cache the series TOGETHER WITH the window it was fetched for: a
+    # cache hit must report the samples' own window envelope, never a
+    # freshly recomputed one that drifts past the cached data (the
+    # envelope is the UI's displayed range).
+    util, start, now, step = deps.route_cache.get_or_set(
+        cache.job_utilization_key(since_hours, user), 60, fetch_utilization)
 
     def fetch_vram():
-        return deps.get_prom().query_range(
+        vram = deps.get_prom().query_range(
             "avg by (slurmjobid, instance, gpu) (slurm_job_memory_usage_gpu / "
             "slurm_job_memory_total_gpu * 100)",
             start, now, step,
         )
+        return vram, start, now, step
 
-    # Each get_or_set carries the window the series was fetched for, so a
-    # hit never pairs cached samples with a freshly recomputed ``now``.
-    util = deps.route_cache.get_or_set(
-        cache.job_utilization_key(since_hours, user), 60, fetch_utilization)
     vram = []
     if include_vram:
         # The VRAM series query carries NO user selector (per-job peaks,
         # not per-user), so its cache identity is user-independent: a
         # user-scoped Jobs request shares the same VRAM fetch as the
-        # global window instead of duplicating it.
+        # global window instead of duplicating it. The fetch reuses the
+        # RESOLVED utilization window above, so both cached series always
+        # share one window even when one entry is a hit and the other a
+        # miss.
         vram = deps.route_cache.get_or_set(
-            cache.job_vram_key(since_hours), 60, fetch_vram)
+            cache.job_vram_key(since_hours), 60, fetch_vram)[0]
     return _aggregate_job_window(util, vram, start, now, step)
 
 
