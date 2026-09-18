@@ -285,6 +285,7 @@
             <option value="24" selected>last 24 h</option>
             <option value="72">last 3 days</option>
             <option value="168">last 7 days</option>
+            <option value="720">last 30 days</option>
           </select>
         </label>
         <label>User
@@ -320,11 +321,39 @@
                 <th class="num" data-k="util_gpu_hours">GPU-hours<button type="button" class="glossary-btn" data-glossary="util-gpu-hours" title="What is this?">?</button></th>
                 <th class="num" data-k="vram_avg">VRAM %</th>
                 <th data-k="gpu_types">GPU types</th>
+                <th data-k="contact_count">Contacts</th>
               </tr></thead>
               <tbody></tbody>
             </table>
           </div>
           <div class="hint">GPU-hours = utilization-weighted GPU-hours over the window (mean util &times; GPU time); the selected user&rsquo;s job table below shows allocation-based effective GPU-hours. The user box filters the list as you type (no fetch). Press Enter &mdash; or click a table row &mdash; to finalize the selection; only then are that user&rsquo;s jobs fetched below. Click a column header to sort.</div>
+        </div>
+      </div>
+      <div class="results-loading">Data is loading&hellip;</div>
+    </div>
+    <div id="userActivityResults" class="results-panel" style="display:none">
+      <div class="results-content">
+        <div class="card">
+          <h2 id="userActivityTitle">Utilization history</h2>
+          <div class="small" id="userContactsStatus"></div>
+          <div class="table-scroll compact">
+            <table id="userContactsTable">
+              <thead><tr><th data-k="date">Date</th><th data-k="message">Message</th></tr></thead>
+              <tbody></tbody>
+            </table>
+          </div>
+          <div class="controls bare" style="margin-top:10px">
+            <label>View
+              <select id="uUtilView">
+                <option value="aggregate" selected>Overall</option>
+                <option value="jobs">By job</option>
+              </select>
+            </label>
+          </div>
+          <div class="chart" id="userUtilPlot"></div>
+          <div class="empty" id="userUtilEmpty" style="display:none">
+            No GPU utilization samples for this user in the window.
+          </div>
         </div>
       </div>
       <div class="results-loading">Data is loading&hellip;</div>

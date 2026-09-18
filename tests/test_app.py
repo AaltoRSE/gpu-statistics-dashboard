@@ -253,6 +253,12 @@ class FakeProm:
                         in allowed]
             if "max by (slurmjobid, instance, gpu_type)" in query:
                 return self._filter(self._PART_SUMMARY, self._matchers(query))
+            if "max by (slurmjobid, instance, gpu)" in query:
+                # Single-user activity query: the selector scopes it, so
+                # filter on the user label like the real exporter would.
+                m = re.search(r'user="([^"]*)"', query)
+                return [s for s in self._JOBS_UTIL + self.extra_jobs
+                        if s["metric"].get("user") == m.group(1)]
             jobs_util = self._JOBS_UTIL + self.extra_jobs
             return self._filter(jobs_util, self._matchers(query))
         if "memory" in query:  # vram
@@ -393,6 +399,25 @@ def test_jobs_endpoint_nonempty(client):
     assert job["gpu_hours_eff"] is not None
 
 
+def test_jobs_window_accepts_30_days(client, fake_prom):
+    # The Users tab's 30-day option sends since_hours=720 to
+    # /api/jobs for the selected user's table; the endpoint must accept
+    # it and scope the PromQL user filter as usual.
+    r = client.get("/api/jobs",
+                   params={"since_hours": 720, "user": "alice"})
+    assert r.status_code == 200
+    data = r.json()
+    assert data["window"]["end"] - data["window"]["start"] == 720 * 3600
+    assert data["count"] >= 1
+    queries = [q for t, q in fake_prom.calls if t == "range"]
+    assert any('user="alice"' in q for q in queries)
+
+
+def test_jobs_window_rejects_over_30_days(client):
+    assert client.get("/api/jobs",
+                      params={"since_hours": 721}).status_code == 422
+
+
 def test_jobs_mean_util_not_trivially_100(client):
     r = client.get("/api/jobs", params={"since_hours": 24})
     utils = [j["mean_util"] for j in r.json()["jobs"]]
@@ -494,6 +519,11 @@ def test_users_mean_util_weights_samples_not_effective_gpu_hours(client, monkeyp
 
 def test_users_window_validation(client):
     assert client.get("/api/users", params={"since_hours": 0}).status_code == 422
+    # Users tab allows up to 30 days (720 h).
+    assert client.get("/api/users",
+                      params={"since_hours": 721}).status_code == 422
+    assert client.get("/api/users",
+                      params={"since_hours": 720}).status_code == 200
 
 
 def test_jobs_user_filter_is_query_scoped(client, fake_prom):
@@ -1775,3 +1805,163 @@ def test_completed_wait_summary_separates_mig_and_excludes_noncompleted():
     assert out["h200_3g.71gb"]["wait_per_gpu_hour_p50"] == 4.0
     assert coverage["valid_samples"] == {"h200": 2, "h200_3g.71gb": 1}
     assert coverage["excluded"] == {"state": 2}
+
+
+# ---- /api/users/contacts and /api/users/{user}/activity -----------------
+
+def _contacts_env(monkeypatch, tmp_path, files):
+    for name in ("GARAGE_DIARY_PATH", "GARAGE_DIARY_REPO",
+                 "GARAGE_DIARY_CHECKOUT", "JOBGRAPH_CONFIG"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("GARAGE_DIARY_PATH", str(tmp_path))
+    for name, text in files.items():
+        (tmp_path / name).write_text(text)
+
+def test_contacts_endpoint_available(client, tmp_path, monkeypatch):
+    _contacts_env(monkeypatch, tmp_path, {
+        "diary.csv": "day,realname,username,title,dept,helpers,summary\n"
+                     "20240105,X,alice1,p,d,h,Hello world\n",
+        "diary2023.csv": "day,realname,username,title,dept,helpers,summary\n"
+                         "20231230,X,Alice1;pAlice@aalto.fi,p,d,h,Earlier\n"
+                         "20231230,X,Alice1;pAlice@aalto.fi,p,d,h,Earlier\n",
+    })
+    data = client.get("/api/users/contacts").json()
+    assert data["available"] is True
+    assert data["warning"] is None
+    assert data["skipped_rows"] == 0
+    assert data["contacts"] == [
+        {"date": "2024-01-05", "username": "alice1",
+         "message": "Hello world"},
+        # semicolon split + @aalto.fi local part + casefold + dedup;
+        # descending date, then username, then message
+        {"date": "2023-12-30", "username": "palice", "message": "Earlier"},
+        {"date": "2023-12-30", "username": "alice1", "message": "Earlier"},
+    ]
+
+
+def test_contacts_endpoint_counts_skipped_rows(client, tmp_path, monkeypatch):
+    _contacts_env(monkeypatch, tmp_path, {
+        "diary.csv": "day,realname,username,title,dept,helpers,summary\n"
+                     "20240105,X,alice1,p,d,h,Ok\n"
+                     "20233299,X,alice1,p,d,h,Bad month\n"
+                     "20240106,X,,p,d,h,No user\n"
+                     "20240107,X,NADEEM?,p,d,h,Unjoinable\n",
+    })
+    data = client.get("/api/users/contacts").json()
+    assert data["available"] is True
+    assert data["warning"] is None
+    assert data["skipped_rows"] == 3
+    assert len(data["contacts"]) == 1
+
+
+def test_contacts_endpoint_unavailable(client, tmp_path, monkeypatch):
+    _contacts_env(monkeypatch, tmp_path, {})
+    data = client.get("/api/users/contacts").json()
+    assert data == {
+        "available": False, "warning": None, "skipped_rows": 0,
+        "contacts": [],
+    } or data["available"] is False and data["contacts"] == []
+
+
+def test_contacts_endpoint_bad_schema(client, tmp_path, monkeypatch):
+    _contacts_env(monkeypatch, tmp_path, {
+        "diary.csv": "date,who,text\n20240105,a,b,c\n",
+    })
+    data = client.get("/api/users/contacts").json()
+    assert data["available"] is False
+    assert data["warning"] == "Garage Diary CSV schema is invalid."
+    assert data["contacts"] == []
+
+
+def test_user_activity_scopes_query_to_user(client, fake_prom):
+    r = client.get("/api/users/alice/activity",
+                   params={"since_hours": 24})
+    assert r.status_code == 200
+    queries = [q for t, q in fake_prom.calls if t == "range"]
+    assert any('user="alice"' in q
+               and "max by (slurmjobid, instance, gpu)" in q
+               for q in queries)
+
+
+def test_user_activity_averages_gpus_and_jobs(client, fake_prom):
+    # Job 1 has two GPU series (40,60) and (20,80): each timestamp's job
+    # mean is 30/70, and alice has only job 1, so the user aggregate
+    # (mean across every observed GPU series) matches the job mean.
+    fake_prom.query_range = lambda query, start, end, step: (
+        fake_prom.calls.append(("range", query)) or [
+            {"metric": {"slurmjobid": "1", "instance": "gpu1", "gpu": "0",
+                        "user": "alice"},
+             "values": [[1000, "40"], [1120, "60"]]},
+            {"metric": {"slurmjobid": "1", "instance": "gpu1", "gpu": "1",
+                        "user": "alice"},
+             "values": [[1000, "20"], [1120, "80"]]},
+            {"metric": {"slurmjobid": "2", "instance": "gpu1", "gpu": "0",
+                        "user": "alice"},
+             "values": [[1000, "10"]]},
+        ])
+    data = client.get("/api/users/alice/activity",
+                      params={"since_hours": 24}).json()
+    assert data["user"] == "alice"
+    # aggregate at 1000: (40+20+10)/3 = 23.33; at 1120: (60+80)/2 = 70.
+    assert data["aggregate"] == [[1000.0, 23.33], [1120.0, 70.0]]
+    # per-job means: job 1 (40+20)/2=30, (60+80)/2=70; job 2 = 10.
+    assert data["jobs"] == [
+        {"jobid": "1", "values": [[1000.0, 30.0], [1120.0, 70.0]]},
+        {"jobid": "2", "values": [[1000.0, 10.0]]},
+    ]
+    assert data["window"]["start"] == NOW - 24 * 3600
+    assert data["window"]["end"] == NOW
+    assert data["step"] == 120
+
+
+def test_user_activity_multiuser_aggregate_spans_jobs(client, fake_prom):
+    # The canned jobs-window series carry distinct users; the activity
+    # query is scoped by the Prometheus selector, so fake responses must
+    # be user-filtered like the real exporter's output would be.
+    def scoped(query, start, end, step):
+        fake_prom.calls.append(("range", query))
+        assert 'user="carol"' in query
+        return [fake_prom._JOBS_UTIL[2]]
+    fake_prom.query_range = scoped
+    data = client.get("/api/users/carol/activity",
+                      params={"since_hours": 24}).json()
+    assert data["aggregate"] == [[1000.0, 90.0], [1120.0, 95.0]]
+    assert data["jobs"][0]["jobid"] == "3"
+
+
+def test_user_activity_empty_when_no_series(client, fake_prom):
+    fake_prom.query_range = lambda query, start, end, step: (
+        fake_prom.calls.append(("range", query)) or [])
+    data = client.get("/api/users/nobody/activity",
+                      params={"since_hours": 24}).json()
+    assert data["aggregate"] == [] and data["jobs"] == []
+
+
+def test_user_activity_escapes_username(client, fake_prom):
+    client.get("/api/users/al%22ice/activity", params={"since_hours": 24})
+    queries = [q for t, q in fake_prom.calls if t == "range"]
+    assert any('user="al\\"ice"' in q for q in queries)
+
+
+def test_user_activity_window_validation(client, fake_prom):
+    assert client.get("/api/users/a/activity",
+                      params={"since_hours": 0}).status_code == 422
+    # The Users tab offers 24 h / 3 d / 7 d / 30 d; the cap is 30 days.
+    assert client.get("/api/users/a/activity",
+                      params={"since_hours": 721}).status_code == 422
+    r = client.get("/api/users/a/activity", params={"since_hours": 168})
+    assert r.status_code == 200
+    r = client.get("/api/users/a/activity", params={"since_hours": 720})
+    assert r.status_code == 200
+    data = r.json()
+    # 30 days uses the coarse 1800 s step tier to keep the range light.
+    assert data["step"] == 1800
+    assert data["window"]["end"] - data["window"]["start"] == 720 * 3600
+
+
+def test_user_activity_result_is_cached(client, fake_prom):
+    client.get("/api/users/alice/activity", params={"since_hours": 24})
+    first = len([1 for t, _ in fake_prom.calls if t == "range"])
+    client.get("/api/users/alice/activity", params={"since_hours": 24})
+    second = len([1 for t, _ in fake_prom.calls if t == "range"])
+    assert second == first

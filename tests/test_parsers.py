@@ -631,3 +631,104 @@ def test_sacct_jobs_invalid_elapsed(monkeypatch):
     assert jobs["401"]["submit"] == "2026-08-30T08:00:00"
     assert jobs["402"]["elapsed_s"] == 5 * 60 + 6
     assert jobs["402"]["submit"] == "2026-08-30T09:00:00"
+
+
+def _contact_env(monkeypatch, tmp_path=None, conf_text=None, **env):
+    """Run load_contact_config with an isolated environment/conf file."""
+    import config
+    for name in (
+        "GARAGE_DIARY_PATH",
+        "GARAGE_DIARY_REPO",
+        "GARAGE_DIARY_CHECKOUT",
+        "JOBGRAPH_CONFIG",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    if conf_text is not None:
+        conf = tmp_path / "jobgraph.conf"
+        conf.write_text(conf_text)
+        monkeypatch.setenv("JOBGRAPH_CONFIG", str(conf))
+    for name, value in env.items():
+        monkeypatch.setenv(name, value)
+    return config.load_contact_config()
+
+
+def test_contact_config_unconfigured_default(monkeypatch):
+    result = _contact_env(monkeypatch)
+    assert result["mode"] == "unconfigured"
+    assert result["path"] == "" and result["repo"] == ""
+
+
+def test_contact_config_local_env(monkeypatch):
+    result = _contact_env(
+        monkeypatch, GARAGE_DIARY_PATH=" /tmp/diary\n")
+    assert result["mode"] == "local"
+    assert result["path"] == "/tmp/diary"
+
+
+def test_contact_config_remote_env_default_checkout(monkeypatch):
+    result = _contact_env(monkeypatch, GARAGE_DIARY_REPO="git@x:r.git")
+    assert result["mode"] == "remote"
+    assert result["repo"] == "git@x:r.git"
+    assert result["checkout"] == os.path.expanduser(
+        "~/.cache/gpu-statistics/garagediary")
+
+
+def test_contact_config_remote_env_checkout(monkeypatch):
+    result = _contact_env(
+        monkeypatch, GARAGE_DIARY_REPO="git@x:r.git",
+        GARAGE_DIARY_CHECKOUT="/tmp/co")
+    assert result == {
+        "mode": "remote", "path": "", "repo": "git@x:r.git",
+        "checkout": "/tmp/co"}
+
+
+def test_contact_config_conf_file(monkeypatch, tmp_path):
+    result = _contact_env(
+        monkeypatch, tmp_path=tmp_path,
+        conf_text="garage_diary_repo = conf-repo\n"
+                  "garage_diary_checkout = conf-co\n")
+    assert result == {
+        "mode": "remote", "path": "", "repo": "conf-repo",
+        "checkout": "conf-co"}
+
+
+def test_contact_config_env_over_conf_file(monkeypatch, tmp_path):
+    result = _contact_env(
+        monkeypatch, tmp_path=tmp_path,
+        conf_text="garage_diary_repo = conf-repo\n",
+        GARAGE_DIARY_PATH="/env/path")
+    assert result["mode"] == "local"
+    assert result["path"] == "/env/path"
+
+
+def test_contact_config_env_checkout_overrides_file_checkout_only(
+        monkeypatch, tmp_path):
+    # An env CHECKOUT must not clear the file's source key: the source
+    # (repo) still comes from the file while the checkout comes from env.
+    result = _contact_env(
+        monkeypatch, tmp_path=tmp_path,
+        conf_text="garage_diary_repo = conf-repo\n"
+                  "garage_diary_checkout = conf-co\n",
+        GARAGE_DIARY_CHECKOUT="/env/co")
+    assert result == {
+        "mode": "remote", "path": "", "repo": "conf-repo",
+        "checkout": "/env/co"}
+
+
+def test_contact_config_file_repo_with_env_checkout_default(
+        monkeypatch, tmp_path):
+    # No env checkout: the file's checkout applies untouched.
+    result = _contact_env(
+        monkeypatch, tmp_path=tmp_path,
+        conf_text="garage_diary_repo = conf-repo\n"
+                  "garage_diary_checkout = conf-co\n")
+    assert result["checkout"] == "conf-co"
+
+
+def test_contact_config_ambiguous_when_both_sources(monkeypatch):
+    result = _contact_env(
+        monkeypatch, GARAGE_DIARY_PATH="/tmp/diary",
+        GARAGE_DIARY_REPO="git@x:r.git")
+    assert result["mode"] == "ambiguous"
+    assert result["path"] == "/tmp/diary"
+    assert result["repo"] == "git@x:r.git"

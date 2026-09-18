@@ -64,6 +64,22 @@ OS-level preference applies when no choice has been saved.
   card below (same enrichment and detail links as the Jobs tab). Raw text
   that matches no list entry is still sent, so admins can look up users
   with no GPU activity in the window.
+- A sortable **Contacts** column joins each user with the Garage Diary
+  history (fetched alongside the list on every load/refresh): `Never` for
+  an active user with no record, `Unavailable` when the contact source
+  cannot be read (null-sorted last), otherwise the count plus the latest
+  contact date. Selecting a user adds the utilization-history card:
+  the all-time contact table (Date + wrapping Message, newest first) and
+  a utilization chart with an **Overall**/**By job** view selector — both
+  views derive from one cached request, so switching never refetches.
+  Contacts whose Europe/Helsinki calendar date intersects the selected
+  window are overlaid on the chart as a dotted vertical line plus a
+  diamond marker at 100% (same-day contacts collapse into one marker
+  listing every message; the table stays uncollapsed and always shows
+  the complete history). No contact time is inferred: the marker and
+  line are plotted at the ISO calendar date string itself on the date
+  axis. Window inclusion is a calendar-date comparison, not an epoch
+  one, so a contact on a partial first/last window day still charts.
 - **Running only** hides users with no live job and re-fetches the
   selected user's running jobs.
 
@@ -152,6 +168,33 @@ lookups for job metadata, a bounded `sacct --allusers -X -S … -E …`
 query for completed-job wait statistics, `scontrol show nodes`, `squeue -t PD`,
 and Prometheus read queries.
 
+### Users tab contact history (Garage Diary)
+
+The Users tab joins each user with their Garage Diary contacts. The source
+is read in this order:
+
+1. Environment: `GARAGE_DIARY_PATH`, `GARAGE_DIARY_REPO`, `GARAGE_DIARY_CHECKOUT`
+2. `jobgraph.conf` — same discovery as the Prometheus settings; keys
+   `garage_diary_path`, `garage_diary_repo`, `garage_diary_checkout`
+
+The two source keys are mutually exclusive; setting both leaves the history
+unavailable with an ambiguity warning. With no source configured the rest of
+the dashboard works and the Users tab reports the contact source as
+unavailable.
+
+```ini
+# Local checkout (used in this deployment)
+garage_diary_path = /scratch/work/firoozh1/w/garagediary
+
+# Future remote repository: cloned on first use into `garage_diary_checkout`
+# (default ~/.cache/gpu-statistics/garagediary) and fast-forwarded
+# (git pull --ff-only on its default tracked branch) on every Users-tab
+# contact-history load; a failed refresh reports the source unavailable
+# instead of serving stale contacts.
+# garage_diary_repo = git@version.aalto.fi:AaltoScienceIT/garagediary.git
+# garage_diary_checkout = ~/.cache/gpu-statistics/garagediary
+```
+
 ## API
 
 | Endpoint | Purpose |
@@ -160,6 +203,9 @@ and Prometheus read queries.
 | `GET /api/jobs?since_hours=&user=&partition=&search=&limit=&running_only=&refresh=` | job table (Prometheus discovery + sacct enrichment; `running_only=true` keeps only jobs with a live GPU series; `refresh=true` bypasses the 60 s window cache) plus `efficiency_histogram` (GPU-hours by 10%-wide mean-utilization bucket, 0-100) |
 | `GET /api/partitions/queue?since_hours=&running_only=` | live pending demand plus bounded completed-job wait metrics. `wait_history_coverage` reports accounting records examined, valid samples by GPU type, exclusions, failed batches, and completeness. |
 | `GET /api/jobs/{jobid}?since_hours=` | per-GPU utilization/VRAM series + metadata (human-readable `start`/`end` preserved as-is) |
+| `GET /api/users?since_hours=` | per-user GPU-activity aggregation over the window (same TTL-cached job-window queries as the Jobs tab; no sacct) |
+| `GET /api/users/contacts` | all Garage Diary contacts (`date`, `username`, `message`), re-read on every call from the configured local checkout or remote repository; `available=false` with a fixed warning when the source cannot be read (never stale rows), `skipped_rows` counts malformed/unjoinable source rows |
+| `GET /api/users/{username}/activity?since_hours=` | one user's per-GPU utilization series over the window, reshaped into the overall `aggregate` mean and per-job `jobs` means from a single cached Prometheus range query; empty arrays when the user has no observed series |
 | `GET /api/partitions?since_hours=&running_only=` | utilization per GPU group + trend + `mean_occupancy` (window-average allocated share) + allocated/total GPU capacity **+ pending-job queue** (`queue`: per-group pending counts and GPU demand keyed by group, `__total__` the unique cluster-wide figure, `queue_available=false` when the squeue snapshot failed). A group is the Slurm partition, except MIG GPUs, which form their own group per node MIG GRES profile (`h200_3g.71gb`), so a MIG node never counts against its whole-GPU pool. Capacity is summed over all nodes of the group (idle included); a node shared by several partitions counts toward each |
 | `GET /api/partitions/vram?since_hours=&running_only=&partition=` | per-job VRAM records for the distribution chart (average per-GPU peak VRAM in GB, mean utilization, allocated GPU-hours); `partition` keeps only one GPU group (a Slurm partition or a MIG GRES profile). Binning and the utilization-range filter happen client-side. `total` counts all candidates in the window; `jobs` holds only the top 2000 by effective GPU-hours, since a `sacct -j` over the whole window would time out |
 | `GET /api/nodes?gpu_only=&refresh=` | node states (state/reason from `scontrol show node`) + live utilization/VRAM + active jobs (`refresh=true` bypasses the 30 s cache) |

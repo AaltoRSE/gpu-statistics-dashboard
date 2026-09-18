@@ -29,7 +29,7 @@ router = APIRouter()
 
 @router.get("/api/jobs", response_model=JobsResponse)
 def api_jobs(
-    since_hours: float = Query(24, gt=0, le=168),
+    since_hours: float = Query(24, gt=0, le=720),
     partition: str = "",
     user: str = "",
     search: str = "",

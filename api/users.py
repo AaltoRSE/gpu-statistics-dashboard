@@ -1,16 +1,22 @@
-"""Route: GET /api/users."""
+"""Routes: GET /api/users, /api/users/contacts, /api/users/{user}/activity."""
 
 from fastapi import APIRouter, Query
 
-from api.schemas import UsersResponse
+from api.schemas import (
+    ContactHistoryResponse,
+    UserActivityResponse,
+    UsersResponse,
+)
 from domain.common import running_gpu_job_ids, window
+from domain.contacts import load_contacts
 from domain.jobs import fetch_job_window
+from domain.users import build_user_activity
 
 router = APIRouter()
 
 
 @router.get("/api/users", response_model=UsersResponse)
-def api_users(since_hours: float = Query(24, gt=0, le=168)):
+def api_users(since_hours: float = Query(24, gt=0, le=720)):
     """Per-user GPU-activity aggregation over the window.
 
     Built from the same job window the Jobs tab uses (utilization and VRAM
@@ -68,3 +74,30 @@ def api_users(since_hours: float = Query(24, gt=0, le=168)):
         "count": len(users),
         "users": users,
     }
+
+
+@router.get("/api/users/contacts", response_model=ContactHistoryResponse)
+def api_users_contacts():
+    """All Garage Diary contacts for the configured source.
+
+    Re-read on every call (page load / refresh), so remote checkouts are
+    fast-forwarded synchronously here. An unusable source returns
+    ``available: false`` with a fixed warning and never stale rows.
+    """
+    return load_contacts()
+
+
+@router.get(
+    "/api/users/{username}/activity", response_model=UserActivityResponse
+)
+def api_user_activity(
+    username: str, since_hours: float = Query(24, gt=0, le=720)
+):
+    """Per-GPU utilization history for one user over the window.
+
+    One cached Prometheus range query derives both the overall aggregate
+    line and the per-job lines, so switching the Users-tab chart view never
+    triggers a second backend request. No observed series yields empty
+    arrays, not an error.
+    """
+    return build_user_activity(username, since_hours)
