@@ -119,6 +119,10 @@ def job_detail_key(jobid, since_hours):
     return ("jobdetail", jobid, since_hours)
 
 
+def user_activity_key(username, since_hours):
+    return ("useractivity", username, since_hours)
+
+
 def partition_window_key(since_hours, running_only):
     return ("parts", since_hours, running_only)
 

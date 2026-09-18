@@ -170,6 +170,49 @@ class UsersResponse(BaseModel):
     users: List[UserRow]
 
 
+class ContactRecord(BaseModel):
+    date: str = Field(description="ISO calendar date (YYYY-MM-DD) of the "
+                      "Garage Diary visit; day granularity, no time zone.")
+    username: str = Field(description="Normalized lowercase Slurm username.")
+    message: str = Field(description="Verbatim diary summary text "
+                         "(trimmed); '?' or empty is preserved as recorded.")
+
+
+class ContactHistoryResponse(BaseModel):
+    available: bool = Field(
+        description="False when the configured source cannot be read; "
+                    "contacts is then empty and never stale.")
+    warning: Optional[str] = Field(
+        description="Fixed, credential-free description of why the source "
+                    "is unavailable; null when usable.")
+    skipped_rows: int = Field(
+        description="Source rows dropped as malformed (bad date) or "
+                    "unjoinable (no usable username).")
+    contacts: List[ContactRecord] = Field(
+        description="All contacts sorted by descending date, then username "
+                    "and message; exact duplicates removed.")
+
+
+class UserUtilizationSeries(BaseModel):
+    jobid: str
+    values: List[Tuple[float, float]] = Field(
+        description="Ascending [epoch_seconds, percent] samples, the mean "
+                    "across the job's observed per-GPU series at each "
+                    "timestamp.")
+
+
+class UserActivityResponse(BaseModel):
+    user: str
+    window: Window
+    step: int
+    aggregate: List[Tuple[float, float]] = Field(
+        description="Ascending [epoch_seconds, percent] overall utilization, "
+                    "the mean across every observed GPU series of the user "
+                    "at each timestamp; empty when no samples exist.")
+    jobs: List[UserUtilizationSeries] = Field(
+        description="Per-job mean-utilization series sorted by jobid.")
+
+
 # ---- /api/partitions, /api/partitions/vram -----------------------------
 class PartitionRow(BaseModel):
     name: str = Field(description="Canonical GPU type (short scontrol "
