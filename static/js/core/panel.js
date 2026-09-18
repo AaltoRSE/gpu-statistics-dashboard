@@ -58,15 +58,29 @@ export function clearPanelError(resultsId) {
 export function panelOk(resultsId) {
   panelLoadedAt[resultsId] = Date.now();
   clearPanelError(resultsId);
+  updateGlobalFreshness();
   tickFreshness();
 }
 
-// ---- freshness clock -----------------------------------------------
-// "updated N ago" next to a panel's count, from the same panelLoadedAt
-// timestamp the stale-note already used. Any element with
-// data-fresh-for="<resultsId>" is kept in sync — on every successful load
-// (via panelOk above) and once a minute so the text keeps advancing on an
-// otherwise-idle tab.
+// ---- header freshness ------------------------------------------------
+// Data is loaded once per window and shared by every tab (the backend
+// caches each source under shared identities), so "when was the data
+// loaded" lives in ONE place: the header stamp for the ACTIVE tab's
+// main panel. router.js's showTab declares which panel that is.
+
+let activeFreshnessPanel = null;
+
+export function setActiveFreshnessPanel(resultsId) {
+  activeFreshnessPanel = resultsId || null;
+  updateGlobalFreshness();
+}
+
+export function updateGlobalFreshness() {
+  const el = $("globalFreshness");
+  if (!el) return;
+  el.textContent = freshnessText(
+    activeFreshnessPanel ? panelLoadedAt[activeFreshnessPanel] : null);
+}
 
 function freshnessText(ts) {
   if (!ts) return "";
@@ -82,6 +96,7 @@ export function tickFreshness() {
   document.querySelectorAll("[data-fresh-for]").forEach((el) => {
     el.textContent = freshnessText(panelLoadedAt[el.dataset.freshFor]);
   });
+  updateGlobalFreshness();
 }
 
 setInterval(tickFreshness, 60000);

@@ -2,6 +2,8 @@
 
 from fastapi import APIRouter, Query
 
+import cache
+import deps
 from api.schemas import UsersResponse
 from domain.common import running_gpu_job_ids, window
 from domain.jobs import fetch_job_window
@@ -10,7 +12,8 @@ router = APIRouter()
 
 
 @router.get("/api/users", response_model=UsersResponse)
-def api_users(since_hours: float = Query(24, gt=0, le=168)):
+def api_users(since_hours: float = Query(24, gt=0, le=168),
+              refresh: bool = Query(False)):
     """Per-user GPU-activity aggregation over the window.
 
     Built from the same job window the Jobs tab uses (utilization and VRAM
@@ -21,6 +24,15 @@ def api_users(since_hours: float = Query(24, gt=0, le=168)):
     effective GPU-hours use before the allocation factor. Users are
     ordered by it (descending), ties broken by name.
     """
+    if refresh:
+        # Forced refresh bypasses the same shared source caches the Jobs
+        # tab's refresh clears: the Users list reads the identical
+        # utilization (+VRAM) window, so stale data would render instantly
+        # from a cache the operator just asked to bypass.
+        deps.get_prom().clear_cache()
+        deps.route_cache.invalidate(
+            cache.job_utilization_key(since_hours, None),
+            cache.job_vram_key(since_hours))
     jobs, start, now, _ = fetch_job_window(since_hours)
     live = running_gpu_job_ids()
     agg = {}

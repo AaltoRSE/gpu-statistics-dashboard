@@ -60,7 +60,6 @@ export async function loadJobs(force = false) {
   if (force) params.set("refresh", "true");
   const search = $("jSearch").value.trim();
   if (search) params.set("search", search);
-  const btn = $("jRefresh");
   if ($("jRunning").checked) {
     // Running mode returns every live GPU job: the limit box is disabled
     // and must not be sent.
@@ -73,7 +72,6 @@ export async function loadJobs(force = false) {
     }
     params.set("limit", String(limit));
   }
-  if (btn) btn.disabled = true;
   setResultsLoading("jobsResults", true);
   setResultsLoading("jobEfficiencyResults", true);
   try {
@@ -107,7 +105,6 @@ export async function loadJobs(force = false) {
       showPanelError("jobsResults", e, () => loadJobs(), "the job list");
   } finally {
     if (token === jobsToken) {
-      if (btn) btn.disabled = false;
       setResultsLoading("jobsResults", false);
       setResultsLoading("jobEfficiencyResults", false);
     }
@@ -507,7 +504,6 @@ $("jLimit").addEventListener("input", updateLimitBadge);
 // so typing doesn't fire a request per keystroke; partition filtering is
 // local because it only changes the table.
 $("jSearch").addEventListener("input", debounce(loadJobs, 250));
-$("jRefresh").addEventListener("click", () => { loadJobs(true); });
 $("jPartition").addEventListener("change", renderJobsView);
 $("jobDetailClose").addEventListener("click", closeJobDetail);
 $("jobDetailBack").addEventListener("click", (e) => {

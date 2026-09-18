@@ -1,5 +1,7 @@
 """Routes: GET /api/nodes, GET /api/nodes/{name}."""
 
+from concurrent.futures import ThreadPoolExecutor
+
 from fastapi import APIRouter, Query
 
 import cache
@@ -7,7 +9,11 @@ import deps
 import gpu_groups
 from api.schemas import NodeDetailResponse, NodesResponse
 from domain.common import series_payload, step_for_range, window
-from domain.partitions import node_current, node_job_start
+from domain.partitions import (
+    aggregate_node_current,
+    node_current_series,
+    node_job_start,
+)
 from prom import PrometheusError
 from promql import label_eq, selector
 
@@ -23,13 +29,25 @@ def api_nodes(gpu_only: bool = True, refresh: bool = Query(False)):
         deps.get_prom().clear_cache()
         deps.route_cache.invalidate(
             cache.scontrol_nodes_key(), cache.node_current_key())
-    nodes = deps.route_cache.get_or_set(cache.scontrol_nodes_key(), 30, deps.show_nodes)
+    # Two independent sources, fetched concurrently: the scontrol node
+    # snapshot and the live node-current Prometheus series. Label
+    # aggregation runs after both resolve; a dead Prometheus must not
+    # hide the node table, so the pre-split fallback keeps current
+    # state empty.
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        nodes_future = executor.submit(
+            deps.route_cache.get_or_set,
+            cache.scontrol_nodes_key(), 30, deps.show_nodes)
+        current_future = executor.submit(node_current_series)
+        nodes = nodes_future.result()
+        try:
+            inst_util, inst_vram, active, alloc = current_future.result()
+        except PrometheusError:
+            inst_util = inst_vram = active = alloc = []
+    cur, jobs_by_node, _, _ = aggregate_node_current(
+        inst_util, inst_vram, active, alloc)
     if gpu_only:
         nodes = [n for n in nodes if n["gpus"]]
-    try:
-        cur, jobs_by_node, _, _ = node_current()
-    except PrometheusError:
-        cur, jobs_by_node = {}, {}
     for n in nodes:
         n["gpu_group"] = gpu_groups.node_gpu_group(n)
         c = cur.get(n["name"], {})

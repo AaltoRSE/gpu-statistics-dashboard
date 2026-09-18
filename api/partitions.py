@@ -1,5 +1,6 @@
 """Routes: GET /api/partitions, GET /api/partitions/vram."""
 
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -9,18 +10,21 @@ import cache
 import deps
 import gpu_groups
 from api.schemas import PartitionQueueResponse, PartitionsResponse, VramResponse
-from domain.common import window
+from domain.common import job_window, running_gpu_job_ids, step_for_range, window
 from domain.partitions import (
     WAIT_TOTAL_KEY,
+    aggregate_node_current,
+    aggregate_partition_window,
     completed_wait_summary,
     gpu_capacity,
-    node_current,
+    node_current_series,
     partition_window,
+    partition_window_series,
     pending_queue_status,
     progress_store,
     wait_empty,
 )
-from domain.vram import vram_job_records
+from domain.vram import _finalize_vram_records, vram_raw_records
 from slurm import SlurmError
 
 router = APIRouter()
@@ -53,12 +57,46 @@ def _queue_snapshot(now, partition_types):
 
 @router.get("/api/partitions", response_model=PartitionsResponse)
 def api_partitions(since_hours: float = Query(24, gt=0, le=168),
-                   running_only: bool = Query(False)):
-    nodes = deps.route_cache.get_or_set(cache.scontrol_nodes_key(), 30, deps.show_nodes)
+                   running_only: bool = Query(False),
+                   refresh: bool = Query(False)):
+    # Three independent sources, fetched concurrently: the scontrol node
+    # snapshot, the partition-window Prometheus series, and the live
+    # node-current Prometheus snapshot. Each is cached on its own key
+    # (TtlCache single-flights concurrent misses); aggregation needs
+    # node types, so it runs after the futures resolve.
+    if refresh:
+        # Forced refresh (the header's global button) bypasses EVERY
+        # cache the response consumes: the core charts' window cache,
+        # the scontrol node snapshot (GPU types/capacity), and the live
+        # node-current snapshot (allocations). The pending queue keeps
+        # its own accounting cadence — a forced charts refresh must not
+        # wipe a wait-history fetch another viewer is watching progress
+        # on. invalidate() also supersedes any in-flight pre-refresh
+        # fetch for these keys, so this request cannot join and
+        # re-publish a stale generation.
+        deps.get_prom().clear_cache()
+        deps.route_cache.invalidate(
+            cache.partition_window_key(since_hours, running_only),
+            cache.scontrol_nodes_key(),
+            cache.node_current_key())
+    with ThreadPoolExecutor(max_workers=3) as executor:
+        nodes_future = executor.submit(
+            deps.route_cache.get_or_set,
+            cache.scontrol_nodes_key(), 30, deps.show_nodes)
+        series_future = executor.submit(
+            partition_window_series, since_hours, running_only)
+        current_future = executor.submit(node_current_series)
+        nodes = nodes_future.result()
+        stats, util_sums, gpu_counts, start, now, step = series_future.result()
+        inst_util, inst_vram, active, alloc = current_future.result()
     node_types = gpu_groups.build_node_index(nodes)
-    groups, trend, instances, occupancy, job_groups, start, now, step = \
-        partition_window(since_hours, running_only, node_gpu_types=node_types)
-    _, _, allocs_by_node, allocs_by_group = node_current(node_types)
+    groups, trend, instances, occupancy, job_groups = \
+        aggregate_partition_window(stats, util_sums, gpu_counts,
+                                   start, now, step,
+                                   running_only=running_only,
+                                   node_gpu_types=node_types)
+    _, _, allocs_by_node, allocs_by_group = aggregate_node_current(
+        inst_util, inst_vram, active, alloc, node_types)
     gpu_capacity(groups, instances, nodes, allocs_by_group)
     for g in groups:
         avg_alloc = occupancy.get(g["name"])
@@ -221,12 +259,55 @@ def api_partition_queue_progress(since_hours: float = Query(24, gt=0, le=168),
 def api_part_vram(since_hours: float = Query(24, gt=0, le=168),
                   running_only: bool = Query(False),
                   partition: str = "",
-                  weight: str = Query("alloc", pattern="^(alloc|eff)$")):
-    node_types = gpu_groups.build_node_index(
-        deps.route_cache.get_or_set(cache.scontrol_nodes_key(), 30, deps.show_nodes))
+                  weight: str = Query("alloc", pattern="^(alloc|eff)$"),
+                  refresh: bool = Query(False)):
+    if refresh:
+        # Forced refresh (the header's global button) bypasses the VRAM
+        # peaks cache and the shared utilization window it builds on;
+        # the node snapshot (grouping) is invalidated up front, and the
+        # sacct enrichment entry below once the candidate IDs are
+        # known — both are consumed by this response, so a forced
+        # refresh that left them cached could return fresh Prometheus
+        # records under stale grouping/allocation metadata. job_vram_key
+        # is NOT invalidated here: the VRAM records route never consumes
+        # that source (its peaks live under vram_key).
+        deps.get_prom().clear_cache()
+        deps.route_cache.invalidate(
+            cache.vram_key(since_hours, running_only),
+            cache.job_utilization_key(since_hours, None),
+            cache.scontrol_nodes_key())
+        forced_sacct = True
+    else:
+        forced_sacct = False
+    live = None
+    if running_only:
+        live = running_gpu_job_ids()
+        if not live:
+            # No live series: empty is genuinely empty, not unknown.
+            start, now = job_window(since_hours)
+            return {
+                "window": window(start, now),
+                "step": step_for_range(now - start),
+                "total": 0,
+                "enriched_frac": 0.0,
+                "failed_batches": 0,
+                "jobs": [],
+            }
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        nodes_future = executor.submit(
+            deps.route_cache.get_or_set,
+            cache.scontrol_nodes_key(), 30, deps.show_nodes)
+        raw_future = executor.submit(vram_raw_records, since_hours, live)
+        nodes = nodes_future.result()
+        records, start, now, step = raw_future.result()
+    node_types = gpu_groups.build_node_index(nodes)
+    # forced_sacct reaches the finalize so the enrichment entry for the
+    # FINAL filtered/capped ID set (known only there) is invalidated
+    # right before the get_or_set that consumes it.
     records, total, start, now, step, enriched_frac, failed_batches = \
-        vram_job_records(since_hours, running_only, partition, node_types,
-                         weight)
+        _finalize_vram_records(records, start, now, step, live,
+                               partition, node_types, weight,
+                               force_enrichment=forced_sacct)
     return {
         "window": window(start, now),
         "step": step,

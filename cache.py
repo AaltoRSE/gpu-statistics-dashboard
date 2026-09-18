@@ -34,63 +34,136 @@ class TtlCache:
     on the same key while the leader is still running joins its
     ``Future`` and gets the same result (or the same exception)
     instead of starting its own fetch.
+
+    Each in-flight entry is a ``(generation, future)`` pair. Forced
+    refresh supersedes a pre-refresh flight by BUMPING the generation
+    and installing a fresh future: the old leader finishes but no
+    longer owns its generation, so it publishes nothing, pops
+    nothing, and only wakes its own already-joined followers with its
+    (now superseded) result — no ``InvalidStateError`` against a
+    cancelled future, no stomping the forced generation's entry.
     """
 
     def __init__(self, max_size=256):
         self._store = {}
-        self._inflight = {}
+        self._inflight = {}  # key -> [generation, Future] (leader-owned)
+        self._stale = set()  # keys whose next fetch must be a fresh one
         self._lock = threading.Lock()
         self._max_size = max_size
+        self._generation = 0
 
     def get_or_set(self, key, ttl, fn):
         with self._lock:
             hit = self._store.get(key)
+            if key in self._stale:
+                # Forced-refresh marker: a warm store hit is not good
+                # enough and a pre-refresh in-flight fetch must not be
+                # joined. The first post-invalidate caller drops the
+                # stale future and becomes a fresh leader; its
+                # generation already prevents the old leader from
+                # publishing. Discarding the marker IMMEDIATELY (same
+                # lock) keeps single-flight: later concurrent callers
+                # see no marker and simply join the new leader.
+                self._stale.discard(key)
+                self._inflight.pop(key, None)
+                hit = None  # ignore the (possibly warm) store entry
             if hit and hit[0] > time.monotonic():
                 return hit[1]
-            future = self._inflight.get(key)
-            if future is not None:
+            entry = self._inflight.get(key)
+            if entry is not None:
+                generation, future = entry
                 is_leader = False
             else:
+                self._generation += 1
+                generation = self._generation
                 future = Future()
-                self._inflight[key] = future
+                self._inflight[key] = [generation, future]
                 is_leader = True
         if not is_leader:
             return future.result()
         try:
             value = fn()
         except BaseException as exc:
-            # Drop the future so the next caller retries instead of
+            # Drop the entry so the next caller retries instead of
             # inheriting this exception forever; still deliver it to
-            # any follower already waiting on this one.
+            # any follower already waiting on this one. A superseded
+            # leader (invalidate raced it) pops nothing — its entry
+            # belongs to a newer generation.
             with self._lock:
-                self._inflight.pop(key, None)
+                entry = self._inflight.get(key)
+                if entry is not None and entry[0] == generation:
+                    self._inflight.pop(key, None)
             future.set_exception(exc)
             raise
         with self._lock:
-            if len(self._store) > self._max_size:
-                self._store.clear()
-            self._store[key] = (time.monotonic() + ttl, value)
-            self._inflight.pop(key, None)
+            entry = self._inflight.get(key)
+            if entry is not None and entry[0] == generation:
+                if len(self._store) > self._max_size:
+                    self._store.clear()
+                self._store[key] = (time.monotonic() + ttl, value)
+                self._inflight.pop(key, None)
+                self._stale.discard(key)
+        # Wake joined followers; a superseded leader's future is its
+        # own object and no longer referenced by _inflight.
         future.set_result(value)
         return value
 
     def invalidate(self, *keys):
-        """Drop specific entries; used by the forced-refresh path."""
+        """Drop specific entries; used by the forced-refresh path.
+
+        A key with an in-flight pre-refresh fetch is SUPERSEDED via the
+        stale marker: the next get_or_set ignores any warm store value
+        AND drops the pre-refresh future, starting a fresh leader
+        flight — it never joins the stale one, and no Future is
+        pre-installed that nobody would complete. The old leader still
+        finishes and wakes its own already-joined followers, but its
+        store publish is suppressed by the generation check.
+        """
         with self._lock:
             for key in keys:
                 self._store.pop(key, None)
+                self._stale.add(key)
 
     def clear(self):
+        """Drop everything, superseding every in-flight fetch (forced
+        refresh must not join a pre-refresh generation)."""
         with self._lock:
             self._store.clear()
+            self._stale.update(self._inflight)
+
+
+    def set(self, key, ttl, value):
+        """Store a value directly (used by the VRAM envelope-alignment
+        refetch in domain/jobs.py, which must overwrite a stale entry
+        without joining or creating an in-flight fetch)."""
+        with self._lock:
+            if len(self._store) > self._max_size:
+                self._store.clear()
+            self._store[key] = (time.monotonic() + ttl, value)
 
 
 # ---- key builders --------------------------------------------------
 # One function per cached value, called by both whoever reads it and
 # whoever invalidates it.
 
-def job_window_key(since_hours, include_vram, user):
-    return ("jobs", since_hours, include_vram, user)
+def job_utilization_key(since_hours, user=None):
+    """The shared per-window utilization range query every job-list
+    consumer reads: the Jobs tab, the Users aggregation, and the VRAM
+    chart's job records all build on the SAME Prometheus fetch, so the
+    cache identity must not vary by caller (include_vram was folded
+    into this key and made the VRAM route re-run the identical query).
+    ``user`` keeps the query-scoped identity: a single-user request
+    must not share with (nor evict) the whole-window fetch."""
+    return ("job_utilization", since_hours, user)
+
+
+def job_vram_key(since_hours):
+    """The per-window VRAM percentage range query, cached separately
+    from utilization so utilization-only callers never pay for it.
+    Deliberately user-independent: the query aggregates per-job peaks
+    and carries no user selector, so a user-scoped Jobs request shares
+    the global VRAM fetch instead of duplicating it."""
+    return ("job_vram", since_hours)
 
 
 def sacct_key(job_ids):

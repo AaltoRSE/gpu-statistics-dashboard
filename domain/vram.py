@@ -10,39 +10,26 @@ from domain.jobs import fetch_job_window
 from promql import label_in, selector
 
 
-def vram_job_records(since_hours, running_only=False, partition="",
-                      node_gpu_types=None, weight="alloc"):
-    """Per-job VRAM records for the utilization-filtered distribution chart.
+def vram_raw_records(since_hours, live=None):
+    """The cached raw record set behind every VRAM view:
+    (records, start, now, step).
 
-    Each record carries the job's canonical GPU group (the Slurm partition,
-    MIG GRES profiles split out), its time-weighted mean utilization, its
-    average per-GPU peak VRAM (GB), and its allocated GPU-hours from sacct.
-    Binning and the utilization range filter happen client-side so the
-    slider can rebin without refetching. A non-empty ``partition`` keeps
-    only jobs of that group, so the candidate ``total`` and the enrichment
-    cap apply to the selected group.
-    Returns (records, total, start, now, step, enriched_frac,
-    failed_batches) where ``total`` counts candidates before the
-    enrichment cap, ``enriched_frac`` is the fraction of capped records
-    whose allocated GPU-hours the sacct enrichment resolved, and
-    ``failed_batches`` counts 100-ID sacct batches that failed after
-    retrying (their records' gpu_hours stay null).
+    Extracted from ``vram_job_records`` so a route can fetch this
+    CONCURRENTLY with independent sources (scontrol) and finalize
+    afterwards, once node types are known. Uses the shared utilization
+    window (include_vram=False). ``live`` (the running-only ID set, or
+    None) scopes the VRAM peaks query exactly as the pre-split code
+    did. No filtering, capping, or grouping here — the raw candidate
+    set is cached unfiltered (so a partition-scoped request can lose no
+    record outside the global cap); ``_finalize_vram_records`` applies
+    groups, live/partition filters, the cap, and enrichment. Each
+    record keeps the job's observed ``nodes`` and raw ``gpu_type`` so
+    the canonical GPU group can be resolved later, when node types are
+    known. Cache identities: the shared utilization key plus the VRAM
+    peaks key (vram_key(since_hours, live is not None)), matching the
+    pre-split running_only flag.
     """
-    node_gpu_types = node_gpu_types or {}
-    start, now = job_window(since_hours)
-    step = step_for_range(now - start)
-    live = None
-    if running_only:
-        live = running_gpu_job_ids()
-        if not live:
-            return [], 0, start, now, step, 0.0, 0
     jobs, start, now, step = fetch_job_window(since_hours, include_vram=False)
-    for j in jobs:
-        j["gpu_group"] = gpu_groups.job_gpu_group(j, node_gpu_types)
-    if live is not None:
-        jobs = [j for j in jobs if j["jobid"] in live]
-    if partition:
-        jobs = [j for j in jobs if j["gpu_group"] == partition]
     sel = "" if live is None else selector(label_in("slurmjobid", live))
 
     def fetch():
@@ -53,7 +40,7 @@ def vram_job_records(since_hours, running_only=False, partition="",
         )
 
     vram = deps.route_cache.get_or_set(
-        cache.vram_key(since_hours, running_only), 60, fetch)
+        cache.vram_key(since_hours, live is not None), 60, fetch)
     # Per-GPU peak VRAM (GB) over the window; a 0 sample means the GPU was
     # never reported with memory and cannot be a peak.
     peaks = defaultdict(list)
@@ -70,17 +57,48 @@ def vram_job_records(since_hours, running_only=False, partition="",
         records.append({
             "jobid": j["jobid"],
             "user": j["user"],
-            "partition": j["gpu_group"],
+            "nodes": j["nodes"],
             "gpu_type": j["gpu_type"],
             "mean_util": j["mean_util"],
             "vram_gb": round(sum(pk) / len(pk), 1),
             "gpu_hours": None,
             "gpu_hours_eff": j.get("gpu_hours_eff") or 0.0,
         })
-    # Pre-cap selection stays effective-GPU-hours driven: it is the only
-    # allocation-derived figure available before the sacct enrichment below,
-    # and it correlates with real allocation hours. The chosen weight then
-    # orders the capped, enriched set for the client.
+    return records, start, now, step
+
+
+def _finalize_vram_records(records, start, now, step, live,
+                           partition, node_gpu_types, weight,
+                           force_enrichment=False):
+    """GPU-group assignment, live/partition filtering, cap, sacct
+    enrichment, and final ordering of raw VRAM records. Post-processing
+    plus the (cached) enrichment — runs after a concurrent fetch
+    resolves. Returns the full ``vram_job_records`` tuple.
+
+    ``total`` — the candidate count the response discloses — is the
+    post-filter, pre-cap count, exactly the pre-split semantics. The
+    raw record list is copied before mutation: it may be a cached
+    entry shared by concurrent requests.
+
+    ``force_enrichment`` (forced refresh) invalidates the enrichment
+    entry for the FINAL filtered/capped ID set immediately before the
+    get_or_set that consumes it — the caller cannot do this correctly
+    from the raw records, because filters and the cap can change which
+    IDs (hence which key) the enrichment actually uses.
+    """
+    node_gpu_types = node_gpu_types or {}
+    records = [dict(r) for r in records]
+    for r in records:
+        # Canonical GPU group: the record keeps its job's observed
+        # nodes + raw gpu_type label (see vram_raw_records), so the
+        # grouping resolves exactly as the pre-split code did.
+        r["partition"] = gpu_groups.job_gpu_group(r, node_gpu_types)
+    if live is not None:
+        records = [r for r in records if r["jobid"] in live]
+    if partition:
+        records = [r for r in records if r["partition"] == partition]
+    # Pre-cap ordering is effective-GPU-hours driven: it is the only
+    # allocation-derived figure available before the sacct enrichment.
     records.sort(key=lambda r: r["gpu_hours_eff"], reverse=True)
     total = len(records)
     records = records[:deps.VRAM_RECORD_CAP]
@@ -88,6 +106,13 @@ def vram_job_records(since_hours, running_only=False, partition="",
     enriched_frac = 0.0
     failed_batches = 0
     if ids:
+        if force_enrichment:
+            # Forced refresh: the FINAL id set is known only here, after
+            # live/partition filters and the cap. Invalidate the exact
+            # entry the get_or_set below consumes — the caller's
+            # raw-records-based invalidation would miss this key when
+            # filters or the cap change which IDs are used.
+            deps.route_cache.invalidate(cache.sacct_resilient_key(ids))
         meta, failed_batches = deps.route_cache.get_or_set(
             # A distinct key: sacct_key holds the plain dict the Jobs
             # paths consume; storing the (dict, failed) tuple under it
@@ -114,3 +139,43 @@ def vram_job_records(since_hours, running_only=False, partition="",
     wkey = "gpu_hours" if weight == "alloc" else "gpu_hours_eff"
     records.sort(key=lambda r: (r.get(wkey) or 0.0), reverse=True)
     return records, total, start, now, step, enriched_frac, failed_batches
+
+
+def vram_job_records(since_hours, running_only=False, partition="",
+                     node_gpu_types=None, weight="alloc"):
+    """Per-job VRAM records for the utilization-filtered distribution chart.
+
+    Each record carries the job's canonical GPU group (the Slurm partition,
+    MIG GRES profiles split out), its time-weighted mean utilization, its
+    average per-GPU peak VRAM (GB), and its allocated GPU-hours from sacct.
+    Binning and the utilization range filter happen client-side so the
+    slider can rebin without refetching. A non-empty ``partition`` keeps
+    only jobs of that group, so the candidate ``total`` and the enrichment
+    cap apply to the selected group.
+    Returns (records, total, start, now, step, enriched_frac,
+    failed_batches) where ``total`` counts candidates after live and
+    partition filtering but before the enrichment cap,
+    ``enriched_frac`` is the fraction of capped records whose allocated
+    GPU-hours the sacct enrichment resolved, and ``failed_batches``
+    counts 100-ID sacct batches that failed after retrying (their
+    records' gpu_hours stay null).
+
+    Composes ``vram_raw_records`` (the cached fetch: the shared
+    utilization window plus the VRAM peaks query, safe to run
+    concurrently with other sources) with ``_finalize_vram_records``
+    (grouping + live/partition filtering + cap + enrichment, which need
+    node types / the live-ID set). The live-ID check runs first exactly
+    as before: with no live series the VRAM query is never issued and
+    the response is a genuinely empty window-bearing payload.
+    """
+    live = None
+    if running_only:
+        live = running_gpu_job_ids()
+        if not live:
+            # No live series: empty is genuinely empty, not unknown. The
+            # window envelope is still real so the response validates.
+            start, now = job_window(since_hours)
+            return [], 0, start, now, step_for_range(now - start), 0.0, 0
+    records, start, now, step = vram_raw_records(since_hours, live)
+    return _finalize_vram_records(records, start, now, step, live,
+                                  partition, node_gpu_types, weight)

@@ -17,33 +17,71 @@ from promql import label_eq, selector
 def fetch_job_window(since_hours, include_vram=True, user=None):
     """Fetch job-level utilization (and optionally vram) series for a window.
 
-    Returns (jobs, start, end) where jobs is a list of dicts aggregated from
-    Prometheus over the window (no sacct enrichment yet). When ``user`` is
-    given, the utilization query is scoped to that Slurm user so the whole
+    Returns (jobs, start, now, step) where jobs is a list of dicts aggregated
+    from Prometheus over the window (no sacct enrichment yet). When ``user``
+    is given, the utilization query is scoped to that Slurm user so the whole
     window is never pulled for a single-user request.
+
+    The two Prometheus range queries are cached under SEPARATE identities
+    (cache.job_utilization_key / cache.job_vram_key): every job-list-shaped
+    view — Jobs, Users, and the VRAM chart's records — shares ONE utilization
+    fetch per window, and a utilization-only caller (include_vram=False)
+    neither pays for nor blocks on the VRAM query.
     """
     start, now = job_window(since_hours)
     step = step_for_range(now - start)
     sel = selector(label_eq("user", user)) if user else ""
 
-    def fetch():
+    def fetch_utilization():
         util = deps.get_prom().query_range(
             "max by (slurmjobid, instance, job, user, gpu_type) "
             "(slurm_job_utilization_gpu%s)" % sel,
             start, now, step,
         )
-        vram = []
-        if include_vram:
-            vram = deps.get_prom().query_range(
-                "avg by (slurmjobid, instance, gpu) (slurm_job_memory_usage_gpu / "
-                "slurm_job_memory_total_gpu * 100)",
-                start, now, step,
-            )
-        return util, vram, start, now, step
+        return util, start, now, step
 
-    key = cache.job_window_key(since_hours, include_vram, user)
-    util, vram, start, now, step = deps.route_cache.get_or_set(key, 60, fetch)
+    # Cache the series TOGETHER WITH the window it was fetched for: a
+    # cache hit must report the samples' own window envelope, never a
+    # freshly recomputed one that drifts past the cached data (the
+    # envelope is the UI's displayed range).
+    util, start, now, step = deps.route_cache.get_or_set(
+        cache.job_utilization_key(since_hours, user), 60, fetch_utilization)
 
+    def fetch_vram():
+        vram = deps.get_prom().query_range(
+            "avg by (slurmjobid, instance, gpu) (slurm_job_memory_usage_gpu / "
+            "slurm_job_memory_total_gpu * 100)",
+            start, now, step,
+        )
+        return vram, start, now, step
+
+    vram = []
+    if include_vram:
+        # The VRAM series query carries NO user selector (per-job peaks,
+        # not per-user), so its cache identity is user-independent: a
+        # user-scoped Jobs request shares the same VRAM fetch as the
+        # global window instead of duplicating it. The cached entry
+        # carries the window it was fetched for; a hit whose envelope
+        # differs from the resolved utilization window (e.g. the
+        # utilization entry expired and re-fetched while the VRAM entry
+        # survived, or vice versa) is REFETCHED so vram_avg never spans
+        # a different interval than util — the response aggregates the
+        # two series into one window and must not mix bounds.
+        vram_entry = deps.route_cache.get_or_set(
+            cache.job_vram_key(since_hours), 60, fetch_vram)
+        if vram_entry[1:] == (start, now, step):
+            vram = vram_entry[0]
+        else:
+            vram, start, now, step = fetch_vram()
+            deps.route_cache.set(
+                cache.job_vram_key(since_hours), 60,
+                (vram, start, now, step))
+    return _aggregate_job_window(util, vram, start, now, step)
+
+
+def _aggregate_job_window(util, vram, start, now, step):
+    """Aggregate cached utilization (+ optional VRAM) series into the
+    job dicts every job-list-shaped view consumes."""
     vram_by_job = defaultdict(list)
     for s in vram:
         m = s["metric"]

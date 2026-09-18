@@ -24,8 +24,6 @@ export async function loadNodes(force = false) {
   const token = ++nodesToken;
   const params = new URLSearchParams({ gpu_only: String($("nGpuOnly").checked) });
   if (force) params.set("refresh", "true");
-  const btn = $("nRefresh");
-  btn.disabled = true;
   setResultsLoading("nodesResults", true);
   try {
     const data = await api("/api/nodes?" + params);
@@ -44,10 +42,7 @@ export async function loadNodes(force = false) {
     if (token === nodesToken)
       showPanelError("nodesResults", e, () => loadNodes(), "the node list");
   } finally {
-    if (token === nodesToken) {
-      btn.disabled = false;
-      setResultsLoading("nodesResults", false);
-    }
+    if (token === nodesToken) setResultsLoading("nodesResults", false);
   }
 }
 
@@ -298,7 +293,6 @@ $("nBusy").addEventListener("change", (e) => {
   nodeControlsChanged();
 });
 $("nGpuOnly").addEventListener("change", () => loadNodes());
-$("nRefresh").addEventListener("click", () => { loadNodes(true); });
 $("ndWindow").addEventListener("change", () => {
   if (nodeDetailName) loadNodeDetail(nodeDetailName);
 });

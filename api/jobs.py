@@ -1,5 +1,7 @@
 """Routes: GET /api/jobs, GET /api/jobs/{jobid}."""
 
+from concurrent.futures import ThreadPoolExecutor
+
 from fastapi import APIRouter, Query
 
 import cache
@@ -44,7 +46,8 @@ def api_jobs(
         # redrawing the same data; it also forces a fresh live-ID query.
         deps.get_prom().clear_cache()
         deps.route_cache.invalidate(
-            cache.job_window_key(since_hours, True, user or None))
+            cache.job_utilization_key(since_hours, user or None),
+            cache.job_vram_key(since_hours))
     if running_only:
         # Live-ID check first: with no running GPU jobs we must not issue
         # the broad window range query at all.
@@ -54,12 +57,21 @@ def api_jobs(
             return {"window": window(start, now), "count": 0,
                     "total_candidates": 0, "partitions": [], "jobs": [],
                     "efficiency_histogram": efficiency_histogram([])}
-    # The user filter is pushed into the Prometheus query (server-side),
-    # not applied after the fact: a single-user request must not pull and
-    # scan the whole window for everyone else's jobs.
-    jobs, start, now, _ = fetch_job_window(since_hours, user=user or None)
-    node_types = gpu_groups.build_node_index(
-        deps.route_cache.get_or_set(cache.scontrol_nodes_key(), 30, deps.show_nodes))
+    # Two independent sources, fetched concurrently: the window fetch
+    # (Prometheus, query-scoped to ``user``) and the scontrol node
+    # snapshot (for GPU-group resolution). Grouping needs node types,
+    # so it runs after both futures resolve. In running-only mode the
+    # live-ID short-circuit above already decided whether the window
+    # fetch happens at all.
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        jobs_future = executor.submit(
+            fetch_job_window, since_hours, True, user or None)
+        nodes_future = executor.submit(
+            deps.route_cache.get_or_set,
+            cache.scontrol_nodes_key(), 30, deps.show_nodes)
+        jobs, start, now, _ = jobs_future.result()
+        nodes = nodes_future.result()
+    node_types = gpu_groups.build_node_index(nodes)
     for j in jobs:
         j["gpu_group"] = gpu_groups.job_gpu_group(j, node_types)
     if running_only:
@@ -130,21 +142,38 @@ def api_job_detail(jobid: str, since_hours: float = Query(24, gt=0, le=168)):
         )
         return util, vram
 
-    util, vram = deps.route_cache.get_or_set(
-        cache.job_detail_key(jobid, since_hours), 60, fetch)
+    def fetch_sacct():
+        return deps.route_cache.get_or_set(
+            cache.sacct_key([jobid]), 300, lambda: deps.sacct_jobs([jobid]))
+
+    def fetch_active():
+        try:
+            return deps.route_cache.get_or_set(
+                cache.scontrol_jobs_key(), 30, deps.show_jobs)
+        except SlurmError:
+            return {}
+
+    # Three independent sources, fetched concurrently: the job's own
+    # Prometheus window (cached under job_detail_key), the sacct row
+    # (300 s), and the live scontrol snapshot (30 s). Metadata
+    # RESOLUTION needs the observed instances from the series, so it
+    # runs after the futures resolve — but the source I/O itself
+    # overlaps instead of running as three sequential blocks.
+    with ThreadPoolExecutor(max_workers=3) as executor:
+        series_future = executor.submit(
+            deps.route_cache.get_or_set,
+            cache.job_detail_key(jobid, since_hours), 60, fetch)
+        sacct_future = executor.submit(fetch_sacct)
+        active_future = executor.submit(fetch_active)
+        util, vram = series_future.result()
+        sacct_meta = sacct_future.result()
+        active = active_future.result()
     series = {
         "utilization": series_payload(util),
         "vram": series_payload(vram),
     }
     observed = sorted({s["metric"].get("instance", "") for s in util
                        if s["metric"].get("instance")})
-    sacct_meta = deps.route_cache.get_or_set(
-        cache.sacct_key([jobid]), 300, lambda: deps.sacct_jobs([jobid]))
-    try:
-        active = deps.route_cache.get_or_set(
-            cache.scontrol_jobs_key(), 30, deps.show_jobs)
-    except SlurmError:
-        active = {}
     meta = (resolve_scontrol_metadata(jobid, observed, active)
             or resolve_sacct_metadata(jobid, observed, sacct_meta))
     if meta:

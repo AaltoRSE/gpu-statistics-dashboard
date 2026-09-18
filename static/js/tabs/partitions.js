@@ -67,9 +67,9 @@ export function applyPartitionSelection(name) {
   setUrl(sel.value ? "/partition/" + encodeURIComponent(sel.value) : "/partitions");
 }
 
-export async function loadPartitions() {
+export async function loadPartitions(force = false) {
   const token = ++partitionsToken;
-  setResultsLoading("partitionsResults", true);
+  setResultsLoading("partitionsResults", true, "Loading GPU utilization history…");
   // The queue is a separate, slower endpoint (squeue + sacct): start it
   // immediately so both requests are in flight together, and never let
   // its completion gate the Prometheus-backed charts below.
@@ -78,6 +78,10 @@ export async function loadPartitions() {
   try {
     const params = new URLSearchParams({ since_hours: $("pWindow").value });
     if ($("pRunning").checked) params.set("running_only", "true");
+    // force=true (the header's global refresh) bypasses the core
+    // charts' window cache; the pending queue keeps its own accounting
+    // cadence and the VRAM panel below refreshes on its own.
+    if (force) params.set("refresh", "true");
     data = await api("/api/partitions?" + params);
   } catch (e) {
     if (token === partitionsToken) {
@@ -105,7 +109,7 @@ export async function loadPartitions() {
   // VRAM distribution then fetches independently under its own panel.
   setResultsLoading("partitionsResults", false);
   if (token !== partitionsToken) return;
-  await loadVram();
+  await loadVram(force);
 }
 
 /* ---------------- Live queue (independent endpoint) ----------------
@@ -549,17 +553,18 @@ let vramGpuType = "";
 let vramEnrichedFrac = 1.0; // sacct enrichment coverage of the returned records
 let vramFailedBatches = 0; // sacct batches that failed after retrying
 
-export async function loadVram() {
+export async function loadVram(force = false) {
   const token = ++vramToken;
   // The VRAM fetch blurs only the VRAM panel (vramResults), never the whole
   // partitions tab: window / running-only / GPU-type changes here must not
   // freeze the other graphs.
   const origin = partitionsToken;
-  setResultsLoading("vramResults", true);
+  setResultsLoading("vramResults", true, "Loading VRAM history…");
   try {
     const params = new URLSearchParams({ since_hours: $("pWindow").value });
     if ($("pRunning").checked) params.set("running_only", "true");
     if (selectedPartition) params.set("partition", selectedPartition);
+    if (force) params.set("refresh", "true");
     // The chart shows allocated vs effective directly; the backend weight
     // param (cap ordering) keeps its default.
     const data = await api("/api/partitions/vram?" + params);

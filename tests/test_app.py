@@ -3,11 +3,8 @@
 Run: .venv/bin/python -m pytest tests/ -q
 """
 
-import os
 import re
-import sys
-
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import threading
 
 import pytest  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
@@ -20,7 +17,11 @@ import domain.metadata as domain_metadata  # noqa: E402
 import domain.partitions  # noqa: E402
 import domain.partitions as domain_partitions  # noqa: E402
 import slurm  # noqa: E402
+from api import jobs as api_jobs  # noqa: E402
+from api import nodes as api_nodes  # noqa: E402
+from api import partitions as api_partitions  # noqa: E402
 from api import users as api_users  # noqa: E402
+from prom import PrometheusError  # noqa: E402
 
 # Deterministic "now" (2026-08-30T18:26:40Z): job 1's sacct start
 # (2026-08-28T00:00:00) is ~2.2 days back, inside the seven-day clamp.
@@ -516,6 +517,137 @@ def test_jobs_user_filter_preserves_prometheus_label_case(client, fake_prom):
     assert r.json()["count"] == 1
     users = [q for t, q in fake_prom.calls if t == "range"]
     assert any('user="Alice"' in q for q in users)
+
+
+def test_jobs_and_vram_share_one_utilization_fetch(client, fake_prom):
+    # The VRAM route's job records (include_vram=False) and the Jobs list
+    # (include_vram=True) build on the SAME per-window utilization range
+    # query: the second caller must reuse the cached fetch, not re-run it.
+    r = client.get("/api/jobs", params={"since_hours": 24})
+    assert r.status_code == 200
+    util_queries = [q for t, q in fake_prom.calls
+                    if t == "range" and "slurm_job_utilization_gpu" in q
+                    and "max by (slurmjobid, instance, job, user, gpu_type)" in q]
+    assert len(util_queries) == 1
+    rv = client.get("/api/partitions/vram", params={"since_hours": 24})
+    assert rv.status_code == 200
+    util_queries_after = [q for t, q in fake_prom.calls
+                          if t == "range"
+                          and "max by (slurmjobid, instance, job, user, gpu_type)" in q]
+    assert util_queries_after == util_queries, (
+        "the VRAM route re-fetched the shared utilization window")
+
+
+def test_users_share_the_jobs_utilization_fetch(client, fake_prom):
+    client.get("/api/jobs", params={"since_hours": 24})
+    before = [q for t, q in fake_prom.calls
+              if t == "range"
+              and "max by (slurmjobid, instance, job, user, gpu_type)" in q]
+    r = client.get("/api/users", params={"since_hours": 24})
+    assert r.status_code == 200
+    after = [q for t, q in fake_prom.calls
+             if t == "range"
+             and "max by (slurmjobid, instance, job, user, gpu_type)" in q]
+    assert after == before, "the Users route re-fetched the shared window"
+
+
+def test_utilization_only_caller_never_fetches_vram(client, fake_prom):
+    # include_vram=False must not pay for (nor block on) the VRAM range
+    # query; the VRAM series is fetched lazily on the first caller that
+    # asks for it.
+    vram_queries = [q for t, q in fake_prom.calls
+                    if t == "range" and "memory" in q]
+    assert vram_queries == []
+    client.get("/api/partitions/vram", params={"since_hours": 24})
+    assert [q for t, q in fake_prom.calls if t == "range" and "memory" in q]
+
+
+def test_user_scoped_window_does_not_share_with_global(client, fake_prom):
+    # A single-user request is a distinct Prometheus query (user label in
+    # the selector) and must neither reuse the global fetch nor let a
+    # global fetch serve it.
+    client.get("/api/jobs", params={"since_hours": 24})
+    before = [q for t, q in fake_prom.calls if t == "range"]
+    r = client.get("/api/jobs", params={"since_hours": 24, "user": "alice"})
+    assert r.status_code == 200
+    after = [q for t, q in fake_prom.calls if t == "range"]
+    assert len(after) > len(before), (
+        "a user-scoped request was served from the global cache entry")
+    assert any('user="alice"' in q for q in after[len(before):])
+
+
+def test_jobs_refresh_invalidates_both_shared_source_keys(
+        client, fake_prom):
+    client.get("/api/jobs", params={"since_hours": 24})
+    before = len([q for t, q in fake_prom.calls if t == "range"])
+    r = client.get("/api/jobs",
+                   params={"since_hours": 24, "refresh": "true"})
+    assert r.status_code == 200
+    after = len([q for t, q in fake_prom.calls if t == "range"])
+    assert after > before, (
+        "a forced refresh redrew cached data instead of re-fetching")
+
+
+def test_jobs_refresh_scoped_to_requested_user(client, fake_prom):
+    client.get("/api/jobs", params={"since_hours": 24})
+    global_queries = [q for t, q in fake_prom.calls if t == "range"]
+    # Refreshing alice's view must not discard the global window: her
+    # query-scoped utilization fetch is a different identity.
+    r = client.get("/api/jobs",
+                   params={"since_hours": 24, "user": "alice",
+                           "refresh": "true"})
+    assert r.status_code == 200
+    scoped = [q for t, q in fake_prom.calls if t == "range"]
+    new_queries = scoped[len(global_queries):]
+    # The user-scoped utilization query is re-fetched with the selector.
+    assert any('user="alice"' in q for q in new_queries)
+    # The VRAM series is user-independent by query identity: its global
+    # entry is the one a forced refresh re-reads, so a repeat of the
+    # selector-free VRAM query is legitimate — but nothing else may be
+    # re-fetched.
+    unexpected = [q for q in new_queries
+                  if "user=" in q and 'user="alice"' not in q]
+    assert unexpected == []
+    util_new = [q for q in new_queries
+                if "max by (slurmjobid, instance, job, user, gpu_type)" in q]
+    assert len(util_new) == 1 and 'user="alice"' in util_new[0]
+    vram_new = [q for q in new_queries
+                if "slurm_job_memory_usage_gpu" in q]
+    assert len(vram_new) == 1
+
+
+def test_cached_window_hit_reports_fetched_window(client, fake_prom,
+                                                  monkeypatch):
+    # A route_cache hit must report the window the cached samples were
+    # FETCHED for, not the caller's own recomputed envelope: advance the
+    # clock between the two calls and require the second response to keep
+    # the first (leader's) window instead of drifting with the clock.
+    r1 = client.get("/api/jobs", params={"since_hours": 24}).json()
+    monkeypatch.setattr(deps, "now", lambda: NOW + 30)
+    r2 = client.get("/api/jobs", params={"since_hours": 24}).json()
+    assert r2["window"] == r1["window"]
+    assert r2["window"]["end"] == NOW, (
+        "a cache hit's window drifted past the cached samples")
+
+
+def test_refresh_bypasses_window_cache_and_uses_new_clock(client, fake_prom,
+                                                          monkeypatch):
+    # Forced refresh invalidates the entry: the next response uses the
+    # caller's own (advanced) clock for its window.
+    client.get("/api/jobs", params={"since_hours": 24})
+    monkeypatch.setattr(deps, "now", lambda: NOW + 30)
+    r = client.get("/api/jobs",
+                   params={"since_hours": 24, "refresh": "true"}).json()
+    assert r["window"]["end"] == NOW + 30
+
+def test_users_refresh_invalidates_shared_sources(client, fake_prom):
+    client.get("/api/users", params={"since_hours": 24})
+    before = len([q for t, q in fake_prom.calls if t == "range"])
+    r = client.get("/api/users",
+                   params={"since_hours": 24, "refresh": "true"})
+    assert r.status_code == 200
+    after = len([q for t, q in fake_prom.calls if t == "range"])
+    assert after > before, "a forced Users refresh redrew cached data"
 
 
 def test_job_detail_200_with_human_readable_meta(client):
@@ -1420,6 +1552,42 @@ def test_partitions_vram_discloses_partial_enrichment(
     assert by_job["2"]["gpu_hours"] is None
 
 
+
+def test_vram_forced_refresh_invalidates_enrichment_for_filtered_ids(
+        client, fake_prom, monkeypatch):
+    # A partition-scoped forced refresh must invalidate the enrichment
+    # entry for the FINAL (filtered) ID set — the raw candidate set
+    # includes jobs the filter drops, so a caller-side invalidation
+    # keyed on raw IDs would miss the key the finalize actually
+    # consumes, and the forced response would render with the pre-
+    # refresh sacct rows.
+    partition = "h200_3g.71gb"
+    # Warm both entries: the unscoped fetch populates the raw candidate
+    # set AND the unscoped enrichment key; the partition fetch populates
+    # the FINAL filtered key.
+    client.get("/api/partitions/vram", params={"since_hours": 24})
+    client.get("/api/partitions/vram",
+               params={"since_hours": 24, "partition": partition})
+    resilient_calls = []
+    real_resilient = deps.sacct_jobs_resilient
+
+    def counting(ids, start_iso=None, **kw):
+        resilient_calls.append(list(ids))
+        return real_resilient(ids, start_iso, **kw)
+
+    monkeypatch.setattr(deps, "sacct_jobs_resilient", counting)
+    # Forced, partition-scoped: the only resilient call this makes must
+    # be for the filtered IDs — proving the finalize's invalidation hit
+    # the exact consumed key (a raw-ID invalidation would have left this
+    # entry cached and made zero calls).
+    r = client.get("/api/partitions/vram",
+                   params={"since_hours": 24, "partition": partition,
+                           "refresh": "true"})
+    assert r.status_code == 200
+    filtered_ids = [j["jobid"] for j in r.json()["jobs"]]
+    assert filtered_ids, "fixture must produce at least one filtered record"
+    assert resilient_calls == [sorted(filtered_ids)]
+
 def test_slurm_error_maps_to_502(client, fake_prom, monkeypatch):
     def boom():
         raise appmod.SlurmError("scontrol is not available")
@@ -1432,6 +1600,205 @@ def test_slurm_error_maps_to_502(client, fake_prom, monkeypatch):
     r = client.get("/api/partitions/vram", params={"since_hours": 24})
     assert r.status_code == 502
     assert r.json()["error"] == "slurm_unreachable"
+
+
+def test_partitions_sources_run_concurrently(client, fake_prom, monkeypatch):
+    # The route submits its independent sources together: each source
+    # must be ENTERED while the other is still blocked. A sequential
+    # implementation deadlocks the paired events and fails on timeout.
+    entered = {"nodes": False, "series": False}
+    lock = threading.Lock()
+    both_entered = threading.Event()
+
+    def slow_nodes():
+        with lock:
+            entered["nodes"] = True
+        # Release only when BOTH sources are inside their fetch: a
+        # sequential implementation (nodes completes, then series
+        # starts) would leave this wait timing out and the request
+        # hanging — the gate discriminates.
+        if all(entered.values()):
+            both_entered.set()
+        assert both_entered.wait(timeout=5)
+        return list(NODES)
+
+    def slow_series(*args, **kwargs):
+        with lock:
+            entered["series"] = True
+        if all(entered.values()):
+            both_entered.set()
+        assert both_entered.wait(timeout=5)
+        return [], [], [], 1, 2, 120
+
+    monkeypatch.setattr(deps, "show_nodes", slow_nodes)
+    monkeypatch.setattr(api_partitions, "partition_window_series",
+                        slow_series)
+    monkeypatch.setattr(api_partitions, "node_current_series",
+                        lambda: ([], [], [], []))
+    r = client.get("/api/partitions", params={"since_hours": 24})
+    assert r.status_code == 200
+    assert entered == {"nodes": True, "series": True}
+
+
+def test_partitions_node_current_overlaps_series(client, fake_prom,
+                                                 monkeypatch):
+    # Same contract for the third source: the live node-current series
+    # is submitted together with the other two.
+    entered = {"nodes": False, "series": False, "current": False}
+    lock = threading.Lock()
+    release = threading.Event()
+
+    def mark(key):
+        def fn(*args, **kwargs):
+            with lock:
+                entered[key] = True
+            if all(entered.values()):
+                release.set()
+            assert release.wait(timeout=5)
+            if key == "nodes":
+                return list(NODES)
+            if key == "series":
+                return [], [], [], 1, 2, 120
+            return [], [], [], []
+        return fn
+
+    monkeypatch.setattr(deps, "show_nodes", mark("nodes"))
+    monkeypatch.setattr(api_partitions, "partition_window_series",
+                        mark("series"))
+    monkeypatch.setattr(api_partitions, "node_current_series",
+                        mark("current"))
+    r = client.get("/api/partitions", params={"since_hours": 24})
+    assert r.status_code == 200
+    assert entered == {"nodes": True, "series": True, "current": True}
+
+
+def test_jobs_sources_run_concurrently(client, fake_prom, monkeypatch):
+    # /api/jobs submits the window fetch and the scontrol snapshot
+    # together; neither may wait for the other.
+    entered = {"jobs": False, "nodes": False}
+    lock = threading.Lock()
+    release = threading.Event()
+
+    def mark(key):
+        def fn(*args, **kwargs):
+            with lock:
+                entered[key] = True
+            if all(entered.values()):
+                release.set()
+            assert release.wait(timeout=5)
+            if key == "nodes":
+                return list(NODES)
+            return [], 1, 2, 120
+        return fn
+
+    monkeypatch.setattr(api_jobs, "fetch_job_window", mark("jobs"))
+    monkeypatch.setattr(deps, "show_nodes", mark("nodes"))
+    r = client.get("/api/jobs", params={"since_hours": 24})
+    assert r.status_code == 200
+    assert entered == {"jobs": True, "nodes": True}
+
+
+def test_vram_sources_run_concurrently(client, fake_prom, monkeypatch):
+    # /api/partitions/vram submits the raw VRAM records and the scontrol
+    # snapshot together.
+    entered = {"vram": False, "nodes": False}
+    lock = threading.Lock()
+    release = threading.Event()
+
+    def mark(key):
+        def fn(*args, **kwargs):
+            with lock:
+                entered[key] = True
+            if all(entered.values()):
+                release.set()
+            assert release.wait(timeout=5)
+            if key == "nodes":
+                return list(NODES)
+            return [], 1, 2, 120
+        return fn
+
+    monkeypatch.setattr(api_partitions, "vram_raw_records", mark("vram"))
+    monkeypatch.setattr(deps, "show_nodes", mark("nodes"))
+    r = client.get("/api/partitions/vram", params={"since_hours": 24})
+    assert r.status_code == 200
+    assert entered == {"vram": True, "nodes": True}
+
+
+def test_nodes_sources_run_concurrently(client, fake_prom, monkeypatch):
+    # /api/nodes submits the scontrol snapshot and the live series
+    # together, and a Prometheus failure still yields the node table.
+    entered = {"nodes": False, "current": False}
+    lock = threading.Lock()
+    release = threading.Event()
+
+    def slow_nodes():
+        with lock:
+            entered["nodes"] = True
+        if all(entered.values()):
+            release.set()
+        assert release.wait(timeout=5)
+        return list(NODES)
+
+    def slow_current():
+        with lock:
+            entered["current"] = True
+        if all(entered.values()):
+            release.set()
+        assert release.wait(timeout=5)
+        raise PrometheusError("prom is down")
+
+    monkeypatch.setattr(deps, "show_nodes", slow_nodes)
+    monkeypatch.setattr(api_nodes, "node_current_series", slow_current)
+    r = client.get("/api/nodes")
+    assert r.status_code == 200
+    assert entered == {"nodes": True, "current": True}
+    assert r.json()["count"] >= 1
+    assert all(n["current_util"] is None for n in r.json()["nodes"])
+
+
+def test_job_detail_sources_run_concurrently(client, fake_prom, monkeypatch):
+    # /api/jobs/{jobid} submits its Prometheus series, sacct row, and
+    # scontrol snapshot together.
+    entered = {"series": False, "sacct": False, "active": False}
+    lock = threading.Lock()
+    release = threading.Event()
+
+    def mark(key):
+        def fn(*args, **kwargs):
+            with lock:
+                entered[key] = True
+            if all(entered.values()):
+                release.set()
+            assert release.wait(timeout=5)
+            if key == "series":
+                return [], []
+            if key == "sacct":
+                return {jobid: SACCT[jobid]
+                        for jobid in ("1",) if jobid in SACCT}
+            return {}
+        return fn
+
+    monkeypatch.setattr(api_jobs, "show_jobs", mark("active"), raising=False)
+    # api_jobs binds deps.show_jobs via deps: patch there.
+    monkeypatch.setattr(deps, "show_jobs", mark("active"))
+    monkeypatch.setattr(deps, "sacct_jobs",
+                        lambda ids, start_iso=None, **kw: mark("sacct")(ids))
+    # The series fetch is the route's own get_or_set(fn=fetch): gate the
+    # underlying prom calls instead.
+    original_query_range = fake_prom.query_range
+
+    def gated_query_range(query, start, end, step):
+        with lock:
+            entered["series"] = True
+        if all(entered.values()):
+            release.set()
+        assert release.wait(timeout=5)
+        return original_query_range(query, start, end, step)
+
+    monkeypatch.setattr(fake_prom, "query_range", gated_query_range)
+    r = client.get("/api/jobs/1", params={"since_hours": 24})
+    assert r.status_code == 200
+    assert entered == {"series": True, "sacct": True, "active": True}
 
 
 def test_partitions_vram_counts_zero_hour_rows_as_enriched(

@@ -41,24 +41,16 @@ never a GPU type and must never leak into the public ``queue`` map.
 """
 
 
-def partition_window(since_hours, running_only=False, now=None,
-                     node_gpu_types=None):
-    """GPU-type utilization window.
+def partition_window_series(since_hours, running_only=False, now=None):
+    """The cached raw Prometheus series behind every partition-window
+    view: (stats, util_sums, gpu_counts, start, now, step).
 
-    Groups are keyed by the canonical GPU type (gpu_groups.canonical_gpu_type):
-    the short scontrol GRES type, MIG profiles split out from their node's
-    whole-GPU pool), not by Slurm partition — priority-only partitions over
-    the same hardware share one group. Summary data keeps the
-    ``slurmjobid`` label (per-job/per-node max, so the job identity
-    survives for running-only matching); the trend/occupancy queries are
-    ``sum``/``count`` ``by (instance, gpu_type)`` so each raw exporter
-    label resolves against its own scontrol node before canonical types
-    merge. Per-timestamp sum / count gives the utilization trend, the
-    count itself is the occupancy series, and the matcher must be injected
-    into the metric selector before aggregation.
-
-    Also returns ``job_groups`` — the canonical group(s) each observed job
-    belongs to — for the historical wait join in ``started_wait_summary``.
+    Extracted from ``partition_window`` so a route can fetch these
+    series CONCURRENTLY with independent sources (scontrol) and
+    aggregate afterwards, once node types are known. Cache identity and
+    TTL are exactly what ``partition_window`` uses; the cached tuple
+    carries its own window, so a hit never pairs the samples with a
+    freshly recomputed envelope.
     """
     start, now = job_window(since_hours, now)
     step = step_for_range(now - start)
@@ -66,7 +58,7 @@ def partition_window(since_hours, running_only=False, now=None,
     if running_only:
         live = running_gpu_job_ids()
         if not live:
-            return [], {}, {}, {}, {}, start, now, step
+            return [], [], [], start, now, step
         sel = selector(label_in("slurmjobid", live))
 
     def fetch():
@@ -90,8 +82,20 @@ def partition_window(since_hours, running_only=False, now=None,
         return stats, util_sums, gpu_counts, start, now, step
 
     key = cache.partition_window_key(since_hours, running_only)
-    stats, util_sums, gpu_counts, start, now, step = \
-        deps.route_cache.get_or_set(key, 60, fetch)
+    return deps.route_cache.get_or_set(key, 60, fetch)
+
+
+def aggregate_partition_window(stats, util_sums, gpu_counts, start, now,
+                               step, running_only=False,
+                               node_gpu_types=None):
+    """Aggregate raw partition-window series into everything the
+    Partitions routes consume: (groups, trend, instances, occupancy,
+    job_groups). Pure post-processing over the cached series — no I/O,
+    so it can run after a concurrent fetch resolves.
+
+    ``start``/``now``/``step`` are passed through unchanged from
+    ``partition_window_series`` for the caller's response envelope.
+    """
     out = aggregate_partition_stats(stats, node_gpu_types)
     trend_out, occupancy = aggregate_gpu_type_series(
         util_sums, gpu_counts, node_gpu_types)
@@ -118,6 +122,39 @@ def partition_window(since_hours, running_only=False, now=None,
         if jobid:
             name = gpu_groups.gpu_group_name(m, node_gpu_types)
             job_groups.setdefault(jobid, set()).add(name)
+    return out, trend_out, instances, occupancy, job_groups
+
+
+def partition_window(since_hours, running_only=False, now=None,
+                     node_gpu_types=None):
+    """GPU-type utilization window.
+
+    Groups are keyed by the canonical GPU type (gpu_groups.canonical_gpu_type):
+    the short scontrol GRES type, MIG profiles split out from their node's
+    whole-GPU pool), not by Slurm partition — priority-only partitions over
+    the same hardware share one group. Summary data keeps the
+    ``slurmjobid`` label (per-job/per-node max, so the job identity
+    survives for running-only matching); the trend/occupancy queries are
+    ``sum``/``count`` ``by (instance, gpu_type)`` so each raw exporter
+    label resolves against its own scontrol node before canonical types
+    merge. Per-timestamp sum / count gives the utilization trend, the
+    count itself is the occupancy series, and the matcher must be injected
+    into the metric selector before aggregation.
+
+    Also returns ``job_groups`` — the canonical group(s) each observed job
+    belongs to — for the historical wait join in ``started_wait_summary``.
+
+    Composes ``partition_window_series`` (the cached fetch) with
+    ``aggregate_partition_window`` (pure post-processing); routes that
+    parallelize source calls call the two halves separately.
+    """
+    stats, util_sums, gpu_counts, start, now, step = \
+        partition_window_series(since_hours, running_only, now)
+    out, trend_out, instances, occupancy, job_groups = \
+        aggregate_partition_window(stats, util_sums, gpu_counts,
+                                   start, now, step,
+                                   running_only=running_only,
+                                   node_gpu_types=node_gpu_types)
     return out, trend_out, instances, occupancy, job_groups, start, now, step
 
 
@@ -257,8 +294,15 @@ def gpu_capacity(groups, instances, nodes, allocs):
     return groups
 
 
-def node_current(node_gpu_types=None):
-    node_gpu_types = node_gpu_types or {}
+def node_current_series():
+    """The cached live node snapshot's raw Prometheus series:
+    (inst_util, inst_vram, active, alloc).
+
+    Extracted from ``node_current`` so a route can fetch these series
+    CONCURRENTLY with other independent sources (scontrol) and
+    aggregate afterwards, once node types are known. Cache identity and
+    TTL are exactly what ``node_current`` uses.
+    """
     prom = deps.get_prom()
 
     def fetch():
@@ -278,8 +322,15 @@ def node_current(node_gpu_types=None):
             "count by (instance, job, gpu_type) (slurm_job_utilization_gpu)")
         return inst_util, inst_vram, active, alloc
 
-    inst_util, inst_vram, active, alloc = deps.route_cache.get_or_set(
-        cache.node_current_key(), 30, fetch)
+    return deps.route_cache.get_or_set(cache.node_current_key(), 30, fetch)
+
+
+def aggregate_node_current(inst_util, inst_vram, active, alloc,
+                           node_gpu_types=None):
+    """Aggregate raw node-current series into (cur, jobs_by_node,
+    allocs_by_node, allocs_by_group). Pure post-processing over the
+    cached series — no I/O."""
+    node_gpu_types = node_gpu_types or {}
     cur = {}
     for s in inst_util:
         cur[s["metric"]["instance"]] = {"util": float(s["value"][1])}
@@ -308,6 +359,12 @@ def node_current(node_gpu_types=None):
         group = gpu_groups.gpu_group_name(m, node_gpu_types)
         allocs_by_group[group] = allocs_by_group.get(group, 0) + count
     return cur, jobs_by_node, allocs_by_node, allocs_by_group
+
+
+def node_current(node_gpu_types=None):
+    inst_util, inst_vram, active, alloc = node_current_series()
+    return aggregate_node_current(inst_util, inst_vram, active, alloc,
+                                  node_gpu_types)
 
 
 def node_job_start(name, now):
