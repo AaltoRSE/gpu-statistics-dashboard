@@ -33,12 +33,6 @@ from slurm import (  # noqa: F401 (re-exported)
 
 route_cache = TtlCache()
 
-# sacct -j over tens of thousands of IDs exceeds the command timeout, so
-# the VRAM chart enriches at most this many jobs (top by effective
-# GPU-hours); the response reports the total candidate count so the UI
-# can disclose the truncation.
-VRAM_RECORD_CAP = 2000
-
 _prom = None
 
 

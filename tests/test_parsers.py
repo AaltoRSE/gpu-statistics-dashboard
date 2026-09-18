@@ -631,3 +631,68 @@ def test_sacct_jobs_invalid_elapsed(monkeypatch):
     assert jobs["401"]["submit"] == "2026-08-30T08:00:00"
     assert jobs["402"]["elapsed_s"] == 5 * 60 + 6
     assert jobs["402"]["submit"] == "2026-08-30T09:00:00"
+
+
+def _sacct_resilient_row(jobid):
+    return "%s|%s|job%s|user|acc|gpu-h200|COMPLETED|" \
+           "2026-08-30T08:00:00|2026-08-30T08:00:00|Unknown|00:10:00|" \
+           "gres/gpu:h200=1|gpu1|4" % (jobid, jobid, jobid)
+
+
+def test_sacct_resilient_reports_batched_progress(monkeypatch):
+    # 205 unique IDs -> 3 batches of 100/100/5. Progress must start at
+    # 0/3, advance monotonically as batches complete (any order), and end
+    # exactly at 3/3 with zero failures.
+    import slurm
+
+    def fake_batch(batch, start_iso=None):
+        rows = {}
+        for jobid in batch:
+            parts = _sacct_resilient_row(jobid).split("|")
+            rows[jobid] = dict(zip(slurm.SACCT_FIELDS, parts))
+        return rows
+
+    monkeypatch.setattr(slurm, "_sacct_batch", fake_batch)
+    ids = [str(700 + i) for i in range(205)]
+    states = []
+    enriched, failed = slurm.sacct_jobs_resilient(
+        ids, workers=2, progress=states.append)
+    assert failed == 0
+    assert set(enriched) == set(ids)
+    assert [s["total"] for s in states] == [3] * len(states)
+    assert states[0]["done"] == 0
+    assert states[0]["failed_batches"] == 0
+    assert states[-1]["done"] == 3
+    dones = [s["done"] for s in states]
+    assert dones == sorted(dones)
+    assert sorted(dones) == list(range(0, 4))
+    assert states[-1]["failed_batches"] == 0
+
+
+def test_sacct_resilient_progress_survives_failed_batch(monkeypatch):
+    # One batch failing twice must not discard the other batches or stall
+    # progress: the last state still reads 3/3 with failed_batches == 1,
+    # and the failed batch's IDs are absent from the result.
+    import slurm
+
+    def fake_batch(batch, start_iso=None):
+        if "702" in batch:
+            raise slurm.SlurmError("slurmdbd timeout")
+        rows = {}
+        for jobid in batch:
+            parts = _sacct_resilient_row(jobid).split("|")
+            rows[jobid] = dict(zip(slurm.SACCT_FIELDS, parts))
+        return rows
+
+    monkeypatch.setattr(slurm, "_sacct_batch", fake_batch)
+    ids = [str(700 + i) for i in range(205)]
+    states = []
+    enriched, failed = slurm.sacct_jobs_resilient(
+        ids, workers=1, progress=states.append)
+    assert failed == 1
+    # "702" lives in the first 100-ID batch (700-799), so the whole
+    # batch is lost — the other two batches survive intact.
+    assert set(enriched) == set(ids) - {str(i) for i in range(700, 800)}
+    assert states[0]["total"] == 3
+    assert states[-1]["done"] == 3
+    assert states[-1]["failed_batches"] == 1

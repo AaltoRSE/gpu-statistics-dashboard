@@ -543,7 +543,7 @@ $("pRunning").addEventListener("change", (e) => {
  * refilters client-side (no refetch); window / running-only refetch. */
 
 export let vramJobs = [];
-let vramTotal = 0; // candidates in the window, before the backend cap
+let vramTotal = 0; // every returned candidate (the server sends all of them)
 let vramToken = 0;
 let vramGpuType = "";
 let vramEnrichedFrac = 1.0; // sacct enrichment coverage of the returned records
@@ -556,12 +556,35 @@ export async function loadVram() {
   // freeze the other graphs.
   const origin = partitionsToken;
   setResultsLoading("vramResults", true);
+  const params = new URLSearchParams({ since_hours: $("pWindow").value });
+  if ($("pRunning").checked) params.set("running_only", "true");
+  if (selectedPartition) params.set("partition", selectedPartition);
+  // Reset the chip first: a previous request's batch count must not flash
+  // under this request's overlay while the first poll is in flight.
+  setVramProgress(0, 0, 0);
+  // Same contract as the queue's wait-history poll: while the data request
+  // runs, watch the batched sacct enrichment's progress under the SAME
+  // parameter identity the data request carries. Best-effort only — the
+  // data response decides the panel's outcome.
+  const pollTimer = setInterval(async () => {
+    try {
+      const resp = await fetch("/api/partitions/vram/progress?" + params);
+      if (resp.status === 404) {
+        // A stale backend without the progress route: stop hammering it
+        // every second — the data request itself still decides the panel.
+        clearInterval(pollTimer);
+        return;
+      }
+      if (!resp.ok) return;
+      const prog = await resp.json();
+      if (token === vramToken && prog && prog.total) {
+        setVramProgress(prog.done, prog.total, prog.failed_batches);
+      }
+    } catch (_) { /* progress is best-effort; the data result decides */ }
+  }, 1000);
   try {
-    const params = new URLSearchParams({ since_hours: $("pWindow").value });
-    if ($("pRunning").checked) params.set("running_only", "true");
-    if (selectedPartition) params.set("partition", selectedPartition);
     // The chart shows allocated vs effective directly; the backend weight
-    // param (cap ordering) keeps its default.
+    // param (enrichment cap ordering) keeps its default.
     const data = await api("/api/partitions/vram?" + params);
     if (token !== vramToken) return; // a newer VRAM request supersedes this one
     panelOk("vramResults");
@@ -575,9 +598,20 @@ export async function loadVram() {
     if (token === vramToken && origin === partitionsToken)
       showPanelError("vramResults", e, loadVram, "the VRAM distribution");
   } finally {
+    clearInterval(pollTimer);
     if (token === vramToken && origin === partitionsToken)
       setResultsLoading("vramResults", false);
   }
+}
+
+export function setVramProgress(done, total, failed) {
+  const panel = $("vramResults");
+  const chip = panel.querySelector(".results-loading");
+  if (!chip) return;
+  chip.innerHTML = escapeHtml(total
+    ? "Loading VRAM distribution: batch " + done + " of " + total
+      + (failed ? " (" + failed + " failed)" : "") + "&hellip;"
+    : "Loading VRAM distribution&hellip;");
 }
 
 function fillVramGpuTypes() {
@@ -674,11 +708,8 @@ function renderVram() {
   const totalEff = matched
     .filter((j) => allocOf(j) != null)
     .reduce((s, j) => s + Math.min(j.gpu_hours_eff || 0, j.gpu_hours), 0);
-  const truncated = vramTotal > vramJobs.length;
   const scopeBits = [
-    truncated
-      ? matched.length + " / " + vramJobs.length + " (top of " + vramTotal + ")"
-      : matched.length + " jobs",
+    matched.length + " jobs",
     selectedPartition,
     vramGpuType,
   ].filter(Boolean);

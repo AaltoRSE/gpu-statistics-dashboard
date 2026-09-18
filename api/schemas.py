@@ -388,8 +388,9 @@ class VramResponse(BaseModel):
     window: Window
     step: int
     total: int = Field(
-        description="Candidate job count before the sacct-enrichment cap; "
-                    "jobs may hold fewer records than this.")
+        description="Returned candidate job count; every VRAM-bearing job "
+                    "in the window (and partition filter) is returned, so "
+                    "this equals len(jobs).")
     enriched_frac: float = Field(
         default=0.0,
         description="Fraction of the returned records whose allocated "

@@ -6,6 +6,7 @@ Run: .venv/bin/python -m pytest tests/ -q
 import os
 import re
 import sys
+import threading
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -1150,6 +1151,136 @@ def test_partitions_queue_progress_endpoint_serves_batch_state(
         domain.partitions.progress_store.pop(key, None)
 
 
+def test_partitions_vram_progress_endpoint_serves_batch_state(
+        client, fake_prom):
+    # Same polling contract as the queue's progress route: the VRAM
+    # progress endpoint must resolve the SAME stable, scope-matched key
+    # the in-flight VRAM fetch publishes under.
+    key = cache.vram_progress_key(24, False, "h200")
+    domain.partitions.progress_store[key] = {
+        "done": 3, "total": 5, "failed_batches": 1,
+    }
+    try:
+        r = client.get("/api/partitions/vram/progress",
+                       params={"since_hours": 24, "partition": "h200"})
+        assert r.status_code == 200
+        assert r.json() == {"done": 3, "total": 5, "failed_batches": 1}
+        # A different partition / window / flag must NOT observe this
+        # fetch's state: the key covers every candidate-affecting param.
+        for wrong in ({"partition": "h100"},
+                      {"partition": "h200", "since_hours": 72},
+                      {"partition": "h200", "running_only": "true"}):
+            assert client.get("/api/partitions/vram/progress",
+                              params=wrong).json() is None
+        # Nothing in flight reads as null, never a fabricated batch.
+        domain.partitions.progress_store.clear()
+        assert client.get("/api/partitions/vram/progress",
+                          params={"since_hours": 24,
+                                  "partition": "h200"}).json() is None
+    finally:
+        domain.partitions.progress_store.pop(key, None)
+
+
+def test_partitions_vram_progress_clears_after_failed_fetch(
+        client, fake_prom, monkeypatch):
+    # A failure inside the enrichment's cache-miss leader must leave no
+    # stale in-flight entry behind: later polls must see null, not a hung
+    # batch state.
+    def boom(*args, progress=None, **kwargs):
+        if progress:
+            progress({"done": 1, "total": 3, "failed_batches": 0})
+        raise appmod.PrometheusError("prometheus down")
+
+    monkeypatch.setattr(deps, "sacct_jobs_resilient", boom)
+
+    r = client.get("/api/partitions/vram",
+                   params={"since_hours": 24})
+    assert r.status_code == 502
+    assert domain.partitions.progress_store == {}
+    assert client.get("/api/partitions/vram/progress",
+                      params={"since_hours": 24}).json() is None
+
+
+def test_partitions_vram_follower_never_rewinds_shared_progress(
+        client, fake_prom, monkeypatch):
+    # A same-scope follower joins the leader's enrichment Future, so it
+    # must not touch the shared progress key: a follower-side seed would
+    # rewind the leader's live batch count to 0, and a follower-side
+    # clear would erase it mid-run. Only the cache-miss leader publishes.
+    progress_key = cache.vram_progress_key(24, False, "")
+    store = domain.partitions.progress_store
+    leader_advanced = threading.Event()
+    release_leader = threading.Event()
+    results = {}
+
+    def slow_resilient(ids, start_iso=None, workers=2, progress=None):
+        assert progress is not None
+        progress({"done": 1, "total": 1, "failed_batches": 0})
+        leader_advanced.set()
+        # Hold the enrichment open so the follower's whole request
+        # lifecycle (route entry through finally) races with it.
+        release_leader.wait(timeout=10)
+        return {j: SACCT[j] for j in ids}, 0
+
+    def run(name, params):
+        results[name] = client.get("/api/partitions/vram", params=params)
+
+    monkeypatch.setattr(deps, "sacct_jobs_resilient", slow_resilient)
+    params = {"since_hours": 24}
+    leader = threading.Thread(target=run, args=("leader", params))
+    follower = threading.Thread(target=run, args=("follower", params))
+    leader.start()
+    try:
+        assert leader_advanced.wait(timeout=10)
+        follower.start()
+        # A correct follower joins the leader's Future and stays blocked
+        # until the leader is released: still alive, no result yet.
+        follower.join(timeout=2)
+        assert follower.is_alive(), \
+            "follower must block on the leader's Future, not run its own fetch"
+        assert "follower" not in results
+        # While the follower sat joined on the request, the leader's
+        # live state was neither rewound to 0 nor erased.
+        assert store[progress_key] == {"done": 1, "total": 1,
+                                       "failed_batches": 0}
+        release_leader.set()
+        leader.join(timeout=10)
+        follower.join(timeout=10)
+        assert results["leader"].status_code == 200
+        assert results["follower"].status_code == 200
+    finally:
+        release_leader.set()
+        leader.join(timeout=10)
+    # After completion the leader's finally cleared the single entry.
+    assert store == {}
+
+
+def test_partitions_vram_publishes_progress_from_enrichment(
+        client, fake_prom, monkeypatch):
+    # The enrichment's cache-miss leader must surface the resilient
+    # helper's real batch states: the last observed state is the final
+    # batch with its failure count.
+    states = []
+    def fake_resilient(ids, start_iso=None, workers=2, progress=None):
+        for state in ({"done": 1, "total": 1, "failed_batches": 0},
+                      {"done": 1, "total": 1, "failed_batches": 1}):
+            states.append(state)
+            if progress:
+                progress(state)
+        return {j: SACCT[j] for j in ids}, 1
+
+    monkeypatch.setattr(deps, "sacct_jobs_resilient", fake_resilient)
+    data = client.get("/api/partitions/vram", params={"since_hours": 24}).json()
+    assert data["failed_batches"] == 1
+    # The in-flight entry is cleared once the response is built.
+    assert domain.partitions.progress_store == {}
+    # The route published both states; the last one carried the failure.
+    assert states[-1] == {"done": 1, "total": 1, "failed_batches": 1}
+    # A poll after completion sees null progress, not the last batch.
+    assert client.get("/api/partitions/vram/progress",
+                      params={"since_hours": 24}).json() is None
+
+
 def test_partitions_queue_progress_clears_after_failed_fetch(
         client, fake_prom, monkeypatch):
     # A SlurmError during completed_jobs must leave no stale in-flight
@@ -1346,15 +1477,21 @@ def test_partitions_vram_records(client):
     assert data["total"] == 4
 
 
-def test_partitions_vram_discloses_truncation(client, fake_prom, monkeypatch):
-    monkeypatch.setattr(deps, "VRAM_RECORD_CAP", 2)
-    r = client.get("/api/partitions/vram", params={"since_hours": 24})
-    assert r.status_code == 200
-    data = r.json()
-    # 4 candidates but the cap of 2 is enforced on the payload…
-    assert len(data["jobs"]) == 2
-    # …while total still reports the full candidate count
-    assert data["total"] == 4
+def test_partitions_vram_returns_every_candidate(client, fake_prom,
+                                                 monkeypatch):
+    # No cap: the VRAM chart must see every VRAM-bearing job in the
+    # window. The fixture's four candidates exceed the old cap-shaped
+    # boundary (2), and all of them reach the enrichment and the payload
+    # with total == len(jobs).
+    seen_ids = []
+    monkeypatch.setattr(
+        deps, "sacct_jobs_resilient",
+        lambda ids, start_iso=None, **kw: (
+            seen_ids.extend(ids) or ({j: SACCT[j] for j in ids}, 0)))
+    data = client.get("/api/partitions/vram", params={"since_hours": 24}).json()
+    assert sorted(seen_ids) == ["1", "2", "3", "4"]
+    assert len(data["jobs"]) == 4
+    assert data["total"] == 4 == len(data["jobs"])
 
 
 def test_partitions_vram_running_only_filters_live(client, fake_prom):
