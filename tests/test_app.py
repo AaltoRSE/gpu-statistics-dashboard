@@ -3,11 +3,8 @@
 Run: .venv/bin/python -m pytest tests/ -q
 """
 
-import os
 import re
-import sys
-
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import threading
 
 import pytest  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
@@ -20,7 +17,11 @@ import domain.metadata as domain_metadata  # noqa: E402
 import domain.partitions  # noqa: E402
 import domain.partitions as domain_partitions  # noqa: E402
 import slurm  # noqa: E402
+from api import jobs as api_jobs  # noqa: E402
+from api import nodes as api_nodes  # noqa: E402
+from api import partitions as api_partitions  # noqa: E402
 from api import users as api_users  # noqa: E402
+from prom import PrometheusError  # noqa: E402
 
 # Deterministic "now" (2026-08-30T18:26:40Z): job 1's sacct start
 # (2026-08-28T00:00:00) is ~2.2 days back, inside the seven-day clamp.
@@ -1563,6 +1564,199 @@ def test_slurm_error_maps_to_502(client, fake_prom, monkeypatch):
     r = client.get("/api/partitions/vram", params={"since_hours": 24})
     assert r.status_code == 502
     assert r.json()["error"] == "slurm_unreachable"
+
+
+def test_partitions_sources_run_concurrently(client, fake_prom, monkeypatch):
+    # The route submits its independent sources together: each source
+    # must be ENTERED while the other is still blocked. A sequential
+    # implementation deadlocks the paired events and fails on timeout.
+    entered = {"nodes": False, "series": False}
+    lock = threading.Lock()
+    both_entered = threading.Event()
+
+    def slow_nodes():
+        with lock:
+            entered["nodes"] = True
+        both_entered.set()
+        assert both_entered.wait(timeout=5)
+        return list(NODES)
+
+    def slow_series(*args, **kwargs):
+        with lock:
+            entered["series"] = True
+        both_entered.set()
+        assert both_entered.wait(timeout=5)
+        return [], [], [], 1, 2, 120
+
+    monkeypatch.setattr(deps, "show_nodes", slow_nodes)
+    monkeypatch.setattr(api_partitions, "partition_window_series",
+                        slow_series)
+    monkeypatch.setattr(api_partitions, "node_current_series",
+                        lambda: ([], [], [], []))
+    r = client.get("/api/partitions", params={"since_hours": 24})
+    assert r.status_code == 200
+    assert entered == {"nodes": True, "series": True}
+
+
+def test_partitions_node_current_overlaps_series(client, fake_prom,
+                                                 monkeypatch):
+    # Same contract for the third source: the live node-current series
+    # is submitted together with the other two.
+    entered = {"nodes": False, "series": False, "current": False}
+    lock = threading.Lock()
+    release = threading.Event()
+
+    def mark(key):
+        def fn(*args, **kwargs):
+            with lock:
+                entered[key] = True
+            if all(entered.values()):
+                release.set()
+            assert release.wait(timeout=5)
+            if key == "nodes":
+                return list(NODES)
+            if key == "series":
+                return [], [], [], 1, 2, 120
+            return [], [], [], []
+        return fn
+
+    monkeypatch.setattr(deps, "show_nodes", mark("nodes"))
+    monkeypatch.setattr(api_partitions, "partition_window_series",
+                        mark("series"))
+    monkeypatch.setattr(api_partitions, "node_current_series",
+                        mark("current"))
+    r = client.get("/api/partitions", params={"since_hours": 24})
+    assert r.status_code == 200
+    assert entered == {"nodes": True, "series": True, "current": True}
+
+
+def test_jobs_sources_run_concurrently(client, fake_prom, monkeypatch):
+    # /api/jobs submits the window fetch and the scontrol snapshot
+    # together; neither may wait for the other.
+    entered = {"jobs": False, "nodes": False}
+    lock = threading.Lock()
+    release = threading.Event()
+
+    def mark(key):
+        def fn(*args, **kwargs):
+            with lock:
+                entered[key] = True
+            if all(entered.values()):
+                release.set()
+            assert release.wait(timeout=5)
+            if key == "nodes":
+                return list(NODES)
+            return [], 1, 2, 120
+        return fn
+
+    monkeypatch.setattr(api_jobs, "fetch_job_window", mark("jobs"))
+    monkeypatch.setattr(deps, "show_nodes", mark("nodes"))
+    r = client.get("/api/jobs", params={"since_hours": 24})
+    assert r.status_code == 200
+    assert entered == {"jobs": True, "nodes": True}
+
+
+def test_vram_sources_run_concurrently(client, fake_prom, monkeypatch):
+    # /api/partitions/vram submits the raw VRAM records and the scontrol
+    # snapshot together.
+    entered = {"vram": False, "nodes": False}
+    lock = threading.Lock()
+    release = threading.Event()
+
+    def mark(key):
+        def fn(*args, **kwargs):
+            with lock:
+                entered[key] = True
+            if all(entered.values()):
+                release.set()
+            assert release.wait(timeout=5)
+            if key == "nodes":
+                return list(NODES)
+            return [], 1, 2, 120
+        return fn
+
+    monkeypatch.setattr(api_partitions, "vram_raw_records", mark("vram"))
+    monkeypatch.setattr(deps, "show_nodes", mark("nodes"))
+    r = client.get("/api/partitions/vram", params={"since_hours": 24})
+    assert r.status_code == 200
+    assert entered == {"vram": True, "nodes": True}
+
+
+def test_nodes_sources_run_concurrently(client, fake_prom, monkeypatch):
+    # /api/nodes submits the scontrol snapshot and the live series
+    # together, and a Prometheus failure still yields the node table.
+    entered = {"nodes": False, "current": False}
+    lock = threading.Lock()
+    release = threading.Event()
+
+    def slow_nodes():
+        with lock:
+            entered["nodes"] = True
+        if all(entered.values()):
+            release.set()
+        assert release.wait(timeout=5)
+        return list(NODES)
+
+    def slow_current():
+        with lock:
+            entered["current"] = True
+        if all(entered.values()):
+            release.set()
+        assert release.wait(timeout=5)
+        raise PrometheusError("prom is down")
+
+    monkeypatch.setattr(deps, "show_nodes", slow_nodes)
+    monkeypatch.setattr(api_nodes, "node_current_series", slow_current)
+    r = client.get("/api/nodes")
+    assert r.status_code == 200
+    assert entered == {"nodes": True, "current": True}
+    assert r.json()["count"] >= 1
+    assert all(n["current_util"] is None for n in r.json()["nodes"])
+
+
+def test_job_detail_sources_run_concurrently(client, fake_prom, monkeypatch):
+    # /api/jobs/{jobid} submits its Prometheus series, sacct row, and
+    # scontrol snapshot together.
+    entered = {"series": False, "sacct": False, "active": False}
+    lock = threading.Lock()
+    release = threading.Event()
+
+    def mark(key):
+        def fn(*args, **kwargs):
+            with lock:
+                entered[key] = True
+            if all(entered.values()):
+                release.set()
+            assert release.wait(timeout=5)
+            if key == "series":
+                return [], []
+            if key == "sacct":
+                return {jobid: SACCT[jobid]
+                        for jobid in ("1",) if jobid in SACCT}
+            return {}
+        return fn
+
+    monkeypatch.setattr(api_jobs, "show_jobs", mark("active"), raising=False)
+    # api_jobs binds deps.show_jobs via deps: patch there.
+    monkeypatch.setattr(deps, "show_jobs", mark("active"))
+    monkeypatch.setattr(deps, "sacct_jobs",
+                        lambda ids, start_iso=None, **kw: mark("sacct")(ids))
+    # The series fetch is the route's own get_or_set(fn=fetch): gate the
+    # underlying prom calls instead.
+    original_query_range = fake_prom.query_range
+
+    def gated_query_range(query, start, end, step):
+        with lock:
+            entered["series"] = True
+        if all(entered.values()):
+            release.set()
+        assert release.wait(timeout=5)
+        return original_query_range(query, start, end, step)
+
+    monkeypatch.setattr(fake_prom, "query_range", gated_query_range)
+    r = client.get("/api/jobs/1", params={"since_hours": 24})
+    assert r.status_code == 200
+    assert entered == {"series": True, "sacct": True, "active": True}
 
 
 def test_partitions_vram_counts_zero_hour_rows_as_enriched(
