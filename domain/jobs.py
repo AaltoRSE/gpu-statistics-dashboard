@@ -60,12 +60,22 @@ def fetch_job_window(since_hours, include_vram=True, user=None):
         # The VRAM series query carries NO user selector (per-job peaks,
         # not per-user), so its cache identity is user-independent: a
         # user-scoped Jobs request shares the same VRAM fetch as the
-        # global window instead of duplicating it. The fetch reuses the
-        # RESOLVED utilization window above, so both cached series always
-        # share one window even when one entry is a hit and the other a
-        # miss.
-        vram = deps.route_cache.get_or_set(
-            cache.job_vram_key(since_hours), 60, fetch_vram)[0]
+        # global window instead of duplicating it. The cached entry
+        # carries the window it was fetched for; a hit whose envelope
+        # differs from the resolved utilization window (e.g. the
+        # utilization entry expired and re-fetched while the VRAM entry
+        # survived, or vice versa) is REFETCHED so vram_avg never spans
+        # a different interval than util — the response aggregates the
+        # two series into one window and must not mix bounds.
+        vram_entry = deps.route_cache.get_or_set(
+            cache.job_vram_key(since_hours), 60, fetch_vram)
+        if vram_entry[1:] == (start, now, step):
+            vram = vram_entry[0]
+        else:
+            vram, start, now, step = fetch_vram()
+            deps.route_cache.set(
+                cache.job_vram_key(since_hours), 60,
+                (vram, start, now, step))
     return _aggregate_job_window(util, vram, start, now, step)
 
 

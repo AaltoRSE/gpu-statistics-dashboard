@@ -65,14 +65,20 @@ def api_partitions(since_hours: float = Query(24, gt=0, le=168),
     # (TtlCache single-flights concurrent misses); aggregation needs
     # node types, so it runs after the futures resolve.
     if refresh:
-        # Forced refresh (the header's global button) bypasses the core
-        # charts' window cache and the Prometheus client cache. The
-        # pending queue keeps its own accounting cadence — a forced
-        # charts refresh must not wipe a wait-history fetch another
-        # viewer is watching progress on.
+        # Forced refresh (the header's global button) bypasses EVERY
+        # cache the response consumes: the core charts' window cache,
+        # the scontrol node snapshot (GPU types/capacity), and the live
+        # node-current snapshot (allocations). The pending queue keeps
+        # its own accounting cadence — a forced charts refresh must not
+        # wipe a wait-history fetch another viewer is watching progress
+        # on. invalidate() also supersedes any in-flight pre-refresh
+        # fetch for these keys, so this request cannot join and
+        # re-publish a stale generation.
         deps.get_prom().clear_cache()
-        deps.route_cache.invalidate(cache.partition_window_key(
-            since_hours, running_only))
+        deps.route_cache.invalidate(
+            cache.partition_window_key(since_hours, running_only),
+            cache.scontrol_nodes_key(),
+            cache.node_current_key())
     with ThreadPoolExecutor(max_workers=3) as executor:
         nodes_future = executor.submit(
             deps.route_cache.get_or_set,
@@ -257,13 +263,22 @@ def api_part_vram(since_hours: float = Query(24, gt=0, le=168),
                   refresh: bool = Query(False)):
     if refresh:
         # Forced refresh (the header's global button) bypasses the VRAM
-        # peaks cache and the shared utilization window it builds on.
-        # job_vram_key is NOT invalidated here: the VRAM records route
-        # never consumes that source (its peaks live under vram_key).
+        # peaks cache and the shared utilization window it builds on;
+        # the node snapshot (grouping) is invalidated up front, and the
+        # sacct enrichment entry below once the candidate IDs are
+        # known — both are consumed by this response, so a forced
+        # refresh that left them cached could return fresh Prometheus
+        # records under stale grouping/allocation metadata. job_vram_key
+        # is NOT invalidated here: the VRAM records route never consumes
+        # that source (its peaks live under vram_key).
         deps.get_prom().clear_cache()
         deps.route_cache.invalidate(
             cache.vram_key(since_hours, running_only),
-            cache.job_utilization_key(since_hours, None))
+            cache.job_utilization_key(since_hours, None),
+            cache.scontrol_nodes_key())
+        forced_sacct = True
+    else:
+        forced_sacct = False
     live = None
     if running_only:
         live = running_gpu_job_ids()
@@ -286,6 +301,13 @@ def api_part_vram(since_hours: float = Query(24, gt=0, le=168),
         nodes = nodes_future.result()
         records, start, now, step = raw_future.result()
     node_types = gpu_groups.build_node_index(nodes)
+    if forced_sacct:
+        # Invalidate the enrichment entry now that the (possibly
+        # filter-shrunk) candidate IDs are known: the finalize below
+        # re-fetches fresh sacct rows for exactly these IDs.
+        ids_now = sorted({r["jobid"] for r in records})
+        if ids_now:
+            deps.route_cache.invalidate(cache.sacct_resilient_key(ids_now))
     records, total, start, now, step, enriched_frac, failed_batches = \
         _finalize_vram_records(records, start, now, step, live,
                                partition, node_types, weight)

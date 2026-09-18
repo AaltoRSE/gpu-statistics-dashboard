@@ -1577,14 +1577,20 @@ def test_partitions_sources_run_concurrently(client, fake_prom, monkeypatch):
     def slow_nodes():
         with lock:
             entered["nodes"] = True
-        both_entered.set()
+        # Release only when BOTH sources are inside their fetch: a
+        # sequential implementation (nodes completes, then series
+        # starts) would leave this wait timing out and the request
+        # hanging — the gate discriminates.
+        if all(entered.values()):
+            both_entered.set()
         assert both_entered.wait(timeout=5)
         return list(NODES)
 
     def slow_series(*args, **kwargs):
         with lock:
             entered["series"] = True
-        both_entered.set()
+        if all(entered.values()):
+            both_entered.set()
         assert both_entered.wait(timeout=5)
         return [], [], [], 1, 2, 120
 

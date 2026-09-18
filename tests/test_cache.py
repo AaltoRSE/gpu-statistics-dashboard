@@ -171,3 +171,98 @@ def test_get_or_set_concurrent_followers_all_see_the_leaders_exception():
 
     assert calls == [1]  # fn still ran exactly once
     assert errors == ["boom"] * 5  # every caller saw the same failure
+
+
+def test_invalidate_supersedes_an_in_flight_fetch():
+    # A forced refresh that races a cold fetch must not JOIN the
+    # pre-refresh flight (and re-cache its pre-refresh result): the
+    # post-invalidate caller starts its own fresh fetch, the old
+    # leader's result never lands in the store, and the old leader
+    # completes without error (no InvalidStateError on a cancelled
+    # future).
+    c = cache.TtlCache()
+    old_release = threading.Event()
+    old_started = threading.Event()
+
+    def old_fn():
+        old_started.set()
+        assert old_release.wait(timeout=5)
+        return "stale"
+
+    leader_result = {}
+
+    def old_leader():
+        try:
+            leader_result["value"] = c.get_or_set("k", 60, old_fn)
+        except Exception as e:  # noqa: BLE001 - surfaced below
+            leader_result["error"] = e
+
+    old_thread = threading.Thread(target=old_leader)
+    old_thread.start()
+    assert old_started.wait(timeout=5)
+
+    # Forced refresh lands while the old fetch is still running.
+    c.invalidate("k")
+
+    fresh_calls = []
+
+    def fresh_fn():
+        fresh_calls.append(1)
+        return "fresh"
+
+    # The post-invalidate caller must run its OWN fn, not join old_fn.
+    assert c.get_or_set("k", 60, fresh_fn) == "fresh"
+
+    old_release.set()
+    old_thread.join(timeout=5)
+    assert not old_thread.is_alive(), "the superseded leader hung"
+    assert "error" not in leader_result, (
+        "the superseded leader crashed: %r" % leader_result.get("error"))
+    assert leader_result.get("value") == "stale"  # its own caller still sees it
+    assert fresh_calls == [1]
+    # The old leader's late publish must not overwrite the fresh value:
+    # wait past any possible interleaving, then confirm the store holds
+    # the FRESH generation.
+    time.sleep(0.05)
+    assert c.get_or_set("k", 60, lambda: "post") == "fresh"
+
+
+def test_invalidate_ignores_warm_store_value():
+    # invalidate() followed by get_or_set must REFETCH even if the
+    # dropped entry's TTL had not expired.
+    c = cache.TtlCache()
+    assert c.get_or_set("k", 60, lambda: "old") == "old"
+    c.invalidate("k")
+    assert c.get_or_set("k", 60, lambda: "new") == "new"
+
+
+def test_invalidate_keeps_single_flight_for_concurrent_refreshes():
+    # Only ONE fresh fetch may run even when several callers arrive
+    # after the invalidate (the first becomes the fresh leader; the
+    # rest join its future — the marker is consumed immediately).
+    c = cache.TtlCache()
+    c.invalidate("k")
+    calls = []
+    call_lock = threading.Lock()
+    release = threading.Event()
+
+    def fn():
+        with call_lock:
+            calls.append(1)
+        assert release.wait(timeout=5)
+        return "fresh"
+
+    results = [None] * 4
+
+    def worker(i):
+        results[i] = c.get_or_set("k", 60, fn)
+
+    threads = [threading.Thread(target=worker, args=(i,)) for i in range(4)]
+    for t in threads:
+        t.start()
+    time.sleep(0.05)
+    release.set()
+    for t in threads:
+        t.join(timeout=5)
+    assert calls == [1]
+    assert results == ["fresh"] * 4
