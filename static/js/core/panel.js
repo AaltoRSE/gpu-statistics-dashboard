@@ -13,8 +13,20 @@ export function errBox(show, msg) {
   if (show) box.textContent = msg;
 }
 
-export function setResultsLoading(resultsId, loading) {
+export function setResultsLoadingMessage(resultsId, message) {
   const el = $(resultsId);
+  const chip = el && el.querySelector(".results-loading");
+  // Plain text only: assembling "&hellip;" at runtime would render the
+  // literal word "hellip" once escaped; a real "…" needs no entity.
+  if (chip) chip.textContent = message;
+}
+
+export function setResultsLoading(resultsId, loading, message = null) {
+  const el = $(resultsId);
+  // Each refresh must restate its panel's own label: a prior load's
+  // batch-progress text would otherwise survive as the next load's
+  // first message.
+  if (loading && message !== null) setResultsLoadingMessage(resultsId, message);
   el.classList.toggle("loading", loading);
   el.setAttribute("aria-busy", loading ? "true" : "false");
 }

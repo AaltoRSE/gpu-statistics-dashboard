@@ -390,6 +390,60 @@ def test_completed_jobs_keeps_successful_chunks_after_failure(monkeypatch):
                         "complete": False}
 
 
+
+def test_completed_jobs_progress_reports_zero_then_completion(monkeypatch):
+    import slurm
+
+    # 3 daily chunks, one exhausts its retry and must surface in the
+    # cumulative failed count.
+    def fake_run(cmd, timeout=30):
+        if cmd[cmd.index("-S") + 1] == "2026-09-11T14:40:57":
+            raise slurm.SlurmError("sacct down")
+        return ("1|1|job|alice|acc|gpu-h200|COMPLETED|"
+                "2026-09-10T15:00:00|2026-09-10T14:00:00|"
+                "2026-09-10T16:00:00|01:00:00|gres/gpu:h200=1|gpu1|8")
+
+    monkeypatch.setattr(slurm, "_run", fake_run)
+    states = []
+    records, coverage = slurm.completed_jobs(
+        "2026-09-10T14:40:57", "2026-09-13T14:40:57",
+        progress=states.append)
+    assert states[0] == {"done": 0, "total": 3, "failed_batches": 0}
+    assert states[-1] == {"done": 3, "total": 3, "failed_batches": 1}
+    for prev, cur in zip(states, states[1:]):
+        assert cur["done"] > prev["done"]  # monotonic
+    assert coverage == {"failed_batches": 1, "successful_batches": 2,
+                        "complete": False}
+    assert records  # the failed chunk did not discard the others
+
+
+def test_sacct_jobs_resilient_progress_batches(monkeypatch):
+    import slurm
+
+    # 250 IDs -> 3 batches of 100/100/50; one batch fails after its retry
+    # and must be counted without discarding the others. IDs sort
+    # lexicographically ("0","1","10","100",…), so target the batch that
+    # starts at "189".
+    ids = [str(i) for i in range(250)]
+
+    def fake_batch(batch, start_iso=None):
+        if batch[0] == "189":
+            raise slurm.SlurmError("batch down")
+        return {jid: {"JobID": jid, "User": "alice"} for jid in batch}
+
+    monkeypatch.setattr(slurm, "_sacct_batch", fake_batch)
+    states = []
+    enriched, failed = slurm.sacct_jobs_resilient(
+        ids, progress=states.append)
+    assert [s["total"] for s in states] == [3] * len(states)
+    assert states[0] == {"done": 0, "total": 3, "failed_batches": 0}
+    assert states[-1] == {"done": 3, "total": 3, "failed_batches": 1}
+    for prev, cur in zip(states, states[1:]):
+        assert cur["done"] == prev["done"] + 1
+    assert failed == 1
+    assert enriched["0"]["jobid"] == "0" or enriched  # shape retained
+    assert "189" not in enriched and "0" in enriched and "54" in enriched
+
 SCTRL_JOB_SAMPLE = (
     "JobId=100 JobName=train UserId=alice(1001) GroupId=alice(1001) Account=acc "
     "QOS=normal JobState=RUNNING NodeList=gpu1-2 NumNodes=2 NumCPUs=16 "

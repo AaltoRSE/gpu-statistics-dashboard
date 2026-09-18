@@ -15,6 +15,7 @@ from fastapi.testclient import TestClient  # noqa: E402
 import app as appmod  # noqa: E402
 import cache  # noqa: E402
 import deps  # noqa: E402
+import domain.common  # noqa: E402
 import domain.jobs as domain_jobs  # noqa: E402
 import domain.metadata as domain_metadata  # noqa: E402
 import domain.partitions  # noqa: E402
@@ -1775,3 +1776,109 @@ def test_completed_wait_summary_separates_mig_and_excludes_noncompleted():
     assert out["h200_3g.71gb"]["wait_per_gpu_hour_p50"] == 4.0
     assert coverage["valid_samples"] == {"h200": 2, "h200_3g.71gb": 1}
     assert coverage["excluded"] == {"state": 2}
+
+
+def test_step_for_range_long_windows():
+    # Long-window policy: through 31 days the Prometheus step coarsens to
+    # 1,800 s; beyond that the legacy fallback holds. 336 h (14 days) and
+    # 720 h (30 days) both land in the 1,800 s tier.
+    assert domain.common.step_for_range(7 * 86400) == 600
+    assert domain.common.step_for_range(336 * 3600) == 1800
+    assert domain.common.step_for_range(720 * 3600) == 1800
+    assert domain.common.step_for_range(32 * 86400) == 900
+
+
+@pytest.mark.parametrize("route", [
+    "/api/jobs",
+    "/api/jobs/1",
+    "/api/users",
+    "/api/partitions",
+    "/api/partitions/queue",
+    "/api/partitions/queue/progress",
+    "/api/partitions/vram",
+    "/api/partitions/vram/progress",
+])
+def test_window_routes_accept_30_days_reject_beyond(client, route):
+    # Every windowed route validates the shared dashboard window selector:
+    # the largest frontend choice (720 h) is accepted, anything beyond
+    # (721 h) is a 422 validation error.
+    assert client.get(route, params={"since_hours": 720}).status_code == 200
+    assert client.get(route, params={"since_hours": 721}).status_code == 422
+
+
+@pytest.mark.parametrize("route", [
+    "/api/jobs",
+    "/api/jobs/1",
+    "/api/users",
+    "/api/partitions",
+])
+def test_window_routes_span_720_hours_with_1800s_step(client, route):
+    data = client.get(route, params={"since_hours": 720}).json()
+    assert data["window"]["end"] - data["window"]["start"] == 720 * 3600
+    # Routes exposing the query step must carry the 1,800 s long-window
+    # value; list endpoints without a step field are skipped.
+    if "step" in data:
+        assert data["step"] == 1800
+
+
+def test_vram_progress_route_resolves_exact_identity(client):
+    # The VRAM poll must resolve ONLY the matching window/running/
+    # partition fetch: a seeded entry is invisible to any other
+    # parameter combination, and an unknown identity reads as null.
+    key = cache.vram_progress_key(24, False, "h200")
+    domain_partitions.progress_store[key] = {
+        "done": 2, "total": 5, "failed_batches": 0}
+    try:
+        hit = client.get("/api/partitions/vram/progress",
+                         params={"since_hours": 24, "partition": "h200"})
+        assert hit.status_code == 200
+        assert hit.json() == {"done": 2, "total": 5, "failed_batches": 0}
+        # A flag mismatch must not read the leader's state.
+        flag = client.get("/api/partitions/vram/progress",
+                          params={"since_hours": 24, "partition": "h200",
+                                  "running_only": "true"})
+        assert flag.json() is None
+        # Neither may a different partition or window.
+        other = client.get("/api/partitions/vram/progress",
+                           params={"since_hours": 24, "partition": "h100"})
+        assert other.json() is None
+        other = client.get("/api/partitions/vram/progress",
+                           params={"since_hours": 72, "partition": "h200"})
+        assert other.json() is None
+    finally:
+        domain_partitions.progress_store.pop(key, None)
+
+
+def test_vram_progress_publishes_and_clears(client, fake_prom, monkeypatch):
+    # The enrichment is the only truly batched part of the VRAM request:
+    # the route publishes an in-flight entry before any work, the batched
+    # helper's callback updates it, and a failed request must leave no
+    # stale state behind.
+    def fake_enrich(ids, start_iso=None, workers=2, progress=None):
+        meta = {j: SACCT[j] for j in ids if j in SACCT}
+        if progress:
+            progress({"done": 0, "total": 1, "failed_batches": 0})
+            progress({"done": 1, "total": 1, "failed_batches": 0})
+        return meta, 0
+
+    monkeypatch.setattr(deps, "sacct_jobs_resilient", fake_enrich)
+    data = client.get("/api/partitions/vram",
+                      params={"since_hours": 24}).json()
+    assert data["failed_batches"] == 0
+    assert domain_partitions.progress_store == {}
+
+    # A fresh 24h window identity: force the enrichment to run again by
+    # dropping the cached (dict, failed) tuple the first request stored,
+    # then make the resilient helper fail outright.
+    deps.route_cache.invalidate(
+        cache.sacct_resilient_key(sorted({"1", "2", "3", "4"})))
+
+    def boom(ids, start_iso=None, workers=2, progress=None):
+        if progress:
+            progress({"done": 1, "total": 3, "failed_batches": 1})
+        raise slurm.SlurmError("sacct unavailable")
+
+    monkeypatch.setattr(deps, "sacct_jobs_resilient", boom)
+    r = client.get("/api/partitions/vram", params={"since_hours": 24})
+    assert r.status_code == 502
+    assert domain_partitions.progress_store == {}

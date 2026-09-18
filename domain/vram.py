@@ -11,7 +11,7 @@ from promql import label_in, selector
 
 
 def vram_job_records(since_hours, running_only=False, partition="",
-                      node_gpu_types=None, weight="alloc"):
+                      node_gpu_types=None, weight="alloc", progress=None):
     """Per-job VRAM records for the utilization-filtered distribution chart.
 
     Each record carries the job's canonical GPU group (the Slurm partition,
@@ -96,7 +96,8 @@ def vram_job_records(since_hours, running_only=False, partition="",
             # Two workers: 2000 IDs mean 20 sequential 100-ID sacct calls
             # per failed batch, so low concurrency keeps the load bounded
             # instead of saturating slurmdbd with 8 parallel lookups.
-            lambda: deps.sacct_jobs_resilient(ids, workers=2))
+            lambda: deps.sacct_jobs_resilient(ids, workers=2,
+                                              progress=progress))
         enriched = 0
         for r in records:
             row = meta.get(r["jobid"]) or {}

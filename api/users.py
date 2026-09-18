@@ -10,7 +10,7 @@ router = APIRouter()
 
 
 @router.get("/api/users", response_model=UsersResponse)
-def api_users(since_hours: float = Query(24, gt=0, le=168)):
+def api_users(since_hours: float = Query(24, gt=0, le=720)):
     """Per-user GPU-activity aggregation over the window.
 
     Built from the same job window the Jobs tab uses (utilization and VRAM

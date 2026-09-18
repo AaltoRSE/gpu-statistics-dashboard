@@ -52,7 +52,7 @@ def _queue_snapshot(now, partition_types):
 
 
 @router.get("/api/partitions", response_model=PartitionsResponse)
-def api_partitions(since_hours: float = Query(24, gt=0, le=168),
+def api_partitions(since_hours: float = Query(24, gt=0, le=720),
                    running_only: bool = Query(False)):
     nodes = deps.route_cache.get_or_set(cache.scontrol_nodes_key(), 30, deps.show_nodes)
     node_types = gpu_groups.build_node_index(nodes)
@@ -75,7 +75,7 @@ def api_partitions(since_hours: float = Query(24, gt=0, le=168),
 
 @router.get("/api/partitions/queue",
             response_model=PartitionQueueResponse)
-def api_partition_queue(since_hours: float = Query(24, gt=0, le=168),
+def api_partition_queue(since_hours: float = Query(24, gt=0, le=720),
                         running_only: bool = Query(False)):
     """Live pending-job queue and historical waits, independent of the
     utilization endpoint.
@@ -205,7 +205,7 @@ def api_partition_queue(since_hours: float = Query(24, gt=0, le=168),
 
 
 @router.get("/api/partitions/queue/progress")
-def api_partition_queue_progress(since_hours: float = Query(24, gt=0, le=168),
+def api_partition_queue_progress(since_hours: float = Query(24, gt=0, le=720),
                                  running_only: bool = Query(False)):
     """Batched accounting progress for the queue's current-window fetch.
 
@@ -217,21 +217,49 @@ def api_partition_queue_progress(since_hours: float = Query(24, gt=0, le=168),
     return progress_store.get(key, None)
 
 
+@router.get("/api/partitions/vram/progress")
+def api_part_vram_progress(since_hours: float = Query(24, gt=0, le=720),
+                           running_only: bool = Query(False),
+                           partition: str = ""):
+    """Batched 100-ID enrichment progress for the VRAM route's fetch.
+
+    The browser polls this while the VRAM loader is in flight, with the
+    same window/running/partition parameters as the data request; the
+    enrichment records its batch state under the matching
+    ``vram_progress_key``. No in-flight fetch reads as JSON null.
+    """
+    key = cache.vram_progress_key(since_hours, running_only, partition)
+    return progress_store.get(key, None)
+
+
 @router.get("/api/partitions/vram", response_model=VramResponse)
-def api_part_vram(since_hours: float = Query(24, gt=0, le=168),
+def api_part_vram(since_hours: float = Query(24, gt=0, le=720),
                   running_only: bool = Query(False),
                   partition: str = "",
                   weight: str = Query("alloc", pattern="^(alloc|eff)$")):
-    node_types = gpu_groups.build_node_index(
-        deps.route_cache.get_or_set(cache.scontrol_nodes_key(), 30, deps.show_nodes))
-    records, total, start, now, step, enriched_frac, failed_batches = \
-        vram_job_records(since_hours, running_only, partition, node_types,
-                         weight)
-    return {
-        "window": window(start, now),
-        "step": step,
-        "total": total,
-        "enriched_frac": enriched_frac,
-        "failed_batches": failed_batches,
-        "jobs": records,
-    }
+    key = cache.vram_progress_key(since_hours, running_only, partition)
+    # Publish before any node/Prometheus work so a poll can already see
+    # the fetch is in flight; removed in finally so no stale state can
+    # survive a failed request.
+    progress_store[key] = {"done": 0, "total": 0, "failed_batches": 0}
+
+    def report(state):
+        progress_store[key] = state
+
+    try:
+        node_types = gpu_groups.build_node_index(
+            deps.route_cache.get_or_set(cache.scontrol_nodes_key(), 30,
+                                        deps.show_nodes))
+        records, total, start, now, step, enriched_frac, failed_batches = \
+            vram_job_records(since_hours, running_only, partition,
+                             node_types, weight, progress=report)
+        return {
+            "window": window(start, now),
+            "step": step,
+            "total": total,
+            "enriched_frac": enriched_frac,
+            "failed_batches": failed_batches,
+            "jobs": records,
+        }
+    finally:
+        progress_store.pop(key, None)
