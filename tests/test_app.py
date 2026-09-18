@@ -1552,6 +1552,42 @@ def test_partitions_vram_discloses_partial_enrichment(
     assert by_job["2"]["gpu_hours"] is None
 
 
+
+def test_vram_forced_refresh_invalidates_enrichment_for_filtered_ids(
+        client, fake_prom, monkeypatch):
+    # A partition-scoped forced refresh must invalidate the enrichment
+    # entry for the FINAL (filtered) ID set — the raw candidate set
+    # includes jobs the filter drops, so a caller-side invalidation
+    # keyed on raw IDs would miss the key the finalize actually
+    # consumes, and the forced response would render with the pre-
+    # refresh sacct rows.
+    partition = "h200_3g.71gb"
+    # Warm both entries: the unscoped fetch populates the raw candidate
+    # set AND the unscoped enrichment key; the partition fetch populates
+    # the FINAL filtered key.
+    client.get("/api/partitions/vram", params={"since_hours": 24})
+    client.get("/api/partitions/vram",
+               params={"since_hours": 24, "partition": partition})
+    resilient_calls = []
+    real_resilient = deps.sacct_jobs_resilient
+
+    def counting(ids, start_iso=None, **kw):
+        resilient_calls.append(list(ids))
+        return real_resilient(ids, start_iso, **kw)
+
+    monkeypatch.setattr(deps, "sacct_jobs_resilient", counting)
+    # Forced, partition-scoped: the only resilient call this makes must
+    # be for the filtered IDs — proving the finalize's invalidation hit
+    # the exact consumed key (a raw-ID invalidation would have left this
+    # entry cached and made zero calls).
+    r = client.get("/api/partitions/vram",
+                   params={"since_hours": 24, "partition": partition,
+                           "refresh": "true"})
+    assert r.status_code == 200
+    filtered_ids = [j["jobid"] for j in r.json()["jobs"]]
+    assert filtered_ids, "fixture must produce at least one filtered record"
+    assert resilient_calls == [sorted(filtered_ids)]
+
 def test_slurm_error_maps_to_502(client, fake_prom, monkeypatch):
     def boom():
         raise appmod.SlurmError("scontrol is not available")

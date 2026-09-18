@@ -68,17 +68,23 @@ def vram_raw_records(since_hours, live=None):
 
 
 def _finalize_vram_records(records, start, now, step, live,
-                           partition, node_gpu_types, weight):
+                           partition, node_gpu_types, weight,
+                           force_enrichment=False):
     """GPU-group assignment, live/partition filtering, cap, sacct
-    enrichment, and final ordering of raw VRAM records. Pure
-    post-processing plus the (cached) enrichment — runs after a
-    concurrent fetch resolves. Returns the full ``vram_job_records``
-    tuple.
+    enrichment, and final ordering of raw VRAM records. Post-processing
+    plus the (cached) enrichment — runs after a concurrent fetch
+    resolves. Returns the full ``vram_job_records`` tuple.
 
     ``total`` — the candidate count the response discloses — is the
     post-filter, pre-cap count, exactly the pre-split semantics. The
     raw record list is copied before mutation: it may be a cached
     entry shared by concurrent requests.
+
+    ``force_enrichment`` (forced refresh) invalidates the enrichment
+    entry for the FINAL filtered/capped ID set immediately before the
+    get_or_set that consumes it — the caller cannot do this correctly
+    from the raw records, because filters and the cap can change which
+    IDs (hence which key) the enrichment actually uses.
     """
     node_gpu_types = node_gpu_types or {}
     records = [dict(r) for r in records]
@@ -100,6 +106,13 @@ def _finalize_vram_records(records, start, now, step, live,
     enriched_frac = 0.0
     failed_batches = 0
     if ids:
+        if force_enrichment:
+            # Forced refresh: the FINAL id set is known only here, after
+            # live/partition filters and the cap. Invalidate the exact
+            # entry the get_or_set below consumes — the caller's
+            # raw-records-based invalidation would miss this key when
+            # filters or the cap change which IDs are used.
+            deps.route_cache.invalidate(cache.sacct_resilient_key(ids))
         meta, failed_batches = deps.route_cache.get_or_set(
             # A distinct key: sacct_key holds the plain dict the Jobs
             # paths consume; storing the (dict, failed) tuple under it

@@ -301,16 +301,13 @@ def api_part_vram(since_hours: float = Query(24, gt=0, le=168),
         nodes = nodes_future.result()
         records, start, now, step = raw_future.result()
     node_types = gpu_groups.build_node_index(nodes)
-    if forced_sacct:
-        # Invalidate the enrichment entry now that the (possibly
-        # filter-shrunk) candidate IDs are known: the finalize below
-        # re-fetches fresh sacct rows for exactly these IDs.
-        ids_now = sorted({r["jobid"] for r in records})
-        if ids_now:
-            deps.route_cache.invalidate(cache.sacct_resilient_key(ids_now))
+    # forced_sacct reaches the finalize so the enrichment entry for the
+    # FINAL filtered/capped ID set (known only there) is invalidated
+    # right before the get_or_set that consumes it.
     records, total, start, now, step, enriched_frac, failed_batches = \
         _finalize_vram_records(records, start, now, step, live,
-                               partition, node_types, weight)
+                               partition, node_types, weight,
+                               force_enrichment=forced_sacct)
     return {
         "window": window(start, now),
         "step": step,
