@@ -527,11 +527,14 @@ def wait_empty():
 
 
 progress_store = {}
-"""Per-window latest batched accounting progress for the queue loader.
+"""Latest batched accounting progress, keyed per fetch scope.
 
-The queue endpoint polls this while the first seven-day accounting fetch
-works through its daily batches, so the UI can show real progress instead
-of one opaque spinner. Each fetch updates, then clears, its entry.
+Two consumers publish here and their poll routes read it: the queue's
+seven-day wait-history fetch (key from
+``cache.completed_progress_key``) and the VRAM distribution's sacct
+enrichment (key from ``cache.vram_progress_key``). Each fetch updates,
+then clears, its own entry, so a poll never observes a finished or
+failed fetch's stale state.
 """
 
 

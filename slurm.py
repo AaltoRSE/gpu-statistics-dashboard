@@ -10,7 +10,7 @@ import json
 import re
 import shutil
 import subprocess
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from zoneinfo import ZoneInfo
 
 SACCT_FIELDS = [
@@ -606,37 +606,51 @@ def sacct_jobs(job_ids, start_iso=None, workers=8):
     return enriched
 
 
-def sacct_jobs_resilient(job_ids, start_iso=None, workers=8):
+def sacct_jobs_resilient(job_ids, start_iso=None, workers=8, progress=None):
     """``sacct_jobs`` plus failed-batch accounting, for callers that
     disclose partial coverage instead of failing the whole enrichment.
 
     Each 100-ID batch retries once; a batch that still fails is counted in
     the returned tuple instead of discarding every other batch's records
     (one slow slurmdbd response must not 502 a 2000-job enrichment).
+    ``progress`` receives ``{"done", "total", "failed_batches"}`` before
+    the batches are submitted and after each batch completes, so a long
+    enrichment can surface real batch progress.
     """
     job_ids = sorted(set(job_ids))
     if not job_ids:
         return {}, 0
     batches = [job_ids[i : i + 100] for i in range(0, len(job_ids), 100)]
+    total = len(batches)
     results = {}
     failed_batches = 0
 
     def fetch(batch):
-        nonlocal failed_batches
+        # Failure is reported as the (rows, failed) pair instead of
+        # mutating shared counters from the worker threads.
         try:
             for attempt in range(2):
                 try:
-                    return _sacct_batch(batch, start_iso)
+                    return _sacct_batch(batch, start_iso), False
                 except SlurmError:
                     if attempt:
                         raise
         except SlurmError:
-            failed_batches += 1
-            return {}
+            return {}, True
 
+    if progress:
+        progress({"done": 0, "total": total, "failed_batches": 0})
     with ThreadPoolExecutor(max_workers=workers) as pool:
-        for chunk in pool.map(fetch, batches):
+        futures = [pool.submit(fetch, batch) for batch in batches]
+        # as_completed: `done` must advance as soon as any batch finishes,
+        # not only when input order reaches it.
+        for done, future in enumerate(as_completed(futures), 1):
+            chunk, failed = future.result()
+            failed_batches += int(failed)
             results.update(chunk)
+            if progress:
+                progress({"done": done, "total": total,
+                          "failed_batches": failed_batches})
     enriched = {}
     for jobid, row in results.items():
         enriched[jobid] = _enrich_sacct_row(row)
