@@ -176,6 +176,12 @@ td.chip-cell { white-space:normal; }
   margin:2px 0 10px; }
 .queue-unique .small { font-weight:400; }
 
+/* Users-tab contact history: the message column wraps (unlike the
+   default nowrap data cells), and the source-warning line sits above
+   the table. */
+td.msg-cell { white-space: normal; min-width: 220px; }
+#userContactsStatus:not(:empty) { color: var(--warn); margin: 4px 0; }
+
 /* Panel-local loading: a small status chip plus a light dim — content stays
    readable (no blur) so a refresh never implies the shown data is gone. */
 .results-panel { position:relative; }

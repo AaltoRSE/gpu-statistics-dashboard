@@ -399,6 +399,25 @@ def test_jobs_endpoint_nonempty(client):
     assert job["gpu_hours_eff"] is not None
 
 
+def test_jobs_window_accepts_30_days(client, fake_prom):
+    # The Users tab's 30-day option sends since_hours=720 to
+    # /api/jobs for the selected user's table; the endpoint must accept
+    # it and scope the PromQL user filter as usual.
+    r = client.get("/api/jobs",
+                   params={"since_hours": 720, "user": "alice"})
+    assert r.status_code == 200
+    data = r.json()
+    assert data["window"]["end"] - data["window"]["start"] == 720 * 3600
+    assert data["count"] >= 1
+    queries = [q for t, q in fake_prom.calls if t == "range"]
+    assert any('user="alice"' in q for q in queries)
+
+
+def test_jobs_window_rejects_over_30_days(client):
+    assert client.get("/api/jobs",
+                      params={"since_hours": 721}).status_code == 422
+
+
 def test_jobs_mean_util_not_trivially_100(client):
     r = client.get("/api/jobs", params={"since_hours": 24})
     utils = [j["mean_util"] for j in r.json()["jobs"]]
@@ -500,6 +519,11 @@ def test_users_mean_util_weights_samples_not_effective_gpu_hours(client, monkeyp
 
 def test_users_window_validation(client):
     assert client.get("/api/users", params={"since_hours": 0}).status_code == 422
+    # Users tab allows up to 30 days (720 h).
+    assert client.get("/api/users",
+                      params={"since_hours": 721}).status_code == 422
+    assert client.get("/api/users",
+                      params={"since_hours": 720}).status_code == 200
 
 
 def test_jobs_user_filter_is_query_scoped(client, fake_prom):
@@ -1919,13 +1943,20 @@ def test_user_activity_escapes_username(client, fake_prom):
     assert any('user="al\\"ice"' in q for q in queries)
 
 
-def test_user_activity_window_validation(client):
+def test_user_activity_window_validation(client, fake_prom):
     assert client.get("/api/users/a/activity",
                       params={"since_hours": 0}).status_code == 422
+    # The Users tab offers 24 h / 3 d / 7 d / 30 d; the cap is 30 days.
     assert client.get("/api/users/a/activity",
-                      params={"since_hours": 169}).status_code == 422
+                      params={"since_hours": 721}).status_code == 422
     r = client.get("/api/users/a/activity", params={"since_hours": 168})
     assert r.status_code == 200
+    r = client.get("/api/users/a/activity", params={"since_hours": 720})
+    assert r.status_code == 200
+    data = r.json()
+    # 30 days uses the coarse 1800 s step tier to keep the range light.
+    assert data["step"] == 1800
+    assert data["window"]["end"] - data["window"]["start"] == 720 * 3600
 
 
 def test_user_activity_result_is_cached(client, fake_prom):

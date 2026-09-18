@@ -134,7 +134,15 @@ export function refreshActiveTab() {
   const name = active.id.replace(/^tab-/, "");
   if (name === "jobs") jobsTab.loadJobs();
   else if (name === "partitions") partitionsTab.loadPartitions();
-  else if (name === "users") usersTab.loadUsers();
+  else if (name === "users") {
+    usersTab.loadUsers();
+    // An open selection reloads its activity graph and job list too;
+    // separate request tokens drop any stale in-flight response.
+    if (usersTab.userSelected) {
+      usersTab.loadUserActivity(usersTab.userSelected);
+      usersTab.loadUserJobs(usersTab.userSelected);
+    }
+  }
   else if (name === "nodes") nodesTab.loadNodes();
 }
 
@@ -154,5 +162,9 @@ export function rerenderAllPlots() {
   }
   if (nodesTab.nodeDetailData && $("nodeDetailResults").style.display !== "none") {
     nodesTab.renderNodeDetail(nodesTab.nodeDetailData, nodesTab.nodeDetailName);
+  }
+  if (usersTab.userActivityData &&
+      $("userActivityResults").style.display !== "none") {
+    usersTab.renderUserActivity();
   }
 }

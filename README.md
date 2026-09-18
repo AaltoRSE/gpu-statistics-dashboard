@@ -64,6 +64,22 @@ OS-level preference applies when no choice has been saved.
   card below (same enrichment and detail links as the Jobs tab). Raw text
   that matches no list entry is still sent, so admins can look up users
   with no GPU activity in the window.
+- A sortable **Contacts** column joins each user with the Garage Diary
+  history (fetched alongside the list on every load/refresh): `Never` for
+  an active user with no record, `Unavailable` when the contact source
+  cannot be read (null-sorted last), otherwise the count plus the latest
+  contact date. Selecting a user adds the utilization-history card:
+  the all-time contact table (Date + wrapping Message, newest first) and
+  a utilization chart with an **Overall**/**By job** view selector — both
+  views derive from one cached request, so switching never refetches.
+  Contacts whose Europe/Helsinki calendar date intersects the selected
+  window are overlaid on the chart as a dotted vertical line plus a
+  diamond marker at 100% (same-day contacts collapse into one marker
+  listing every message; the table stays uncollapsed and always shows
+  the complete history). No contact time is inferred: the marker and
+  line are plotted at the ISO calendar date string itself on the date
+  axis. Window inclusion is a calendar-date comparison, not an epoch
+  one, so a contact on a partial first/last window day still charts.
 - **Running only** hides users with no live job and re-fetches the
   selected user's running jobs.
 

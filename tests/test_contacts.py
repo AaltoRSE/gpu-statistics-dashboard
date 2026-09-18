@@ -43,6 +43,20 @@ def test_local_parses_and_normalizes(tmp_path):
     ]
 
 
+def test_username_casefold_not_lower(tmp_path):
+    # Plan requires case-folding: 'ſ' (U+017F long s) folds to 's',
+    # which .lower() would leave as 'ſ' and the ASCII username regex
+    # would then reject.
+    result = _load_local(tmp_path, {
+        "diary.csv": HEADER + "20240105,X,ſuser;pBob@aalto.fi,p,d,h,Hi\n",
+    })
+    # Same date: fully-descending order puts 'suser' before 'pbob'
+    # (established contract in test_contacts_endpoint_available).
+    assert [(c["username"], c["message"]) for c in result["contacts"]] == [
+        ("suser", "Hi"), ("pbob", "Hi"),
+    ]
+
+
 def test_all_diary_files_discovered(tmp_path):
     result = _load_local(tmp_path, {
         "diary.csv": HEADER + "20240102,X,alice1,p,d,h,New\n",
@@ -240,6 +254,31 @@ def test_remote_git_timeout(tmp_path, monkeypatch, remote_repo):
         "available": False, "warning": "Garage Diary Git refresh failed.",
         "skipped_rows": 0, "contacts": [],
     }
+
+
+def test_remote_filesystem_failure(tmp_path, monkeypatch, remote_repo):
+    """A filesystem failure while preparing/installing the checkout must
+    degrade to the fixed refresh failure — never a 500 — without leaving
+    a partial checkout. Mocked (not chmod-based) so the runner's
+    privilege level cannot mask the failure path."""
+    checkout = tmp_path / "unwritable" / "garagediary"
+    _remote_env(tmp_path, remote_repo, checkout)
+
+    real_makedirs = os.makedirs
+
+    def denied(path, *args, **kwargs):
+        if str(path).endswith("unwritable"):
+            raise PermissionError(13, "Permission denied", str(path))
+        return real_makedirs(path, *args, **kwargs)
+
+    monkeypatch.setattr(contacts.os, "makedirs", denied)
+    result = contacts.load_contacts()
+    assert result == {
+        "available": False, "warning": "Garage Diary Git refresh failed.",
+        "skipped_rows": 0, "contacts": [],
+    }
+    assert not checkout.exists()
+
 
 def test_git_timeout_constant():
     # Git calls must be bounded; a hung fetch cannot block the dashboard.

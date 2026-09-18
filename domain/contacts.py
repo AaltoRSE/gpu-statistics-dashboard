@@ -70,6 +70,10 @@ def _git(args, cwd=None):
         # A hung fetch must not crash the route or freeze the loader: a
         # timed-out refresh is an unavailable source, never stale rows.
         return subprocess.CompletedProcess(args, returncode=124)
+    except OSError:
+        # A missing git executable or spawn failure reduces to the same
+        # fixed refresh-failure warning at every call site.
+        return subprocess.CompletedProcess(args, returncode=124)
 
 
 def _origin_url(checkout):
@@ -89,20 +93,28 @@ def _sync_remote_checkout(repo, checkout):
     mismatch.
     """
     checkout = os.path.expanduser(checkout)
-    parent = os.path.dirname(checkout) or "."
-    os.makedirs(parent, exist_ok=True)
-    if not os.path.isdir(checkout):
-        tmp = checkout + ".tmp-" + str(os.getpid())
+    tmp = checkout + ".tmp-" + str(os.getpid())
+    try:
+        parent = os.path.dirname(checkout) or "."
+        os.makedirs(parent, exist_ok=True)
+        if not os.path.isdir(checkout):
+            shutil.rmtree(tmp, ignore_errors=True)
+            result = _git(["clone", repo, tmp])
+            if result.returncode != 0:
+                shutil.rmtree(tmp, ignore_errors=True)
+                return _WARN_GIT
+            if os.path.exists(checkout):
+                # A concurrent process won the race; drop ours and
+                # refresh below.
+                shutil.rmtree(tmp, ignore_errors=True)
+            else:
+                os.replace(tmp, checkout)
+    except OSError:
+        # An unwritable parent, an unremovable temp, or a failed atomic
+        # install must degrade to the fixed unavailable response — never
+        # a 500 — and never leave a partial checkout behind.
         shutil.rmtree(tmp, ignore_errors=True)
-        result = _git(["clone", repo, tmp])
-        if result.returncode != 0:
-            shutil.rmtree(tmp, ignore_errors=True)
-            return _WARN_GIT
-        if os.path.exists(checkout):
-            # A concurrent process won the race; drop ours and refresh below.
-            shutil.rmtree(tmp, ignore_errors=True)
-        else:
-            os.replace(tmp, checkout)
+        return _WARN_GIT
     origin = _origin_url(checkout)
     if origin is None or origin != repo:
         # A timed-out origin lookup (rc 124) returns None too — treat it
@@ -118,7 +130,9 @@ def _normalize_usernames(cell):
     """Split a username cell into normalized tokens; may be empty."""
     tokens = []
     for token in re.split(r"[\s]*;[\s]*", cell.strip()):
-        token = token.strip().lower()
+        # casefold, not lower: the plan requires Unicode-aggressive
+        # folding so tokens like 'ſuser' (long s) join 'suser'.
+        token = token.strip().casefold()
         if token.endswith(_AALTO_SUFFIX):
             token = token[: -len(_AALTO_SUFFIX)].strip()
         if token and _USERNAME_RE.match(token):
