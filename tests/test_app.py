@@ -15,6 +15,7 @@ from fastapi.testclient import TestClient  # noqa: E402
 import app as appmod  # noqa: E402
 import cache  # noqa: E402
 import deps  # noqa: E402
+import domain.common  # noqa: E402
 import domain.jobs as domain_jobs  # noqa: E402
 import domain.metadata as domain_metadata  # noqa: E402
 import domain.partitions  # noqa: E402
@@ -1775,3 +1776,45 @@ def test_completed_wait_summary_separates_mig_and_excludes_noncompleted():
     assert out["h200_3g.71gb"]["wait_per_gpu_hour_p50"] == 4.0
     assert coverage["valid_samples"] == {"h200": 2, "h200_3g.71gb": 1}
     assert coverage["excluded"] == {"state": 2}
+
+
+def test_step_for_range_long_windows():
+    # Long-window policy: through 31 days the Prometheus step coarsens to
+    # 1,800 s; beyond that the legacy fallback holds. 336 h (14 days) and
+    # 720 h (30 days) both land in the 1,800 s tier.
+    assert domain.common.step_for_range(7 * 86400) == 600
+    assert domain.common.step_for_range(336 * 3600) == 1800
+    assert domain.common.step_for_range(720 * 3600) == 1800
+    assert domain.common.step_for_range(32 * 86400) == 900
+
+
+@pytest.mark.parametrize("route", [
+    "/api/jobs",
+    "/api/jobs/1",
+    "/api/users",
+    "/api/partitions",
+    "/api/partitions/queue",
+    "/api/partitions/queue/progress",
+    "/api/partitions/vram",
+])
+def test_window_routes_accept_30_days_reject_beyond(client, route):
+    # Every windowed route validates the shared dashboard window selector:
+    # the largest frontend choice (720 h) is accepted, anything beyond
+    # (721 h) is a 422 validation error.
+    assert client.get(route, params={"since_hours": 720}).status_code == 200
+    assert client.get(route, params={"since_hours": 721}).status_code == 422
+
+
+@pytest.mark.parametrize("route", [
+    "/api/jobs",
+    "/api/jobs/1",
+    "/api/users",
+    "/api/partitions",
+])
+def test_window_routes_span_720_hours_with_1800s_step(client, route):
+    data = client.get(route, params={"since_hours": 720}).json()
+    assert data["window"]["end"] - data["window"]["start"] == 720 * 3600
+    # Routes exposing the query step must carry the 1,800 s long-window
+    # value; list endpoints without a step field are skipped.
+    if "step" in data:
+        assert data["step"] == 1800

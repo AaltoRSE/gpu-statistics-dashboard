@@ -16,6 +16,8 @@ def step_for_range(seconds):
         return 300
     if seconds <= 7 * 86400:
         return 600
+    if seconds <= 31 * 86400:
+        return 1800
     return 900
 
 

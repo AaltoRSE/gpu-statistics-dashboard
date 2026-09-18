@@ -529,7 +529,7 @@ def wait_empty():
 progress_store = {}
 """Per-window latest batched accounting progress for the queue loader.
 
-The queue endpoint polls this while the first seven-day accounting fetch
+The queue endpoint polls this while the first long-window accounting fetch
 works through its daily batches, so the UI can show real progress instead
 of one opaque spinner. Each fetch updates, then clears, its entry.
 """

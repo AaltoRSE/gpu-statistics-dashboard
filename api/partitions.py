@@ -52,7 +52,7 @@ def _queue_snapshot(now, partition_types):
 
 
 @router.get("/api/partitions", response_model=PartitionsResponse)
-def api_partitions(since_hours: float = Query(24, gt=0, le=168),
+def api_partitions(since_hours: float = Query(24, gt=0, le=720),
                    running_only: bool = Query(False)):
     nodes = deps.route_cache.get_or_set(cache.scontrol_nodes_key(), 30, deps.show_nodes)
     node_types = gpu_groups.build_node_index(nodes)
@@ -75,7 +75,7 @@ def api_partitions(since_hours: float = Query(24, gt=0, le=168),
 
 @router.get("/api/partitions/queue",
             response_model=PartitionQueueResponse)
-def api_partition_queue(since_hours: float = Query(24, gt=0, le=168),
+def api_partition_queue(since_hours: float = Query(24, gt=0, le=720),
                         running_only: bool = Query(False)):
     """Live pending-job queue and historical waits, independent of the
     utilization endpoint.
@@ -205,7 +205,7 @@ def api_partition_queue(since_hours: float = Query(24, gt=0, le=168),
 
 
 @router.get("/api/partitions/queue/progress")
-def api_partition_queue_progress(since_hours: float = Query(24, gt=0, le=168),
+def api_partition_queue_progress(since_hours: float = Query(24, gt=0, le=720),
                                  running_only: bool = Query(False)):
     """Batched accounting progress for the queue's current-window fetch.
 
@@ -218,7 +218,7 @@ def api_partition_queue_progress(since_hours: float = Query(24, gt=0, le=168),
 
 
 @router.get("/api/partitions/vram", response_model=VramResponse)
-def api_part_vram(since_hours: float = Query(24, gt=0, le=168),
+def api_part_vram(since_hours: float = Query(24, gt=0, le=720),
                   running_only: bool = Query(False),
                   partition: str = "",
                   weight: str = Query("alloc", pattern="^(alloc|eff)$")):

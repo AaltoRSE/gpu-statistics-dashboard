@@ -547,7 +547,7 @@ def _completed_jobs_batch(start_iso, end_iso):
 def completed_jobs(start_iso, end_iso, progress=None):
     """Completed records plus bounded-query completeness metadata.
 
-    Daily chunks keep a seven-day all-user query bounded. Each chunk retries
+    Daily chunks keep long all-user queries bounded. Each chunk retries
     once; successful chunks survive another chunk's failure, and inclusive
     boundary duplicates are removed by sacct JobID (array task IDs remain
     distinct). ``progress`` receives a callback after every chunk so a caller
