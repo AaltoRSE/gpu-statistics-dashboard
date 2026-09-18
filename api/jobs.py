@@ -44,7 +44,8 @@ def api_jobs(
         # redrawing the same data; it also forces a fresh live-ID query.
         deps.get_prom().clear_cache()
         deps.route_cache.invalidate(
-            cache.job_window_key(since_hours, True, user or None))
+            cache.job_utilization_key(since_hours, user or None),
+            cache.job_vram_key(since_hours))
     if running_only:
         # Live-ID check first: with no running GPU jobs we must not issue
         # the broad window range query at all.

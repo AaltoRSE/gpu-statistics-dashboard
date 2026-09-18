@@ -89,8 +89,24 @@ class TtlCache:
 # One function per cached value, called by both whoever reads it and
 # whoever invalidates it.
 
-def job_window_key(since_hours, include_vram, user):
-    return ("jobs", since_hours, include_vram, user)
+def job_utilization_key(since_hours, user=None):
+    """The shared per-window utilization range query every job-list
+    consumer reads: the Jobs tab, the Users aggregation, and the VRAM
+    chart's job records all build on the SAME Prometheus fetch, so the
+    cache identity must not vary by caller (include_vram was folded
+    into this key and made the VRAM route re-run the identical query).
+    ``user`` keeps the query-scoped identity: a single-user request
+    must not share with (nor evict) the whole-window fetch."""
+    return ("job_utilization", since_hours, user)
+
+
+def job_vram_key(since_hours):
+    """The per-window VRAM percentage range query, cached separately
+    from utilization so utilization-only callers never pay for it.
+    Deliberately user-independent: the query aggregates per-job peaks
+    and carries no user selector, so a user-scoped Jobs request shares
+    the global VRAM fetch instead of duplicating it."""
+    return ("job_vram", since_hours)
 
 
 def sacct_key(job_ids):

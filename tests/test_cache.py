@@ -73,9 +73,14 @@ def test_oversized_store_clears_on_next_write():
 
 
 def test_key_builders_are_stable_and_distinct():
-    assert cache.job_window_key(24, True, None) == ("jobs", 24, True, None)
-    assert cache.job_window_key(24, True, "alice") == ("jobs", 24, True, "alice")
-    assert cache.job_window_key(24, True, None) != cache.job_window_key(72, True, None)
+    assert cache.job_utilization_key(24, None) == ("job_utilization", 24, None)
+    assert cache.job_utilization_key(24, "alice") == ("job_utilization", 24, "alice")
+    assert cache.job_utilization_key(24, None) != cache.job_utilization_key(72, None)
+    assert cache.job_utilization_key(24, None) != cache.job_utilization_key(24, "alice")
+    assert cache.job_vram_key(24) == ("job_vram", 24)
+    assert cache.job_vram_key(24) != cache.job_vram_key(72)
+    assert (cache.job_utilization_key(24, None)
+            != cache.job_vram_key(24))
     assert cache.sacct_key(["2", "1"]) == cache.sacct_key(["1", "2"])
     assert cache.scontrol_jobs_key() == "scontrol_jobs"
     assert cache.scontrol_nodes_key() == "scontrol_nodes"

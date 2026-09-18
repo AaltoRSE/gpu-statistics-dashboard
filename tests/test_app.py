@@ -518,6 +518,113 @@ def test_jobs_user_filter_preserves_prometheus_label_case(client, fake_prom):
     assert any('user="Alice"' in q for q in users)
 
 
+def test_jobs_and_vram_share_one_utilization_fetch(client, fake_prom):
+    # The VRAM route's job records (include_vram=False) and the Jobs list
+    # (include_vram=True) build on the SAME per-window utilization range
+    # query: the second caller must reuse the cached fetch, not re-run it.
+    r = client.get("/api/jobs", params={"since_hours": 24})
+    assert r.status_code == 200
+    util_queries = [q for t, q in fake_prom.calls
+                    if t == "range" and "slurm_job_utilization_gpu" in q
+                    and "max by (slurmjobid, instance, job, user, gpu_type)" in q]
+    assert len(util_queries) == 1
+    rv = client.get("/api/partitions/vram", params={"since_hours": 24})
+    assert rv.status_code == 200
+    util_queries_after = [q for t, q in fake_prom.calls
+                          if t == "range"
+                          and "max by (slurmjobid, instance, job, user, gpu_type)" in q]
+    assert util_queries_after == util_queries, (
+        "the VRAM route re-fetched the shared utilization window")
+
+
+def test_users_share_the_jobs_utilization_fetch(client, fake_prom):
+    client.get("/api/jobs", params={"since_hours": 24})
+    before = [q for t, q in fake_prom.calls
+              if t == "range"
+              and "max by (slurmjobid, instance, job, user, gpu_type)" in q]
+    r = client.get("/api/users", params={"since_hours": 24})
+    assert r.status_code == 200
+    after = [q for t, q in fake_prom.calls
+             if t == "range"
+             and "max by (slurmjobid, instance, job, user, gpu_type)" in q]
+    assert after == before, "the Users route re-fetched the shared window"
+
+
+def test_utilization_only_caller_never_fetches_vram(client, fake_prom):
+    # include_vram=False must not pay for (nor block on) the VRAM range
+    # query; the VRAM series is fetched lazily on the first caller that
+    # asks for it.
+    vram_queries = [q for t, q in fake_prom.calls
+                    if t == "range" and "memory" in q]
+    assert vram_queries == []
+    client.get("/api/partitions/vram", params={"since_hours": 24})
+    assert [q for t, q in fake_prom.calls if t == "range" and "memory" in q]
+
+
+def test_user_scoped_window_does_not_share_with_global(client, fake_prom):
+    # A single-user request is a distinct Prometheus query (user label in
+    # the selector) and must neither reuse the global fetch nor let a
+    # global fetch serve it.
+    client.get("/api/jobs", params={"since_hours": 24})
+    before = [q for t, q in fake_prom.calls if t == "range"]
+    r = client.get("/api/jobs", params={"since_hours": 24, "user": "alice"})
+    assert r.status_code == 200
+    after = [q for t, q in fake_prom.calls if t == "range"]
+    assert len(after) > len(before), (
+        "a user-scoped request was served from the global cache entry")
+    assert any('user="alice"' in q for q in after[len(before):])
+
+
+def test_jobs_refresh_invalidates_both_shared_source_keys(
+        client, fake_prom):
+    client.get("/api/jobs", params={"since_hours": 24})
+    before = len([q for t, q in fake_prom.calls if t == "range"])
+    r = client.get("/api/jobs",
+                   params={"since_hours": 24, "refresh": "true"})
+    assert r.status_code == 200
+    after = len([q for t, q in fake_prom.calls if t == "range"])
+    assert after > before, (
+        "a forced refresh redrew cached data instead of re-fetching")
+
+
+def test_jobs_refresh_scoped_to_requested_user(client, fake_prom):
+    client.get("/api/jobs", params={"since_hours": 24})
+    global_queries = [q for t, q in fake_prom.calls if t == "range"]
+    # Refreshing alice's view must not discard the global window: her
+    # query-scoped utilization fetch is a different identity.
+    r = client.get("/api/jobs",
+                   params={"since_hours": 24, "user": "alice",
+                           "refresh": "true"})
+    assert r.status_code == 200
+    scoped = [q for t, q in fake_prom.calls if t == "range"]
+    new_queries = scoped[len(global_queries):]
+    # The user-scoped utilization query is re-fetched with the selector.
+    assert any('user="alice"' in q for q in new_queries)
+    # The VRAM series is user-independent by query identity: its global
+    # entry is the one a forced refresh re-reads, so a repeat of the
+    # selector-free VRAM query is legitimate — but nothing else may be
+    # re-fetched.
+    unexpected = [q for q in new_queries
+                  if "user=" in q and 'user="alice"' not in q]
+    assert unexpected == []
+    util_new = [q for q in new_queries
+                if "max by (slurmjobid, instance, job, user, gpu_type)" in q]
+    assert len(util_new) == 1 and 'user="alice"' in util_new[0]
+    vram_new = [q for q in new_queries
+                if "slurm_job_memory_usage_gpu" in q]
+    assert len(vram_new) == 1
+
+
+def test_users_refresh_invalidates_shared_sources(client, fake_prom):
+    client.get("/api/users", params={"since_hours": 24})
+    before = len([q for t, q in fake_prom.calls if t == "range"])
+    r = client.get("/api/users",
+                   params={"since_hours": 24, "refresh": "true"})
+    assert r.status_code == 200
+    after = len([q for t, q in fake_prom.calls if t == "range"])
+    assert after > before, "a forced Users refresh redrew cached data"
+
+
 def test_job_detail_200_with_human_readable_meta(client):
     r = client.get("/api/jobs/1", params={"since_hours": 24})
     assert r.status_code == 200
