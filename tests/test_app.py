@@ -1131,6 +1131,50 @@ def test_partitions_partial_wait_history_keeps_successful_metrics(
     assert data["queue"]["h200"]["wait_samples"] == 2
 
 
+def test_partitions_queue_live_serves_snapshot_without_history(
+        client, fake_prom, monkeypatch):
+    # /api/partitions/queue/live is the first phase of the queue render:
+    # pending demand, unique totals, and the waiting list in one bounded
+    # squeue round-trip — NO wait statistics, NO Prometheus, NO sacct.
+    # Same pending shapes as the full response; a live route that
+    # fabricated zeros there would flash "0" before the real numbers.
+    monkeypatch.setattr(deps, "queue_pending", lambda: [
+        {"jobid": "30", "user": "eve", "partition": "gpu-h200",
+         "state": "PENDING", "submit": "2026-08-30T12:26:40",
+         "start": "", "reason": "(Resources)", "nodes": 1, "gpus": 2,
+         "gpu_type": "h200"},
+    ])
+    data = client.get("/api/partitions/queue/live").json()
+    assert data["queue_available"] is True
+    assert data["totals"]["unique_pending_jobs"] == 1
+    row = data["queue"]["h200"]
+    assert row["exclusive_jobs"] == 1
+    assert row["exclusive_gpus"] == 2
+    # Every wait field is explicitly None, not the schema defaults:
+    # wait_samples must NOT read as "zero valid samples" while the
+    # history is merely still loading.
+    assert row["wait_p50_s"] is None
+    assert row["wait_p90_s"] is None
+    assert row["wait_avg_s"] is None
+    assert row["wait_samples"] is None
+    assert row["wait_per_gpu_hour_weighted"] is None
+    assert data["waiting_jobs"][0]["jobid"] == "30"
+
+
+def test_partitions_queue_live_unavailable_is_explicit(
+        client, fake_prom, monkeypatch):
+    # A dead squeue reads available=False with null totals, never an
+    # empty queue masquerading as "nothing pending".
+    def _boom():
+        raise slurm.SlurmError("squeue is not available")
+
+    monkeypatch.setattr(deps, "queue_pending", _boom)
+    data = client.get("/api/partitions/queue/live").json()
+    assert data["queue_available"] is False
+    assert data["totals"]["unique_pending_jobs"] is None
+    assert data["waiting_jobs"] == []
+
+
 def test_partitions_queue_progress_endpoint_serves_batch_state(
         client, fake_prom):
     # The polling contract: /api/partitions/queue/progress must resolve

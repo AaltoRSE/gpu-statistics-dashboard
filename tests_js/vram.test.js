@@ -80,6 +80,13 @@ async function boot(opts, bust) {
       return Promise.resolve({ ok: true, json: () => Promise.resolve(
         opts.vram || VRAM_BODY) });
     }
+    if (u.startsWith("/api/partitions/queue/live")) {
+      return Promise.resolve({ ok: true, json: () => Promise.resolve({
+        queue: {},
+        totals: { unique_pending_jobs: 0, unique_gpus_requested: 0 },
+        queue_available: true, waiting_jobs: [],
+      }) });
+    }
     if (u.startsWith("/api/partitions/queue")) {
       return Promise.resolve({ ok: true, json: () => Promise.resolve({
         queue: {},

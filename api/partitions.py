@@ -8,7 +8,12 @@ from fastapi import APIRouter, Query
 import cache
 import deps
 import gpu_groups
-from api.schemas import PartitionQueueResponse, PartitionsResponse, VramResponse
+from api.schemas import (
+    LiveQueueResponse,
+    PartitionQueueResponse,
+    PartitionsResponse,
+    VramResponse,
+)
 from domain.common import window
 from domain.partitions import (
     WAIT_TOTAL_KEY,
@@ -71,6 +76,57 @@ def api_partitions(since_hours: float = Query(24, gt=0, le=720),
         "partitions": groups,
         "trend": trend,
     }
+
+
+def _live_queue_payload(now, partition_types):
+    """One live pending snapshot: per-type rows + unique totals.
+
+    squeue is a live scheduler snapshot, never cached: every call costs
+    one bounded (15 s) squeue --json. This is the ONLY Slurm work the
+    live route does — no Prometheus, no sacct — so its whole response
+    is bounded by that one call.
+    """
+    queue, totals, waiting_jobs, queue_available = _queue_snapshot(
+        now, partition_types)
+    # eligible_* is a per-row invariant (exclusive + flexible), computed
+    # here exactly as the full queue route does, so every rendering
+    # surface — live or full — sees it filled.
+    for row in queue.values():
+        row["eligible_jobs"] = row["exclusive_jobs"] + row["flexible_jobs"]
+        row["eligible_gpus"] = row["exclusive_gpus"] + row["flexible_gpus"]
+        # Every wait field is explicitly None — including wait_samples,
+        # whose QueueGroup default of 0 would otherwise read as "zero
+        # valid samples" while the history is merely still loading.
+        row["wait_p50_s"] = None
+        row["wait_p90_s"] = None
+        row["wait_avg_s"] = None
+        row["wait_samples"] = None
+        row["wait_per_gpu_hour_weighted"] = None
+    return {
+        "queue": queue,
+        "totals": totals,
+        "queue_available": queue_available,
+        "waiting_jobs": waiting_jobs,
+    }
+
+
+@router.get("/api/partitions/queue/live",
+            response_model=LiveQueueResponse)
+def api_partition_queue_live():
+    """Immediate pending-job snapshot, no wait history.
+
+    Serves the queue table in one squeue round-trip: pending demand,
+    unique totals, and the waiting list land as soon as squeue answers,
+    while /api/partitions/queue (same shapes for the shared keys, plus
+    the sacct wait statistics and full union rows) fills in behind it.
+    A dead squeue stays an explicit available=False, never an empty
+    queue.
+    """
+    nodes = deps.route_cache.get_or_set(cache.scontrol_nodes_key(), 30,
+                                        deps.show_nodes)
+    partition_types = gpu_groups.partition_gpu_types(nodes)
+    now = int(deps.now())
+    return _live_queue_payload(now, partition_types)
 
 
 @router.get("/api/partitions/queue",

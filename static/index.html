@@ -218,7 +218,7 @@
           <div class="hint">Rows are per GPU type: a job eligible for several types appears in each, so &ldquo;Eligible jobs&rdquo; / &ldquo;Eligible GPUs&rdquo; are exclusive&nbsp;+&nbsp;flexible within a row and must not be summed across rows. Eligibility is where demand could land &mdash; not a claim that a job could start right now. The unique cluster-wide figure above counts every GPU-eligible pending job once.</div>
           <div class="hint">Wait statistics describe completed jobs that started on this GPU type inside the selected window (Submit &rarr; Start), not the current waiting age and not Slurm&rsquo;s estimated start. &ldquo;&mdash;&rdquo; with 0 samples means no valid starts, not a zero wait. Median wait / GPU-hour normalizes by job size: 4 hours waiting for 2 GPUs running 1 hour = 2.00 h/GPU-h.</div>
           <div class="hint" id="pQueueHint" hidden>Queue status unavailable &mdash; squeue could not be reached (this is not an empty queue).</div>
-          <div class="hint" id="pWaitHistoryHint" hidden>Historical wait data unavailable &mdash; sacct enrichment failed; pending counts above are still live.</div>
+          <div class="hint" id="pWaitHistoryHint" hidden></div>
         </div>
 
         <div class="card collapsible collapsed" id="pWaitingExplorer" style="grid-column:1 / -1; margin-top:14px">
@@ -250,7 +250,7 @@
     </div>
 
 
-    <div id="vramResults" class="results-panel">
+    <div id="vramResults" class="results-panel loading">
       <div class="results-content">
         <div class="card" style="margin-top:14px">
         <h2>VRAM distribution by job <button type="button" class="glossary-btn" data-glossary="gpu-hours-alloc" title="What is this?">?</button></h2>

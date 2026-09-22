@@ -107,9 +107,24 @@ async function boot(opts, importCacheBust) {
     waiting_jobs: opts.waitingJobs || [],
     wait_history_available: opts.waitHistoryAvailable !== false,
   };
+  // The live snapshot: same pending shapes, wait statistics absent —
+  // exactly what /api/partitions/queue/live returns. opt-driven:
+  // liveQueue/liveTotals override the defaults derived from the full
+  // queue body when a test wants the two responses to differ.
+  const liveBody = opts.liveError ? null : {
+    queue: opts.liveQueue !== undefined ? opts.liveQueue
+      : (opts.queue || {}),
+    totals: opts.liveTotals !== undefined ? opts.liveTotals
+      : (opts.queueAvailable === false
+        ? { unique_pending_jobs: null, unique_gpus_requested: null }
+        : TOTALS),
+    queue_available: opts.queueAvailable !== false,
+    waiting_jobs: opts.waitingJobs || [],
+  };
   const coreBody = opts.coreError ? null : { ...CORE_BODY };
   const urls = [];
   let releaseQueue = () => {};
+  let releaseLive = () => {};
 
   global.fetch = (url) => {
     urls.push(String(url));
@@ -118,6 +133,19 @@ async function boot(opts, importCacheBust) {
       // circuit-breaker test.
       return Promise.resolve({ ok: false, status: 404,
                                json: () => Promise.resolve({}) });
+    }
+    if (String(url).startsWith("/api/partitions/queue/live")) {
+      // The live snapshot: pending figures WITHOUT wait statistics.
+      if (opts.queueError) return Promise.reject(new Error("squeue down"));
+      if (opts.gateLive) {
+        return new Promise((resolve) => {
+          releaseLive = () => resolve({
+            ok: true, json: () => Promise.resolve(liveBody),
+          });
+        });
+      }
+      return Promise.resolve({
+        ok: true, json: () => Promise.resolve(liveBody) });
     }
     if (String(url).startsWith("/api/partitions/queue")) {
       if (opts.queueError) return Promise.reject(new Error("squeue down"));
@@ -147,6 +175,7 @@ async function boot(opts, importCacheBust) {
   // or the gated-queue test would invoke the initial no-op forever.
   return { dom, mod, urls,
            releaseQueue: (...args) => releaseQueue(...args),
+           releaseLive: (...args) => releaseLive(...args),
            intervals, clearedIds };
 }
 
@@ -276,7 +305,10 @@ test("waiting jobs list de-duplicates rows behind its disclosure", async (t) => 
   assert.ok(explorer.classList.contains("collapsed"));
 });
 
-test("metrics render while the queue request is still pending", async (t) => {
+test("metrics render while the wait history is still pending", async (t) => {
+  // The live snapshot (one squeue call) is NOT gated here — only the
+  // FULL queue response (sacct wait history) hangs. The metrics panel
+  // and the live pending rows both render before history resolves.
   const ctx = await boot({
     gateQueue: true,
     queue: QUEUE,
@@ -286,32 +318,39 @@ test("metrics render while the queue request is still pending", async (t) => {
   const releaseQueue = ctx.releaseQueue;
   const urls = ctx.urls;
   t.after(() => dom.window.close());
-  await ctx.mod.loadPartitions(); // core resolves; queue stays gated
-  // both endpoints were requested together
+  await ctx.mod.loadPartitions(); // core + live resolve; history gated
+  // all three companions were requested together
   assert.ok(urls.some((u) => u.startsWith("/api/partitions?") ||
                           u === "/api/partitions"), urls);
-  assert.ok(urls.some((u) => u.startsWith("/api/partitions/queue")), urls);
+  assert.ok(urls.some((u) => u.startsWith("/api/partitions/queue/live")), urls);
+  assert.ok(urls.some((u) => u.startsWith("/api/partitions/queue?")), urls);
   const doc = dom.window.document;
   // metrics panel unblocks and renders as soon as its response lands
   const metricsPanel = doc.getElementById("partitionsResults");
   assert.equal(metricsPanel.classList.contains("loading"), false);
   assert.equal(metricsPanel.getAttribute("aria-busy"), "false");
   assert.ok(doc.querySelectorAll("#partTable tbody tr").length > 0);
-  // the queue panel is still the only one under its loading overlay
+  // the live queue rows are already rendered and NOT blurred: only the
+  // history phase (the hint) is still in flight.
   const queuePanel = doc.getElementById("queueResults");
-  assert.equal(queuePanel.classList.contains("loading"), true);
-  assert.equal(queuePanel.getAttribute("aria-busy"), "true");
-  // release the queue: only its panel unblocks, rows appear
-  releaseQueue();
-  await new Promise((r) => setTimeout(r, 20));
   assert.equal(queuePanel.classList.contains("loading"), false);
   assert.equal(queuePanel.getAttribute("aria-busy"), "false");
+  assert.equal(doc.querySelectorAll("#partQueueTable tbody tr").length, 2);
+  // release the full queue: the wait statistics merge into the rows
+  releaseQueue();
+  await new Promise((r) => setTimeout(r, 20));
+  assert.equal(doc.getElementById("pWaitHistoryHint").hidden, true);
   assert.equal(doc.querySelectorAll("#partQueueTable tbody tr").length, 2);
 });
 
 test("queue failures leave the metrics panel usable", async (t) => {
   const { dom } = await bootAndWait({ queueError: true }, 8);
   t.after(() => dom.window.close());
+  // BOTH queue phases reject with queueError: live (awaited in
+  // loadPartitionQueue's try) and history (held in historyPromise).
+  // The history rejection must be consumed before the test ends, or
+  // node flags an unhandled rejection after the test completed.
+  await new Promise((r) => setTimeout(r, 20));
   const doc = dom.window.document;
   assert.equal(doc.getElementById("partitionsResults").classList.contains("loading"), false);
   assert.equal(doc.getElementById("queueResults").classList.contains("loading"), false);
@@ -332,41 +371,55 @@ test("a window change refetches both endpoints with the new window", async (t) =
   doc.getElementById("pWindow").value = "72";
   doc.getElementById("pWindow").dispatchEvent(new dom.window.Event("change"));
   await new Promise((r) => setTimeout(r, 20));
-  const queueUrls = urls.filter((u) => u.startsWith("/api/partitions/queue"));
+  // Three companions fire per window change: the live snapshot (which
+  // deliberately carries NO window — the snapshot is live by
+  // construction), the full queue with the new window, and the core
+  // metrics request with the new window.
+  const liveUrls = urls.filter((u) => u.startsWith("/api/partitions/queue/live"));
+  const fullQueueUrls = urls.filter((u) => u.startsWith("/api/partitions/queue?"));
   const coreUrls = urls.filter((u) => u.startsWith("/api/partitions?"));
-  assert.equal(queueUrls.length, 1, urls);
+  assert.equal(liveUrls.length, 1, urls);
+  assert.equal(fullQueueUrls.length, 1, urls);
   assert.equal(coreUrls.length, 1, urls);
-  assert.match(queueUrls[0], /since_hours=72/);
+  assert.match(liveUrls[0], /^\/api\/partitions\/queue\/live$/);
+  assert.match(fullQueueUrls[0], /since_hours=72/);
   assert.match(coreUrls[0], /since_hours=72/);
   // the replacement payload's rows render under the fresh fetch
   assert.ok(doc.querySelectorAll("#partQueueTable tbody tr").length >= 0);
   assert.ok(mod.selectedPartition !== undefined);
 });
 
-test("queue progress rewrites the loading chip while the request runs", async (t) => {
+test("live rows render first, then wait-history progress lands on the hint", async (t) => {
+  // The live snapshot resolves immediately (pending figures render,
+  // overlay clears); only the sacct wait history stays in flight. Its
+  // batch progress is non-blocking: it rewrites the history HINT, not
+  // a blurred loading chip, because the table above it is already live.
   const ctx = await boot({
     gateQueue: true,
     queue: QUEUE,
+    waitingJobs: WAITING,
   }, 12);
   const releaseQueue = ctx.releaseQueue;
   t.after(() => ctx.dom.window.close());
-  await ctx.mod.loadPartitions(); // queue stays gated
+  await ctx.mod.loadPartitions(); // live renders; full queue stays gated
   const doc = ctx.dom.window.document;
-  const chip = doc.querySelector("#queueResults .results-loading");
-  assert.ok(chip, "the queue panel has its loading chip");
-  assert.equal(chip.textContent, "Loading current queue and wait history…");
-  // A progress poll that returns batch state rewrites the chip in place:
-  // the user sees "batch N of M" instead of an opaque spinner, as plain
-  // text — an escaped "&hellip;" once rendered as the literal "hellip".
+  const panel = doc.getElementById("queueResults");
+  // live rows are NOT blurred: the overlay is already cleared
+  assert.equal(panel.classList.contains("loading"), false);
+  assert.ok(doc.querySelectorAll("#partQueueTable tbody tr").length > 0);
+  // the history hint is visible while the enrichment runs
+  const hint = doc.getElementById("pWaitHistoryHint");
+  assert.equal(hint.hidden, false);
+  assert.match(hint.textContent, /Wait statistics loading/);
+  // progress lands on the hint as plain text
   ctx.mod.setQueueProgress(3, 7, 1);
-  assert.equal(chip.textContent,
+  assert.equal(hint.textContent,
     "Loading wait history: batch 3 of 7 (1 failed)…");
-  assert.ok(!chip.textContent.includes("hellip"));
-  // releasing the queue clears the overlay entirely
+  assert.ok(!hint.textContent.includes("hellip"));
+  // releasing the full queue resolves the history phase
   releaseQueue();
   await new Promise((r) => setTimeout(r, 20));
-  assert.equal(doc.getElementById("queueResults")
-    .classList.contains("loading"), false);
+  assert.equal(hint.hidden, true);
 });
 
 test("progress polling stops after a 404 from a stale backend", async (t) => {
@@ -645,11 +698,18 @@ test("a late poll from a superseded queue request cannot overwrite the new label
     }
     if (u.startsWith("/api/partitions/queue")) {
       if (queueGeneration === 0) {
-        return new Promise(() => {}); // the OLD request never lands
+        return new Promise(() => {}); // the OLD requests never land
       }
-      return Promise.resolve({ ok: true, json: () => Promise.resolve({
-        queue: {}, totals: TOTALS, queue_available: true,
-        waiting_jobs: [], wait_history_available: true }) });
+      if (u.startsWith("/api/partitions/queue/live")) {
+        // generation 1: the live snapshot answers immediately, so the
+        // new request's rows render and its history phase is pending.
+        return Promise.resolve({ ok: true, json: () => Promise.resolve({
+          queue: {}, totals: TOTALS, queue_available: true,
+          waiting_jobs: [] }) });
+      }
+      // The FULL queue response stays gated for the whole test: the
+      // hint must still read "loading" when the stale poller fires.
+      return new Promise(() => {});
     }
     if (u.startsWith("/api/partitions")) {
       return coreGated.then(() => ({ ok: true,
@@ -666,22 +726,26 @@ test("a late poll from a superseded queue request cannot overwrite the new label
   // core request is held back so no VRAM poller can register yet.
   mod.loadPartitions();
   await new Promise((r) => setTimeout(r, 20));
-  // Drive every registered interval once and identify the OLD queue
-  // poller by the progress URL it actually requests.
+  // Capture the OLD queue poller: it was registered by the gated
+  // generation-0 request's progress polling.
   const oldPoller = intervals.at(-1);
   assert.ok(oldPoller, "the old queue request registered a progress poller");
   releaseCore();
-  // A window change supersedes it: token bumps, new request answers.
+  // A window change supersedes it: token bumps, the NEW requests
+  // answer (generation 1). The new request's live rows render, its
+  // history phase shows the loading hint.
+  queueGeneration = 1;
   doc.getElementById("pWindow").value = "72";
   doc.getElementById("pWindow").dispatchEvent(
     new dom.window.Event("change"));
-  queueGeneration = 1;
   await new Promise((r) => setTimeout(r, 20));
-  const chip = doc.querySelector("#queueResults .results-loading");
-  assert.equal(chip.textContent, "Loading current queue and wait history…");
+  const hint = doc.getElementById("pWaitHistoryHint");
+  // the new request's live rows already rendered; the hint shows the
+  // loading state of ITS history phase
+  assert.match(hint.textContent, /Wait statistics loading/);
   // The old poller fires late: without the token gate it would paint
-  // "batch 4 of 30" over the new request's label.
+  // "batch 4 of 30" over the new request's hint.
   await oldPoller();
   await new Promise((r) => setTimeout(r, 20));
-  assert.equal(chip.textContent, "Loading current queue and wait history…");
+  assert.match(hint.textContent, /Wait statistics loading/);
 });

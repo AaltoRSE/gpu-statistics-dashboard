@@ -330,6 +330,35 @@ class WaitHistoryCoverage(BaseModel):
     complete: bool = True
 
 
+class LiveQueueResponse(BaseModel):
+    """The immediate pending snapshot behind /api/partitions/queue/live.
+
+    Same pending-demand shapes as PartitionQueueResponse minus the wait
+    statistics: the queue table renders from this as soon as squeue
+    answers, and the historical waits arrive with the full queue
+    response. No wait field may be fabricated here — they are simply
+    absent until /api/partitions/queue lands.
+    """
+    queue: Dict[str, QueueGroup] = Field(
+        default_factory=dict,
+        description="Pending-job demand per GPU-type group (wait "
+                    "statistics absent: they come with the full "
+                    "/api/partitions/queue response).")
+    totals: QueueTotals = Field(
+        default_factory=QueueTotals,
+        description="Cluster-wide unique pending figures; null fields "
+                    "when squeue is unavailable.")
+    queue_available: bool = Field(
+        default=True,
+        description="False when the squeue snapshot failed — pending "
+                    "figures are then unavailable; must not be read as "
+                    "an empty queue.")
+    waiting_jobs: List[PendingJob] = Field(
+        default_factory=list,
+        description="GPU-eligible jobs still waiting; empty when "
+                    "squeue is unavailable.")
+
+
 class PartitionQueueResponse(BaseModel):
     queue: Dict[str, QueueGroup] = Field(
         default_factory=dict,

@@ -21,6 +21,7 @@ let queueTotals = null;  // the backend's unique cluster-wide pending figures
 let queueAvailable = true;
 let waitingJobs = [];    // raw waiting_jobs records from the API
 let waitHistoryAvailable = true;
+let historyResolved = false; // wait stats arrived (or failed) from the full queue payload
 export let partTrendData = {};
 let partTrendStep = 300; // seconds; set from the API response, used to size the smoothing window
 export let selectedPartition = ""; // deep-linked or chosen GPU type; "" = all
@@ -70,10 +71,13 @@ export function applyPartitionSelection(name) {
 export async function loadPartitions() {
   const token = ++partitionsToken;
   setResultsLoading("partitionsResults", true, "Loading GPU utilization history…");
-  // The queue is a separate, slower endpoint (squeue + sacct): start it
-  // immediately so both requests are in flight together, and never let
-  // its completion gate the Prometheus-backed charts below.
+  // Both slower companions start immediately: the queue (squeue + the
+  // sacct wait history) and the VRAM distribution (Prometheus range +
+  // batched sacct enrichment) each render under their own loading
+  // overlay, in parallel with the Prometheus-backed charts below —
+  // and none of them gates another.
   loadPartitionQueue();
+  loadVram();
   let data;
   try {
     const params = new URLSearchParams({ since_hours: $("pWindow").value });
@@ -102,10 +106,8 @@ export async function loadPartitions() {
   renderPartTable();
   loaded.partitions = true;
   // The summary panel is unblocked as soon as its response renders; the
-  // VRAM distribution then fetches independently under its own panel.
+  // VRAM distribution and queue run independently under their own panels.
   setResultsLoading("partitionsResults", false);
-  if (token !== partitionsToken) return;
-  await loadVram();
 }
 
 /* ---------------- Live queue (independent endpoint) ----------------
@@ -116,53 +118,96 @@ let queueToken = 0;
 
 async function loadPartitionQueue() {
   const token = ++queueToken;
-  setResultsLoading("queueResults", true, "Loading current queue and wait history…");
+  historyResolved = false; // each new queue request restarts the history phase
+  setResultsLoading("queueResults", true, "Loading current queue…");
+  // BOTH phases fire now: the history request (multi-batch sacct) must
+  // not wait behind the squeue round-trip — the two are independent.
+  // The promise NEVER rejects: it settles to {ok, data|error} so a live
+  // failure (or supersession) can never strand an unhandled rejection.
+  // The live snapshot renders FIRST regardless; the history result is
+  // held until then.
   const params = new URLSearchParams({ since_hours: $("pWindow").value });
   if ($("pRunning").checked) params.set("running_only", "true");
-  // Poll the accounting progress endpoint while the queue request runs, so
-  // the long-window wait-history fetch shows real batch progress instead of
-  // an opaque spinner. The poll stops when the queue response lands.
-  const stopPolling = pollProgress("/api/partitions/queue/progress?" + params,
-    () => token === queueToken,
-    (prog) => setQueueProgress(prog.done, prog.total,
-                              prog.failed_batches));
-  let data;
+  const historyPromise = api("/api/partitions/queue?" + params)
+    .then((data) => ({ ok: true, data }))
+    .catch((error) => ({ ok: false, error }));
+  // The live snapshot: one bounded squeue round-trip, no Prometheus, no
+  // sacct. Pending demand, the waiting list, and the unique totals land
+  // immediately; wait statistics arrive with historyPromise below. No
+  // query params: the snapshot is live by construction.
+  let live;
   try {
-    data = await api("/api/partitions/queue?" + params);
+    live = await api("/api/partitions/queue/live");
   } catch (e) {
-    stopPolling();
     if (token === queueToken) {
       setResultsLoading("queueResults", false);
       showPanelError("queueResults", e, loadPartitionQueue, "the pending-jobs queue");
     }
     return;
   }
-  stopPolling();
   if (token !== queueToken) return; // a newer request supersedes this one
+  // Overlay OFF as soon as the live rows render: the pending table is
+  // interactive while the wait history loads behind the hint line.
+  setResultsLoading("queueResults", false);
   panelOk("queueResults");
+  applyQueueData(live, { historyResolved: false });
+  // Poll the accounting progress endpoint while the history request
+  // runs, so the long-window wait-history fetch shows real batch
+  // progress instead of an opaque spinner. The poll stops when the
+  // full response lands.
+  const stopPolling = pollProgress("/api/partitions/queue/progress?" + params,
+    () => token === queueToken,
+    (prog) => setQueueProgress(prog.done, prog.total,
+                              prog.failed_batches));
+  const outcome = await historyPromise;
+  stopPolling();
+  if (!outcome.ok) {
+    if (token === queueToken) {
+      // The live rows already rendered; keep them, surface the history
+      // failure as the unavailable hint instead of nuking the panel.
+      historyResolved = true;
+      waitHistoryAvailable = false;
+      renderPartQueue();
+      setResultsLoading("queueResults", false);
+    }
+    return;
+  }
+  if (token !== queueToken) return; // a newer request supersedes this one
+  applyQueueData(outcome.data, { historyResolved: true });
+  setResultsLoading("queueResults", false);
+}
+
+// Merge one queue payload into module state and re-render. The live
+// payload (historyResolved=false) supplies pending figures and the
+// waiting list with wait statistics ABSENT; the full payload (true)
+// overwrites with the union rows including wait statistics.
+function applyQueueData(data, opts) {
   const q = data.queue || {};
   queueTotals = data.totals || null;
   queueRows = Object.entries(q)
     .map(([name, g]) => Object.assign({ name }, g));
   queueAvailable = data.queue_available !== false;
   waitingJobs = data.waiting_jobs || [];
-  waitHistoryAvailable = data.wait_history_available !== false;
+  if (opts.historyResolved) {
+    historyResolved = true;
+    waitHistoryAvailable = data.wait_history_available !== false;
+  }
   // Queue-only GPU types join the selector's union; the two queue
   // tables re-render under the current type filter. The metrics charts
   // are already rendered and are NOT redrawn here.
   refreshSelectorOptions();
   renderPartQueue();
   renderWaitingJobs();
-  setResultsLoading("queueResults", false);
 }
 
 export function setQueueProgress(done, total, failed) {
-  setResultsLoadingMessage("queueResults", batchText(
-    "Loading wait history", done, total, failed));
+  // Non-blocking by design: the live queue rows are already rendered,
+  // so batch progress lands on the history hint, not a loading chip.
+  const hint = $("pWaitHistoryHint");
+  hint.hidden = false;
+  hint.textContent = batchText(
+    "Loading wait history", done, total, failed);
 }
-
-// Plain-text batch progress line. The ellipsis is the literal character:
-// an escaped "&hellip;" would render as the visible word "hellip".
 function batchText(prefix, done, total, failed) {
   return prefix + ": batch " + done + " of " + total
     + (failed ? " (" + failed + " failed)" : "") + "…";
@@ -430,7 +475,19 @@ const partQueueTable = createTable({
 function renderPartQueue() {
   partQueueTable.setRows(queueRows);
   $("pQueueHint").hidden = queueAvailable;
-  $("pWaitHistoryHint").hidden = waitHistoryAvailable;
+  // Three states for the history hint: absent (live rows rendered,
+  // history still loading), hidden (history resolved and available),
+  // shown (history resolved but failed — the "—" cells above are a
+  // real unavailability, not a pending load).
+  const hint = $("pWaitHistoryHint");
+  if (!historyResolved) {
+    hint.hidden = false;
+    hint.textContent = "Wait statistics loading — pending counts above are live.";
+  } else {
+    hint.hidden = waitHistoryAvailable;
+    hint.textContent = "Historical wait data unavailable — sacct enrichment "
+      + "failed; pending counts above are still live.";
+  }
   // The unique cluster-wide figure (totals from the backend) always
   // stays cluster-wide: per-type rows overlap (flexible jobs count in
   // each eligible row), so a type filter rewrites the waiting list
