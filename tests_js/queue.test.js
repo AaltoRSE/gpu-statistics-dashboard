@@ -50,14 +50,14 @@ const QUEUE = {
     exclusive_gpus: 4, flexible_gpus: 1, eligible_gpus: 5,
     wait_p50_s: 3600, wait_p90_s: 3600, wait_avg_s: 3600,
     wait_samples: 2,
-    wait_per_gpu_hour_p50: 0.5,
+    wait_per_gpu_hour_weighted: 0.5,
   },
   "h200_3g.71gb": {
     exclusive_jobs: 0, flexible_jobs: 1, eligible_jobs: 1,
     exclusive_gpus: 0, flexible_gpus: 1, eligible_gpus: 1,
     wait_p50_s: null, wait_p90_s: null, wait_avg_s: null,
     wait_samples: 0,
-    wait_per_gpu_hour_p50: null,
+    wait_per_gpu_hour_weighted: null,
   },
 };
 

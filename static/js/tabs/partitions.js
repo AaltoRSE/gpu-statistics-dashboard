@@ -260,9 +260,9 @@ function queueRowHtml(q) {
         ? "—" : fmtDuration(q.wait_avg_s)}</td>
       <td class="num">${q.wait_samples === null || q.wait_samples === undefined
         ? "—" : fmtInt(q.wait_samples)}</td>
-      <td class="num">${q.wait_per_gpu_hour_p50 === null
-        || q.wait_per_gpu_hour_p50 === undefined
-        ? "—" : fmt(q.wait_per_gpu_hour_p50, 2) + " h/GPU-h"}</td>
+      <td class="num">${q.wait_per_gpu_hour_weighted === null
+        || q.wait_per_gpu_hour_weighted === undefined
+        ? "—" : fmt(q.wait_per_gpu_hour_weighted, 2) + " h/GPU-h"}</td>
     </tr>`;
 }
 // Centered rolling mean over a fixed WALL-CLOCK window (not a fixed point
@@ -402,7 +402,7 @@ const partQueueTable = createTable({
     { key: "wait_p90_s", type: "number" },
     { key: "wait_avg_s", type: "number" },
     { key: "wait_samples", type: "number" },
-    { key: "wait_per_gpu_hour_p50", type: "number" },
+    { key: "wait_per_gpu_hour_weighted", type: "number" },
   ],
   defaultSort: { key: "eligible_jobs", dir: "desc" },
   renderRow: queueRowHtml,

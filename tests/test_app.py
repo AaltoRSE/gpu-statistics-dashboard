@@ -862,10 +862,9 @@ def test_partitions_queue_summary(client, fake_prom, monkeypatch):
     assert q["h200"]["wait_p90_s"] == 3600
     assert q["h200"]["wait_avg_s"] == 3600
     assert q["h200"]["wait_samples"] == 2
-    # ratio from the shared SACCT fixture: job 1 = 3600s wait for
-    # 2 GPUs × 3600s = ratio 0.5; job 2 = 3600s wait for 1 GPU ×
-    # 7200s = 0.5 -> median 0.5 wait-hours per GPU-hour
-    assert q["h200"]["wait_per_gpu_hour_p50"] == 0.5
+    # GPU-hour weighted: (3600s+3600s) waits / (2×3600 + 1×7200 GPU-s)
+    # = 7200/14400 = 0.5 wait-hours per GPU-hour
+    assert q["h200"]["wait_per_gpu_hour_weighted"] == 0.5
     # job 11's untyped request is also eligible for the MIG profile
     # (flexible there); job 4 (the in-window MIG start) waited 7200s:
     # submitted 22:00 the day before its 00:00 start
@@ -873,8 +872,8 @@ def test_partitions_queue_summary(client, fake_prom, monkeypatch):
     assert q["h200_3g.71gb"]["wait_p50_s"] == 7200
     assert q["h200_3g.71gb"]["wait_p90_s"] == 7200
     assert q["h200_3g.71gb"]["wait_samples"] == 1
-    # job 4: 7200s wait, 1 GPU × 3600s elapsed -> ratio 2.0
-    assert q["h200_3g.71gb"]["wait_per_gpu_hour_p50"] == 2.0
+    # job 4: 7200s wait, 1 GPU × 3600s elapsed -> 7200/3600 = 2.0
+    assert q["h200_3g.71gb"]["wait_per_gpu_hour_weighted"] == 2.0
     # constraints-only row on the h100 partition: 1 job, 0 GPUs, no waits
     assert q["h100"]["exclusive_jobs"] == 1
     assert q["h100"]["eligible_jobs"] == 1
@@ -954,8 +953,7 @@ def test_wait_statistics_percentiles():
     out = dp._wait_statistics([])
     assert out == {"wait_p50_s": None, "wait_p90_s": None,
                    "wait_avg_s": None, "wait_samples": 0,
-                   "wait_per_gpu_hour_p50": None}
-    # the median helper itself: empty -> None, odd -> middle,
+                   "wait_per_gpu_hour_weighted": None}
     # even ints -> rounded mean, floats keep precision
     assert dp._median([]) is None
     assert dp._median([10, 20, 30]) == 20
@@ -999,21 +997,22 @@ def test_started_wait_summary_excludes_invalid_records(client, fake_prom,
         records, {"gpu2": ["h100"]}, NOW - 72 * 3600, NOW)
     # Only the two positive-runtime records are valid completed samples.
     assert out["h100"] == {"wait_p50_s": 5400, "wait_p90_s": 7200,
-                            "wait_avg_s": 5400, "wait_samples": 2,
-                            "wait_per_gpu_hour_p50": 1.0}
+                           "wait_avg_s": 5400, "wait_samples": 2,
+                           "wait_per_gpu_hour_weighted": 1.0}
+    assert coverage["excluded"]["nonpositive_elapsed"] == 1
     assert coverage["excluded"]["timestamps"] == 2
     assert coverage["excluded"]["negative_wait"] == 1
-    assert coverage["excluded"]["nonpositive_elapsed"] == 1
 
 
-def test_started_wait_summary_ratio_median_and_exclusions(client, fake_prom,
-                                                          monkeypatch):
-    # The ratio is the median of PER-JOB ratios (not wait-sum over
-    # GPU-hour-sum, which would weight large jobs), rounded to two
-    # decimals. A zero wait with positive job size is a valid 0.0.
+def test_started_wait_summary_ratio_weighted_and_exclusions(
+        client, fake_prom, monkeypatch):
+    # The ratio is GPU-hour weighted — wait-sum over GPU-hour-sum
+    # (elapsed_s × gpus summed over jobs) — NOT the median of per-job
+    # ratios, which short jobs would dominate. Rounded to two decimals.
     import domain.partitions as dp
-    # per-job ratios: 1800/(1800*1)=1.0, 3600/(3600*4)=0.25, 0/(900*2)=0.0
-    # -> median 0.25; ratio-of-sums would be 5400/15300h ~= 0.35 instead.
+    # waits: 1800 + 3600 + 0 = 5400; GPU-s: 1800*1 + 3600*4 + 900*2 = 18000
+    # -> 5400/18000 = 0.3; the per-job median would be 0.25 instead.
+    # A zero wait with positive job size is a valid sample.
     recs = {
         "200": {"submit": "2026-08-30T09:00:00", "start": "2026-08-30T09:30:00",
                 "elapsed_s": 1800, "gpus": 1},
@@ -1026,7 +1025,7 @@ def test_started_wait_summary_ratio_median_and_exclusions(client, fake_prom,
                 "node_list": "gpu2"} for record in recs.values()]
     out, _ = dp.completed_wait_summary(
         records, {"gpu2": ["h100"]}, NOW - 72 * 3600, NOW)
-    assert out["h100"]["wait_per_gpu_hour_p50"] == 0.25
+    assert out["h100"]["wait_per_gpu_hour_weighted"] == 0.3
     assert out["h100"]["wait_samples"] == 3
     # Typed allocation is mandatory: an untyped/zero-GPU record is excluded.
     records = [{"state": "COMPLETED", "submit": "2026-08-30T09:00:00",
@@ -1036,6 +1035,14 @@ def test_started_wait_summary_ratio_median_and_exclusions(client, fake_prom,
         records, {"gpu2": ["h100"]}, NOW - 72 * 3600, NOW)
     assert out[dp.WAIT_TOTAL_KEY] == dp.wait_empty()
     assert coverage["excluded"]["missing_typed_gpu_allocation"] == 1
+    # All-zero waits with positive GPU-hours stay a valid 0.0, not None.
+    records = [{"state": "COMPLETED", "submit": "2026-08-30T12:00:00",
+                "start": "2026-08-30T12:00:00", "elapsed_s": 900,
+                "gpus": 2, "gpu_type": "h100", "node_list": "gpu2"}]
+    out, coverage = dp.completed_wait_summary(
+        records, {"gpu2": ["h100"]}, NOW - 72 * 3600, NOW)
+    assert out["h100"]["wait_per_gpu_hour_weighted"] == 0.0
+    assert coverage["valid_samples"] == {"h100": 1}
 
 
 def test_completed_wait_summary_no_records(client, fake_prom):
@@ -1099,7 +1106,6 @@ def test_partitions_wait_history_unavailable_keeps_queue(client, fake_prom,
                       params={"since_hours": 24}).json()
     assert data["wait_history_available"] is False
     assert data["queue_available"] is True
-    # current pending figures survive the history failure
     assert data["totals"]["unique_pending_jobs"] == 0
     # wait statistics read as unknown — all null — not as zero samples
 
@@ -1108,7 +1114,7 @@ def test_partitions_wait_history_unavailable_keeps_queue(client, fake_prom,
     assert row["wait_p90_s"] is None
     assert row["wait_avg_s"] is None
     assert row["wait_samples"] is None
-    assert row["wait_per_gpu_hour_p50"] is None
+    assert row["wait_per_gpu_hour_weighted"] is None
 
 def test_partitions_partial_wait_history_keeps_successful_metrics(
         client, fake_prom, monkeypatch):
@@ -1907,8 +1913,8 @@ def test_completed_wait_summary_separates_mig_and_excludes_noncompleted():
         records, {"gpu49": ["h200", "h200_3g.71gb"]},
         NOW - 72 * 3600, NOW)
     assert out["h200"]["wait_samples"] == 2  # includes the five-minute job
-    assert out["h200"]["wait_per_gpu_hour_p50"] == 1.0
+    assert out["h200"]["wait_per_gpu_hour_weighted"] == 1.0
     assert out["h200_3g.71gb"]["wait_samples"] == 1
-    assert out["h200_3g.71gb"]["wait_per_gpu_hour_p50"] == 4.0
+    assert out["h200_3g.71gb"]["wait_per_gpu_hour_weighted"] == 4.0
     assert coverage["valid_samples"] == {"h200": 2, "h200_3g.71gb": 1}
     assert coverage["excluded"] == {"state": 2}
