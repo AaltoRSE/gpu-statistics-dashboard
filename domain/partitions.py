@@ -513,12 +513,12 @@ def _wait_statistics(samples):
     if not ordered:
         return {"wait_p50_s": None, "wait_p90_s": None,
                 "wait_avg_s": None, "wait_samples": 0,
-                "wait_per_gpu_hour_p50": None}
+                "wait_per_gpu_hour_weighted": None}
     p90 = ordered[-(-9 * len(ordered) // 10) - 1]
     return {"wait_p50_s": _median(ordered), "wait_p90_s": p90,
             "wait_avg_s": round(sum(ordered) / len(ordered)),
             "wait_samples": len(ordered),
-            "wait_per_gpu_hour_p50": None}
+            "wait_per_gpu_hour_weighted": None}
 
 
 def wait_empty():
@@ -541,13 +541,17 @@ def completed_wait_summary(records, node_gpu_types, window_start, window_end,
 
     Each accepted record is a completed allocation that started inside the
     requested window and has valid Submit, Start, positive elapsed time, and
-    a positive *typed* GPU allocation. The normalized median is calculated
-    per job as ``wait_s / (elapsed_s * gpus)``; its units are wait-hours per
-    GPU-hour because the seconds cancel. Prometheus is deliberately absent:
-    short jobs need not survive a scrape to be counted.
+    a positive *typed* GPU allocation. The normalized ratio is GPU-hour
+    weighted: ``sum(wait_s) / sum(elapsed_s * gpus)``, i.e. wait-hours
+    per allocated GPU-hour; seconds cancel. Aggregating totals instead of
+    taking a median of per-job ratios keeps short jobs (a 96-second array
+    element waiting 5 h is 202 h/GPU-h on its own) from outweighing the
+    GPU-hours of large jobs. Prometheus is deliberately absent: short
+    jobs need not survive a scrape to be counted.
     """
     waits = defaultdict(list)
-    ratios = defaultdict(list)
+    wait_sums = defaultdict(int)
+    gpu_hour_sums = defaultdict(float)
     excluded = defaultdict(int)
     examined = 0
     for rec in records:
@@ -577,23 +581,23 @@ def completed_wait_summary(records, node_gpu_types, window_start, window_end,
             "gpu_type": rec["gpu_type"],
         }, node_gpu_types)
         wait = int(started - submitted)
-        ratio = wait / (rec["elapsed_s"] * rec["gpus"])
         for name in (group, WAIT_TOTAL_KEY):
             waits[name].append(wait)
-            ratios[name].append(ratio)
+            wait_sums[name] += wait
+            gpu_hour_sums[name] += rec["elapsed_s"] * rec["gpus"]
 
     summary = {}
     for name in set(waits) | {WAIT_TOTAL_KEY}:
         entry = _wait_statistics(waits.get(name, []))
-        group_ratios = ratios.get(name, [])
-        entry["wait_per_gpu_hour_p50"] = (
-            round(_median(group_ratios), 2) if group_ratios else None)
+        gpu_hours = gpu_hour_sums.get(name, 0.0)
+        entry["wait_per_gpu_hour_weighted"] = (
+            round(wait_sums[name] / gpu_hours, 2) if gpu_hours > 0 else None)
         summary[name] = entry
     accounting_coverage = accounting_coverage or {}
     coverage = {
         "records_examined": examined,
-        "valid_samples": {name: len(samples) for name, samples in ratios.items()
-                          if name != WAIT_TOTAL_KEY},
+        "valid_samples": {name: len(samples) for name, samples in
+                          waits.items() if name != WAIT_TOTAL_KEY},
         "excluded": dict(excluded),
         "failed_batches": accounting_coverage.get("failed_batches", 0),
         "complete": accounting_coverage.get("complete", True),

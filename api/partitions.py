@@ -191,7 +191,7 @@ def api_partition_queue(since_hours: float = Query(24, gt=0, le=168),
             entry.update({
                 "wait_p50_s": None, "wait_p90_s": None,
                 "wait_avg_s": None, "wait_samples": None,
-                "wait_per_gpu_hour_p50": None,
+                "wait_per_gpu_hour_weighted": None,
             })
         merged[name] = entry
     return {
