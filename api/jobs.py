@@ -29,7 +29,7 @@ router = APIRouter()
 
 @router.get("/api/jobs", response_model=JobsResponse)
 def api_jobs(
-    since_hours: float = Query(24, gt=0, le=168),
+    since_hours: float = Query(24, gt=0, le=720),
     partition: str = "",
     user: str = "",
     search: str = "",
@@ -110,7 +110,7 @@ def api_jobs(
 
 
 @router.get("/api/jobs/{jobid}", response_model=JobDetailResponse)
-def api_job_detail(jobid: str, since_hours: float = Query(24, gt=0, le=168)):
+def api_job_detail(jobid: str, since_hours: float = Query(24, gt=0, le=720)):
     start, now = job_window(since_hours)
     step = step_for_range(now - start)
     prom = deps.get_prom()

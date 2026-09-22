@@ -74,8 +74,8 @@ export async function loadJobs(force = false) {
     params.set("limit", String(limit));
   }
   if (btn) btn.disabled = true;
-  setResultsLoading("jobsResults", true);
-  setResultsLoading("jobEfficiencyResults", true);
+  setResultsLoading("jobsResults", true, "Loading job history…");
+  setResultsLoading("jobEfficiencyResults", true, "Loading job history…");
   try {
     const data = await api("/api/jobs?" + params);
     if (token !== jobsToken) return; // a newer request supersedes this one
@@ -303,7 +303,7 @@ export async function loadJobDetail(jobid, from) {
   }
   setJobDetailHead(jobid);
   detail.style.display = "block";
-  setResultsLoading("jobDetailResults", true);
+  setResultsLoading("jobDetailResults", true, "Loading job detail history…");
   clearJobTableHighlight();
   // Detail-first: the requested job is the subject of this view, so tuck
   // the broad explorer behind its "Browse jobs" control unless the click

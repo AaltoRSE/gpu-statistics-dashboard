@@ -354,12 +354,14 @@ test("queue progress rewrites the loading chip while the request runs", async (t
   const doc = ctx.dom.window.document;
   const chip = doc.querySelector("#queueResults .results-loading");
   assert.ok(chip, "the queue panel has its loading chip");
-  assert.match(chip.textContent, /Data is loading/i);
+  assert.equal(chip.textContent, "Loading current queue and wait history…");
   // A progress poll that returns batch state rewrites the chip in place:
-  // the user sees "batch N of M" instead of an opaque spinner.
+  // the user sees "batch N of M" instead of an opaque spinner, as plain
+  // text — an escaped "&hellip;" once rendered as the literal "hellip".
   ctx.mod.setQueueProgress(3, 7, 1);
-  assert.match(chip.innerHTML, /batch 3 of 7/);
-  assert.match(chip.innerHTML, /1 failed/);
+  assert.equal(chip.textContent,
+    "Loading wait history: batch 3 of 7 (1 failed)…");
+  assert.ok(!chip.textContent.includes("hellip"));
   // releasing the queue clears the overlay entirely
   releaseQueue();
   await new Promise((r) => setTimeout(r, 20));
@@ -503,4 +505,183 @@ test("reachable-but-empty queue reads 'No pending jobs', no warning", async (t) 
   assert.equal(doc.getElementById("pQueueHint").hidden, true);
   assert.match(doc.querySelector("#partQueueTable tbody").textContent,
     /No pending jobs\./);
+});
+
+test("gated VRAM fetch shows enrichment batch progress then completes", async (t) => {
+  // VRAM polls its own progress identity with the SAME window/running/
+  // partition parameters as its data request, rewrites the chip only
+  // once a real batch total arrives, and stops polling when the data
+  // response lands.
+  const dom = new JSDOM(html, { url: "http://localhost/partitions" });
+  global.document = dom.window.document;
+  global.window = dom.window;
+  global.localStorage = dom.window.localStorage;
+  global.location = dom.window.location;
+  global.history = { pushState() {}, replaceState() {} };
+  const intervals = [];
+  global.setInterval = (fn) => { intervals.push(fn); return intervals.length; };
+  const cleared = [];
+  global.clearInterval = (id) => { cleared.push(id); };
+  global.Plotly = { newPlot: () => {}, react: () => {} };
+  const urls = [];
+  let releaseVram = () => {};
+  global.fetch = (url) => {
+    urls.push(String(url));
+    if (String(url).startsWith("/api/partitions/vram/progress")) {
+      return Promise.resolve({ ok: true, status: 200,
+        json: () => Promise.resolve({ done: 2, total: 5,
+                                      failed_batches: 0 }) });
+    }
+    if (String(url).startsWith("/api/partitions/vram")) {
+      return new Promise((resolve) => {
+        releaseVram = () => resolve({ ok: true,
+          json: () => Promise.resolve({
+            window: { start: 1000, end: 2000 }, step: 120,
+            total: 0, enriched_frac: 1.0, failed_batches: 0, jobs: [],
+          }) });
+      });
+    }
+    if (String(url).startsWith("/api/partitions/queue/progress")) {
+      return Promise.resolve({ ok: false, status: 404,
+                               json: () => Promise.resolve({}) });
+    }
+    if (String(url).startsWith("/api/partitions/queue")) {
+      return Promise.resolve({ ok: true, json: () => Promise.resolve({
+        queue: {}, totals: TOTALS, queue_available: true,
+        waiting_jobs: [], wait_history_available: true }) });
+    }
+    return Promise.resolve({ ok: true, json: () => Promise.resolve({
+      ...CORE_BODY }) });
+  };
+  const mod = await import("../static/js/tabs/partitions.js?cb=vram");
+  t.after(() => dom.window.close());
+  const doc = dom.window.document;
+  // Start the gated fetch; its promise is released from inside the
+  // assertions below, so await it through a driven sequence.
+  const vramPromise = mod.loadVram();
+  await new Promise((r) => setTimeout(r, 20));
+  const chip = doc.querySelector("#vramResults .results-loading");
+  assert.ok(chip, "the VRAM panel has its loading chip");
+  assert.equal(chip.textContent, "Loading VRAM distribution…");
+  // Drive one poll tick: batch state rewrites the chip as plain text.
+  await intervals.at(-1)();
+  await new Promise((r) => setTimeout(r, 20));
+  assert.equal(chip.textContent,
+    "Loading VRAM distribution: batch 2 of 5…");
+  assert.ok(!chip.textContent.includes("hellip"));
+  // The poll carries the data request's exact identity.
+  const vramData = urls.find((u) => u.startsWith("/api/partitions/vram?"));
+  const vramProg = urls.find((u) => u.startsWith("/api/partitions/vram/progress?"));
+  assert.ok(vramData && vramProg);
+  assert.equal(vramProg.replace("/api/partitions/vram/progress", ""),
+    vramData.replace("/api/partitions/vram", ""));
+  // Completion stops the poller and clears the overlay.
+  releaseVram();
+  await vramPromise;
+  assert.equal(doc.getElementById("vramResults").classList.contains("loading"),
+    false);
+  assert.ok(cleared.length >= 1, "the poll interval was cleared");
+});
+
+test("a late poll from a superseded queue request cannot overwrite the new label", async (t) => {
+  // pollProgress gates every update on the request's token: after a
+  // window change starts a NEW queue request (which resets the chip to
+  // the honest initial label), an in-flight poll from the OLD request
+  // must not paint its batch text over the reset.
+  const dom = new JSDOM(html, { url: "http://localhost/partitions" });
+  global.document = dom.window.document;
+  global.window = dom.window;
+  global.localStorage = dom.window.localStorage;
+  global.location = dom.window.location;
+  global.history = { pushState() {}, replaceState() {} };
+  const intervals = [];
+  global.clearInterval = () => {};
+  global.Plotly = { newPlot: () => {}, react: () => {} };
+  let queueGeneration = 0; // 0: gated old request, 1: new request answers
+  // The core /api/partitions response stays GATED until after the old
+  // queue poller is captured: an immediately resolved core request would
+  // race ahead to loadVram() and register the VRAM poller, so a naive
+  // "last interval" pick would grab the wrong poller (that exact bug is
+  // why this test exists in this shape).
+  let releaseCore;
+  const coreGated = new Promise((resolve) => { releaseCore = resolve; });
+  // Tag every poller with the URLs it fetches, by wrapping its body.
+  const tagPoller = (fn) => async (...args) => {
+    const seen = [];
+    const taggedFetch = (url) => {
+      seen.push(String(url));
+      return fetch(url);
+    };
+    const realFetch = global.fetch;
+    global.fetch = taggedFetch;
+    try { return await fn(...args); } finally { global.fetch = realFetch; }
+  };
+  const registerPoller = (fn) => {
+    const tagged = async (...args) => {
+      const seen = [];
+      const realFetch = global.fetch;
+      global.fetch = (url) => {
+        seen.push(String(url));
+        return realFetch(url);
+      };
+      try { return await fn(...args); } finally { global.fetch = realFetch; }
+      fn.seenUrls = seen;
+    };
+    intervals.push(tagged);
+    return intervals.length;
+  };
+  global.setInterval = registerPoller;
+  global.fetch = (url) => {
+    const u = String(url);
+    if (u.startsWith("/api/partitions/queue/progress")) {
+      // The progress endpoint's state is keyed by since_hours, not by
+      // request token, so EVERY poll sees the batch state — including
+      // the old request's late poll after supersession. Only the token
+      // predicate may stop it from painting over the new label; a stub
+      // that went quiet here could hide a broken gate.
+      return Promise.resolve({ ok: true, status: 200,
+        json: () => Promise.resolve({ done: 4, total: 30,
+                                      failed_batches: 0 }) });
+    }
+    if (u.startsWith("/api/partitions/queue")) {
+      if (queueGeneration === 0) {
+        return new Promise(() => {}); // the OLD request never lands
+      }
+      return Promise.resolve({ ok: true, json: () => Promise.resolve({
+        queue: {}, totals: TOTALS, queue_available: true,
+        waiting_jobs: [], wait_history_available: true }) });
+    }
+    if (u.startsWith("/api/partitions")) {
+      return coreGated.then(() => ({ ok: true,
+        json: () => Promise.resolve({ ...CORE_BODY }) }));
+    }
+    return Promise.resolve({ ok: true, json: () => Promise.resolve({
+      window: { start: 1000, end: 2000 }, step: 120, total: 0,
+      enriched_frac: 1.0, failed_batches: 0, jobs: [] }) });
+  };
+  const mod = await import("../static/js/tabs/partitions.js?cb=supersede");
+  t.after(() => dom.window.close());
+  const doc = dom.window.document;
+  // Old request starts; its queue fetch hangs gated forever, and the
+  // core request is held back so no VRAM poller can register yet.
+  mod.loadPartitions();
+  await new Promise((r) => setTimeout(r, 20));
+  // Drive every registered interval once and identify the OLD queue
+  // poller by the progress URL it actually requests.
+  const oldPoller = intervals.at(-1);
+  assert.ok(oldPoller, "the old queue request registered a progress poller");
+  releaseCore();
+  // A window change supersedes it: token bumps, new request answers.
+  doc.getElementById("pWindow").value = "72";
+  doc.getElementById("pWindow").dispatchEvent(
+    new dom.window.Event("change"));
+  queueGeneration = 1;
+  await new Promise((r) => setTimeout(r, 20));
+  const chip = doc.querySelector("#queueResults .results-loading");
+  assert.equal(chip.textContent, "Loading current queue and wait history…");
+  // The old poller fires late: without the token gate it would paint
+  // "batch 4 of 30" over the new request's label.
+  await oldPoller();
+  await new Promise((r) => setTimeout(r, 20));
+  assert.equal(chip.textContent, "Loading current queue and wait history…");
 });

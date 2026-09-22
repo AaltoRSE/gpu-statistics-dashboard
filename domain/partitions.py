@@ -530,7 +530,7 @@ progress_store = {}
 """Latest batched accounting progress, keyed per fetch scope.
 
 Two consumers publish here and their poll routes read it: the queue's
-seven-day wait-history fetch (key from
+long-window wait-history fetch (key from
 ``cache.completed_progress_key``) and the VRAM distribution's sacct
 enrichment (key from ``cache.vram_progress_key``). Each fetch updates,
 then clears, its own entry, so a poll never observes a finished or

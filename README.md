@@ -98,8 +98,11 @@ OS-level preference applies when no choice has been saved.
   of shown GPU-hours, and the dual **GPU utilization range** slider
   filters jobs by mean utilization client-side (no refetch). The card
   shares the tab's window and **Running only** controls. While its fetch
-  is in flight the card shows a "Data is loading" popup on its own — the
-  other graphs and the table stay live and interactive.
+  is in flight the card shows its own loading popup — first
+  "Loading VRAM history…", then real batch progress
+  ("Enriching VRAM history: batch N of M…") while the sacct enrichment
+  works through its 100-job batches. The other graphs and the table
+  stay live and interactive.
 
 ### Nodes tab
 - All GPU nodes with live utilization/VRAM (instant Prometheus query),

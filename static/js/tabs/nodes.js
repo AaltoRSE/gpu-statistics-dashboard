@@ -168,7 +168,7 @@ export async function loadNodeDetail(name) {
   const token = ++nodeDetailToken;
   $("nodeDetailResults").style.display = "block";
   $("nodeDetailTitle").textContent = "Node " + name;
-  setResultsLoading("nodeDetailResults", true);
+  setResultsLoading("nodeDetailResults", true, "Loading node history…");
   clearNodeTableHighlight();
   try {
     const data = await api("/api/nodes/" + encodeURIComponent(name) + "?view=" + $("ndWindow").value);

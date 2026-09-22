@@ -547,7 +547,7 @@ def _completed_jobs_batch(start_iso, end_iso):
 def completed_jobs(start_iso, end_iso, progress=None):
     """Completed records plus bounded-query completeness metadata.
 
-    Daily chunks keep a seven-day all-user query bounded. Each chunk retries
+    Daily chunks keep long all-user queries bounded. Each chunk retries
     once; successful chunks survive another chunk's failure, and inclusive
     boundary duplicates are removed by sacct JobID (array task IDs remain
     distinct). ``progress`` receives a callback after every chunk so a caller
@@ -564,6 +564,8 @@ def completed_jobs(start_iso, end_iso, progress=None):
         chunks.append((cursor, chunk_end))
         cursor = chunk_end
     total = len(chunks)
+    if progress:
+        progress({"done": 0, "total": total, "failed_batches": 0})
     for index, (chunk_start, chunk_end) in enumerate(chunks):
         chunk_start_iso = chunk_start.isoformat(timespec="seconds")
         chunk_end_iso = chunk_end.isoformat(timespec="seconds")
@@ -614,8 +616,8 @@ def sacct_jobs_resilient(job_ids, start_iso=None, workers=8, progress=None):
     the returned tuple instead of discarding every other batch's records
     (one slow slurmdbd response must not 502 a 2000-job enrichment).
     ``progress`` receives ``{"done", "total", "failed_batches"}`` before
-    the batches are submitted and after each batch completes, so a long
-    enrichment can surface real batch progress.
+    the first batch (``done=0``) and once per finished batch — the same
+    batched-progress contract as ``completed_jobs``.
     """
     job_ids = sorted(set(job_ids))
     if not job_ids:
@@ -624,6 +626,9 @@ def sacct_jobs_resilient(job_ids, start_iso=None, workers=8, progress=None):
     total = len(batches)
     results = {}
     failed_batches = 0
+    if progress:
+        progress({"done": 0, "total": len(batches),
+                  "failed_batches": 0})
 
     def fetch(batch):
         # Failure is reported as the (rows, failed) pair instead of
@@ -638,8 +643,6 @@ def sacct_jobs_resilient(job_ids, start_iso=None, workers=8, progress=None):
         except SlurmError:
             return {}, True
 
-    if progress:
-        progress({"done": 0, "total": total, "failed_batches": 0})
     with ThreadPoolExecutor(max_workers=workers) as pool:
         futures = [pool.submit(fetch, batch) for batch in batches]
         # as_completed: `done` must advance as soon as any batch finishes,
@@ -655,3 +658,4 @@ def sacct_jobs_resilient(job_ids, start_iso=None, workers=8, progress=None):
     for jobid, row in results.items():
         enriched[jobid] = _enrich_sacct_row(row)
     return enriched, failed_batches
+
