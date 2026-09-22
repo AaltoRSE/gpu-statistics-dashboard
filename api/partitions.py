@@ -224,9 +224,21 @@ def api_part_vram(since_hours: float = Query(24, gt=0, le=168),
                   weight: str = Query("alloc", pattern="^(alloc|eff)$")):
     node_types = gpu_groups.build_node_index(
         deps.route_cache.get_or_set(cache.scontrol_nodes_key(), 30, deps.show_nodes))
+    progress_key = cache.vram_progress_key(since_hours, running_only,
+                                           partition)
+    # Progress lifecycle lives inside the enrichment's cache-miss leader
+    # (the fetch below): a same-scope follower joins that fetch's Future
+    # and must never touch the key — a follower-side reset would rewind
+    # the leader's live batch state to 0, and a follower-side pop on the
+    # finally path could erase it mid-run. Exactly one publisher per
+    # actual batch run.
+    def report(state):
+        progress_store[progress_key] = state
+
     records, total, start, now, step, enriched_frac, failed_batches = \
-        vram_job_records(since_hours, running_only, partition, node_types,
-                         weight)
+        vram_job_records(since_hours, running_only, partition,
+                         node_types, weight, progress=report,
+                         progress_key=progress_key)
     return {
         "window": window(start, now),
         "step": step,
@@ -235,3 +247,18 @@ def api_part_vram(since_hours: float = Query(24, gt=0, le=168),
         "failed_batches": failed_batches,
         "jobs": records,
     }
+
+
+@router.get("/api/partitions/vram/progress")
+def api_part_vram_progress(since_hours: float = Query(24, gt=0, le=168),
+                           running_only: bool = Query(False),
+                           partition: str = ""):
+    """Batched sacct enrichment progress for the VRAM distribution's
+    current-window fetch. The browser polls this while /api/partitions/vram
+    is in flight; the route resolves the same stable key the data route
+    publishes under, so a poll can only observe that request's batches.
+    Returns the state dict, or null when nothing is in flight (finished,
+    cached, or failed — progress is advisory, the data response decides
+    the panel outcome)."""
+    key = cache.vram_progress_key(since_hours, running_only, partition)
+    return progress_store.get(key, None)
