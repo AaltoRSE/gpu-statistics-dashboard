@@ -191,7 +191,7 @@ def api_partition_queue(since_hours: float = Query(24, gt=0, le=720),
             entry.update({
                 "wait_p50_s": None, "wait_p90_s": None,
                 "wait_avg_s": None, "wait_samples": None,
-                "wait_per_gpu_hour_p50": None,
+                "wait_per_gpu_hour_weighted": None,
             })
         merged[name] = entry
     return {
@@ -237,29 +237,28 @@ def api_part_vram(since_hours: float = Query(24, gt=0, le=720),
                   running_only: bool = Query(False),
                   partition: str = "",
                   weight: str = Query("alloc", pattern="^(alloc|eff)$")):
-    key = cache.vram_progress_key(since_hours, running_only, partition)
-    # Publish before any node/Prometheus work so a poll can already see
-    # the fetch is in flight; removed in finally so no stale state can
-    # survive a failed request.
-    progress_store[key] = {"done": 0, "total": 0, "failed_batches": 0}
-
+    node_types = gpu_groups.build_node_index(
+        deps.route_cache.get_or_set(cache.scontrol_nodes_key(), 30, deps.show_nodes))
+    progress_key = cache.vram_progress_key(since_hours, running_only,
+                                           partition)
+    # Progress lifecycle lives inside the enrichment's cache-miss leader
+    # (the fetch below): a same-scope follower joins that fetch's Future
+    # and must never touch the key — a follower-side reset would rewind
+    # the leader's live batch state to 0, and a follower-side pop on the
+    # finally path could erase it mid-run. Exactly one publisher per
+    # actual batch run.
     def report(state):
-        progress_store[key] = state
+        progress_store[progress_key] = state
 
-    try:
-        node_types = gpu_groups.build_node_index(
-            deps.route_cache.get_or_set(cache.scontrol_nodes_key(), 30,
-                                        deps.show_nodes))
-        records, total, start, now, step, enriched_frac, failed_batches = \
-            vram_job_records(since_hours, running_only, partition,
-                             node_types, weight, progress=report)
-        return {
-            "window": window(start, now),
-            "step": step,
-            "total": total,
-            "enriched_frac": enriched_frac,
-            "failed_batches": failed_batches,
-            "jobs": records,
-        }
-    finally:
-        progress_store.pop(key, None)
+    records, total, start, now, step, enriched_frac, failed_batches = \
+        vram_job_records(since_hours, running_only, partition,
+                         node_types, weight, progress=report,
+                         progress_key=progress_key)
+    return {
+        "window": window(start, now),
+        "step": step,
+        "total": total,
+        "enriched_frac": enriched_frac,
+        "failed_batches": failed_batches,
+        "jobs": records,
+    }

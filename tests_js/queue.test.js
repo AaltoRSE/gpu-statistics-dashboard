@@ -50,14 +50,14 @@ const QUEUE = {
     exclusive_gpus: 4, flexible_gpus: 1, eligible_gpus: 5,
     wait_p50_s: 3600, wait_p90_s: 3600, wait_avg_s: 3600,
     wait_samples: 2,
-    wait_per_gpu_hour_p50: 0.5,
+    wait_per_gpu_hour_weighted: 0.5,
   },
   "h200_3g.71gb": {
     exclusive_jobs: 0, flexible_jobs: 1, eligible_jobs: 1,
     exclusive_gpus: 0, flexible_gpus: 1, eligible_gpus: 1,
     wait_p50_s: null, wait_p90_s: null, wait_avg_s: null,
     wait_samples: 0,
-    wait_per_gpu_hour_p50: null,
+    wait_per_gpu_hour_weighted: null,
   },
 };
 
@@ -562,12 +562,12 @@ test("gated VRAM fetch shows enrichment batch progress then completes", async (t
   await new Promise((r) => setTimeout(r, 20));
   const chip = doc.querySelector("#vramResults .results-loading");
   assert.ok(chip, "the VRAM panel has its loading chip");
-  assert.equal(chip.textContent, "Loading VRAM history…");
+  assert.equal(chip.textContent, "Loading VRAM distribution…");
   // Drive one poll tick: batch state rewrites the chip as plain text.
   await intervals.at(-1)();
   await new Promise((r) => setTimeout(r, 20));
   assert.equal(chip.textContent,
-    "Enriching VRAM history: batch 2 of 5…");
+    "Loading VRAM distribution: batch 2 of 5…");
   assert.ok(!chip.textContent.includes("hellip"));
   // The poll carries the data request's exact identity.
   const vramData = urls.find((u) => u.startsWith("/api/partitions/vram?"));

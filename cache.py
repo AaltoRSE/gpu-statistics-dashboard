@@ -127,6 +127,20 @@ def vram_key(since_hours, running_only):
     return ("vram_gb", since_hours, running_only)
 
 
+def vram_progress_key(since_hours, running_only, partition):
+    """The VRAM enrichment's stable progress-store key, shared by the
+    /api/partitions/vram route (which publishes) and the /progress route
+    (which polls).
+
+    It covers exactly the parameters that change the enrichment's work:
+    since_hours (the window), running_only (the live-ID set), and
+    partition (the candidate filter). weight is deliberately excluded —
+    it only reorders the response, never the batch work — and the epoch
+    is excluded so a poll always resolves the in-flight fetch's entry.
+    """
+    return ("vram_progress", since_hours, running_only, partition)
+
+
 def completed_jobs_key(since_hours):
     """The accounting cache identity, keyed like the progress store.
 
@@ -150,17 +164,6 @@ def completed_progress_key(since_hours):
     view, so the flag has no place in this identity.
     """
     return ("completed_progress", since_hours)
-
-
-def vram_progress_key(since_hours, running_only, partition):
-    """The stable VRAM enrichment progress-store key.
-
-    Like the accounting progress key, it must resolve to exactly one
-    in-flight fetch: the enrichment batches over distinct job-ID sets per
-    window/running/partition view, so a poll for one Partitions view must
-    never read another view's batch state.
-    """
-    return ("vram_progress", since_hours, bool(running_only), partition)
 
 
 def node_current_key():

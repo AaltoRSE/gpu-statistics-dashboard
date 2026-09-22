@@ -274,9 +274,9 @@ function queueRowHtml(q) {
         ? "—" : fmtDuration(q.wait_avg_s)}</td>
       <td class="num">${q.wait_samples === null || q.wait_samples === undefined
         ? "—" : fmtInt(q.wait_samples)}</td>
-      <td class="num">${q.wait_per_gpu_hour_p50 === null
-        || q.wait_per_gpu_hour_p50 === undefined
-        ? "—" : fmt(q.wait_per_gpu_hour_p50, 2) + " h/GPU-h"}</td>
+      <td class="num">${q.wait_per_gpu_hour_weighted === null
+        || q.wait_per_gpu_hour_weighted === undefined
+        ? "—" : fmt(q.wait_per_gpu_hour_weighted, 2) + " h/GPU-h"}</td>
     </tr>`;
 }
 // Centered rolling mean over a fixed WALL-CLOCK window (not a fixed point
@@ -416,7 +416,7 @@ const partQueueTable = createTable({
     { key: "wait_p90_s", type: "number" },
     { key: "wait_avg_s", type: "number" },
     { key: "wait_samples", type: "number" },
-    { key: "wait_per_gpu_hour_p50", type: "number" },
+    { key: "wait_per_gpu_hour_weighted", type: "number" },
   ],
   defaultSort: { key: "eligible_jobs", dir: "desc" },
   renderRow: queueRowHtml,
@@ -557,7 +557,7 @@ $("pRunning").addEventListener("change", (e) => {
  * refilters client-side (no refetch); window / running-only refetch. */
 
 export let vramJobs = [];
-let vramTotal = 0; // candidates in the window, before the backend cap
+let vramTotal = 0; // every returned candidate (the server sends all of them)
 let vramToken = 0;
 let vramGpuType = "";
 let vramEnrichedFrac = 1.0; // sacct enrichment coverage of the returned records
@@ -568,7 +568,7 @@ export async function loadVram() {
   // partitions tab: window / running-only / GPU-type changes here must not
   // freeze the other graphs.
   const origin = partitionsToken;
-  setResultsLoading("vramResults", true, "Loading VRAM history…");
+  setResultsLoading("vramResults", true, "Loading VRAM distribution…");
   const params = new URLSearchParams({ since_hours: $("pWindow").value });
   if ($("pRunning").checked) params.set("running_only", "true");
   if (selectedPartition) params.set("partition", selectedPartition);
@@ -577,9 +577,7 @@ export async function loadVram() {
   const stopPolling = pollProgress(
     "/api/partitions/vram/progress?" + params,
     () => token === vramToken,
-    (prog) => setResultsLoadingMessage("vramResults", batchText(
-      "Enriching VRAM history", prog.done, prog.total,
-      prog.failed_batches)));
+    (prog) => setVramProgress(prog.done, prog.total, prog.failed_batches));
   try {
     const data = await api("/api/partitions/vram?" + params);
     if (token !== vramToken) return; // a newer VRAM request supersedes this one
@@ -598,6 +596,11 @@ export async function loadVram() {
     if (token === vramToken && origin === partitionsToken)
       setResultsLoading("vramResults", false);
   }
+}
+
+export function setVramProgress(done, total, failed) {
+  setResultsLoadingMessage("vramResults", batchText(
+    "Loading VRAM distribution", done, total, failed));
 }
 
 function fillVramGpuTypes() {
@@ -694,11 +697,8 @@ function renderVram() {
   const totalEff = matched
     .filter((j) => allocOf(j) != null)
     .reduce((s, j) => s + Math.min(j.gpu_hours_eff || 0, j.gpu_hours), 0);
-  const truncated = vramTotal > vramJobs.length;
   const scopeBits = [
-    truncated
-      ? matched.length + " / " + vramJobs.length + " (top of " + vramTotal + ")"
-      : matched.length + " jobs",
+    matched.length + " jobs",
     selectedPartition,
     vramGpuType,
   ].filter(Boolean);

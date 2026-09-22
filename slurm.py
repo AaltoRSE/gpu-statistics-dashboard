@@ -10,7 +10,7 @@ import json
 import re
 import shutil
 import subprocess
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from zoneinfo import ZoneInfo
 
 SACCT_FIELDS = [
@@ -623,33 +623,36 @@ def sacct_jobs_resilient(job_ids, start_iso=None, workers=8, progress=None):
     if not job_ids:
         return {}, 0
     batches = [job_ids[i : i + 100] for i in range(0, len(job_ids), 100)]
+    total = len(batches)
+    results = {}
     failed_batches = 0
     if progress:
         progress({"done": 0, "total": len(batches),
                   "failed_batches": 0})
 
     def fetch(batch):
+        # Failure is reported as the (rows, failed) pair instead of
+        # mutating shared counters from the worker threads.
         try:
             for attempt in range(2):
                 try:
-                    return _sacct_batch(batch, start_iso), 0
+                    return _sacct_batch(batch, start_iso), False
                 except SlurmError:
                     if attempt:
                         raise
         except SlurmError:
-            return {}, 1
+            return {}, True
 
-    done = 0
-    # Count failures and merge rows in the collecting thread, never in the
-    # workers: the counter must stay exact under concurrent batches.
-    results = {}
     with ThreadPoolExecutor(max_workers=workers) as pool:
-        for rows, failed in pool.map(fetch, batches):
-            done += 1
-            failed_batches += failed
-            results.update(rows)
+        futures = [pool.submit(fetch, batch) for batch in batches]
+        # as_completed: `done` must advance as soon as any batch finishes,
+        # not only when input order reaches it.
+        for done, future in enumerate(as_completed(futures), 1):
+            chunk, failed = future.result()
+            failed_batches += int(failed)
+            results.update(chunk)
             if progress:
-                progress({"done": done, "total": len(batches),
+                progress({"done": done, "total": total,
                           "failed_batches": failed_batches})
     enriched = {}
     for jobid, row in results.items():

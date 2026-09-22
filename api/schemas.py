@@ -248,12 +248,14 @@ class QueueGroup(BaseModel):
         description="Number of valid completed-job waits behind the "
                     "percentile/average figures; null when the sacct "
                     "enrichment failed (distinct from a genuine 0).")
-    wait_per_gpu_hour_p50: Optional[float] = Field(
+    wait_per_gpu_hour_weighted: Optional[float] = Field(
         default=None,
-        description="Median completed-job queue-wait hours per "
-                    "allocated GPU-hour (wait_hours / (elapsed_hours × "
-                    "GPUs)); lower is better. Null when no completed "
-                    "job has valid positive elapsed time and GPU "
+        description="Completed-job queue-wait hours per allocated "
+                    "GPU-hour, GPU-hour weighted: sum(wait_hours) / "
+                    "sum(elapsed_hours × GPUs); lower is better. "
+                    "Weighted by job size, so short jobs cannot "
+                    "dominate the figure. Null when no completed job "
+                    "has valid positive elapsed time and GPU "
                     "allocation, or when wait history is unavailable.")
 
 
@@ -388,8 +390,9 @@ class VramResponse(BaseModel):
     window: Window
     step: int
     total: int = Field(
-        description="Candidate job count before the sacct-enrichment cap; "
-                    "jobs may hold fewer records than this.")
+        description="Returned candidate job count; every VRAM-bearing job "
+                    "in the window (and partition filter) is returned, so "
+                    "this equals len(jobs).")
     enriched_frac: float = Field(
         default=0.0,
         description="Fraction of the returned records whose allocated "

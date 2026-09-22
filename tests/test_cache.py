@@ -85,6 +85,17 @@ def test_key_builders_are_stable_and_distinct():
     assert cache.node_current_key() == "node_current"
     assert cache.node_detail_key("gpu1", "job_start", 1000) == (
         "nodedetail", "gpu1", "job_start", 1000)
+    # The VRAM progress key covers every candidate-affecting parameter:
+    # two different windows, flags, or partitions are different fetches
+    # whose batch states must never cross.
+    assert cache.vram_progress_key(24, False, "") == (
+        "vram_progress", 24, False, "")
+    assert cache.vram_progress_key(24, False, "") != \
+        cache.vram_progress_key(24, True, "")
+    assert cache.vram_progress_key(24, False, "") != \
+        cache.vram_progress_key(72, False, "")
+    assert cache.vram_progress_key(24, False, "") != \
+        cache.vram_progress_key(24, False, "h200")
 
 
 def test_get_or_set_single_flights_concurrent_misses():

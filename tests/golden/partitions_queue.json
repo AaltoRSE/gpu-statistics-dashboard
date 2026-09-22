@@ -10,7 +10,7 @@
       "wait_avg_s": null,
       "wait_p50_s": null,
       "wait_p90_s": null,
-      "wait_per_gpu_hour_p50": null,
+      "wait_per_gpu_hour_weighted": null,
       "wait_samples": 0
     },
     "h100": {
@@ -23,7 +23,7 @@
       "wait_avg_s": null,
       "wait_p50_s": null,
       "wait_p90_s": null,
-      "wait_per_gpu_hour_p50": null,
+      "wait_per_gpu_hour_weighted": null,
       "wait_samples": 0
     },
     "h200": {
@@ -36,7 +36,7 @@
       "wait_avg_s": null,
       "wait_p50_s": null,
       "wait_p90_s": null,
-      "wait_per_gpu_hour_p50": null,
+      "wait_per_gpu_hour_weighted": null,
       "wait_samples": 0
     },
     "h200_3g.71gb": {
@@ -49,7 +49,7 @@
       "wait_avg_s": null,
       "wait_p50_s": null,
       "wait_p90_s": null,
-      "wait_per_gpu_hour_p50": null,
+      "wait_per_gpu_hour_weighted": null,
       "wait_samples": 0
     },
     "v100_16gb": {
@@ -62,7 +62,7 @@
       "wait_avg_s": null,
       "wait_p50_s": null,
       "wait_p90_s": null,
-      "wait_per_gpu_hour_p50": null,
+      "wait_per_gpu_hour_weighted": null,
       "wait_samples": 0
     },
     "v100_32gb": {
@@ -75,7 +75,7 @@
       "wait_avg_s": null,
       "wait_p50_s": null,
       "wait_p90_s": null,
-      "wait_per_gpu_hour_p50": null,
+      "wait_per_gpu_hour_weighted": null,
       "wait_samples": 0
     }
   },

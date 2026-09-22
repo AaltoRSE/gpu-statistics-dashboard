@@ -7,11 +7,13 @@ import deps
 import gpu_groups
 from domain.common import job_window, running_gpu_job_ids, series_values, step_for_range
 from domain.jobs import fetch_job_window
+from domain.partitions import progress_store
 from promql import label_in, selector
 
 
 def vram_job_records(since_hours, running_only=False, partition="",
-                      node_gpu_types=None, weight="alloc", progress=None):
+                      node_gpu_types=None, weight="alloc", progress=None,
+                      progress_key=None):
     """Per-job VRAM records for the utilization-filtered distribution chart.
 
     Each record carries the job's canonical GPU group (the Slurm partition,
@@ -19,14 +21,26 @@ def vram_job_records(since_hours, running_only=False, partition="",
     average per-GPU peak VRAM (GB), and its allocated GPU-hours from sacct.
     Binning and the utilization range filter happen client-side so the
     slider can rebin without refetching. A non-empty ``partition`` keeps
-    only jobs of that group, so the candidate ``total`` and the enrichment
-    cap apply to the selected group.
+    only jobs of that group, so the candidate ``total`` applies to the
+    selected group. Every candidate is returned: the sacct enrichment
+    runs in bounded 100-ID batches instead of a single oversized query.
     Returns (records, total, start, now, step, enriched_frac,
-    failed_batches) where ``total`` counts candidates before the
-    enrichment cap, ``enriched_frac`` is the fraction of capped records
-    whose allocated GPU-hours the sacct enrichment resolved, and
+    failed_batches) where ``total`` equals ``len(records)``,
+    ``enriched_frac`` is the fraction of returned records whose
+    allocated GPU-hours the sacct enrichment resolved, and
     ``failed_batches`` counts 100-ID sacct batches that failed after
     retrying (their records' gpu_hours stay null).
+
+    ``progress_key`` scopes progress publication: the cache-miss leader
+    that actually runs the enrichment seeds
+    ``{"done": 0, "total": 0, "failed_batches": 0}`` under it, the
+    ``progress`` callback replaces it per batch, and a ``finally`` clears
+    it — exactly one publisher per actual batch run, so a follower
+    cannot rewind or erase live batch state. When there are no ``ids``
+    no leader ``fetch`` runs at all, so the key is never seeded and
+    nothing needs clearing; likewise a cache hit skips ``fetch``, so no
+    progress becomes observable. If ``progress_key`` is None, nothing
+    is published.
     """
     node_gpu_types = node_gpu_types or {}
     start, now = job_window(since_hours)
@@ -77,27 +91,34 @@ def vram_job_records(since_hours, running_only=False, partition="",
             "gpu_hours": None,
             "gpu_hours_eff": j.get("gpu_hours_eff") or 0.0,
         })
-    # Pre-cap selection stays effective-GPU-hours driven: it is the only
-    # allocation-derived figure available before the sacct enrichment below,
-    # and it correlates with real allocation hours. The chosen weight then
-    # orders the capped, enriched set for the client.
-    records.sort(key=lambda r: r["gpu_hours_eff"], reverse=True)
     total = len(records)
-    records = records[:deps.VRAM_RECORD_CAP]
     ids = sorted({r["jobid"] for r in records})
     enriched_frac = 0.0
     failed_batches = 0
     if ids:
+        # Progress publication belongs to the cache-miss leader: it is
+        # the only caller whose sacct_jobs_resilient actually runs, so
+        # seeding/clearing here keeps one publisher per batch run and
+        # leaves followers' joins untouched.
+        def fetch():
+            if progress_key is not None:
+                progress_store[progress_key] = {
+                    "done": 0, "total": 0, "failed_batches": 0}
+            try:
+                # Two workers: every candidate means batches scale with
+                # the window, so low concurrency keeps the load bounded
+                # instead of saturating slurmdbd with 8 parallel lookups.
+                return deps.sacct_jobs_resilient(ids, workers=2,
+                                                 progress=progress)
+            finally:
+                if progress_key is not None:
+                    progress_store.pop(progress_key, None)
+
         meta, failed_batches = deps.route_cache.get_or_set(
             # A distinct key: sacct_key holds the plain dict the Jobs
             # paths consume; storing the (dict, failed) tuple under it
             # would hand the other consumer the wrong shape for the TTL.
-            cache.sacct_resilient_key(ids), 300,
-            # Two workers: 2000 IDs mean 20 sequential 100-ID sacct calls
-            # per failed batch, so low concurrency keeps the load bounded
-            # instead of saturating slurmdbd with 8 parallel lookups.
-            lambda: deps.sacct_jobs_resilient(ids, workers=2,
-                                              progress=progress))
+            cache.sacct_resilient_key(ids), 300, fetch)
         enriched = 0
         for r in records:
             row = meta.get(r["jobid"]) or {}
