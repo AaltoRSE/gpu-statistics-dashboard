@@ -5,9 +5,10 @@ from fastapi import APIRouter, Query
 import cache
 import deps
 import gpu_groups
+import sources
 from api.schemas import NodeDetailResponse, NodesResponse
 from domain.common import series_payload, step_for_range, window
-from domain.partitions import node_current, node_job_start
+from domain.partitions import node_job_start
 from prom import PrometheusError
 from promql import label_eq, selector
 
@@ -19,22 +20,25 @@ def api_nodes(gpu_only: bool = True, refresh: bool = Query(False)):
     if refresh:
         # Forced refresh bypasses both the dashboard's 30-second
         # scontrol cache and the Prometheus client's response cache
-        # (60 s range / 20 s instant) instead of redrawing cached data.
+        # (60 s range / 20 s instant) instead of redrawing cached data;
+        # the live snapshot re-reads on the next request.
         deps.get_prom().clear_cache()
-        deps.route_cache.invalidate(
-            cache.scontrol_nodes_key(), cache.node_current_key())
+        deps.route_cache.invalidate(cache.scontrol_nodes_key(),
+                                    cache.snapshot_key())
     nodes = deps.route_cache.get_or_set(cache.scontrol_nodes_key(), 30, deps.show_nodes)
     if gpu_only:
         nodes = [n for n in nodes if n["gpus"]]
     try:
-        cur, jobs_by_node, _, _ = node_current()
+        snap = sources.live_snapshot()
     except PrometheusError:
-        cur, jobs_by_node = {}, {}
+        snap = None
+    cur = snap["node_util"] if snap else {}
+    vram = snap["node_vram"] if snap else {}
+    jobs_by_node = snap["jobs_by_node"] if snap else {}
     for n in nodes:
         n["gpu_group"] = gpu_groups.node_gpu_group(n)
-        c = cur.get(n["name"], {})
-        n["current_util"] = c.get("util")
-        n["current_vram"] = c.get("vram")
+        n["current_util"] = cur.get(n["name"])
+        n["current_vram"] = vram.get(n["name"])
         # scontrol's own AllocTRES (parsed into gpus_alloc by
         # parse_scontrol_nodes), not the live Prometheus series count: a
         # node's monitoring exporter going silent must not make a fully
@@ -60,10 +64,10 @@ def api_node_detail(
     else:
         start = now - int(float(view) * 3600)
     step = step_for_range(now - start)
-    prom = deps.get_prom()
-    sel = selector(label_eq("instance", name))
 
     def fetch():
+        prom = deps.get_prom()
+        sel = selector(label_eq("instance", name))
         util = prom.query_range(
             "max by (slurmjobid, gpu) "
             "(slurm_job_utilization_gpu%s)" % sel,

@@ -534,23 +534,6 @@ def _enrich_sacct_row(row):
     }
 
 
-def _completed_jobs_batch(start_iso, end_iso):
-    """Completed allocation records from one bounded sacct interval."""
-    cmd = [
-        "sacct", "--allusers", "-X", "--state=COMPLETED",
-        "-S", start_iso, "-E", end_iso,
-        "-o", ",".join(SACCT_FIELDS), "--parsable2", "--noheader",
-    ]
-    out = _run(cmd, timeout=120)
-    records = []
-    for line in out.splitlines():
-        row = _parse_sacct_row(line.strip().split("|"))
-        if not line.strip() or "." in row.get("JobID", ""):
-            continue
-        records.append(_enrich_sacct_row(row))
-    return records
-
-
 def sacct_allocations(start_iso, end_iso, partitions):
     """All-user allocation records from one bounded sacct interval.
 
@@ -560,10 +543,10 @@ def sacct_allocations(start_iso, end_iso, partitions):
     partition list — the GPU partitions, resolved from the cached
     scontrol snapshot by the caller, so CPU jobs never enter the dump.
     An empty partition list omits ``-r`` (all partitions). Rows are
-    parsed with the same parser/enricher as ``_completed_jobs_batch``
-    (step rows skipped, blank lines skipped); ``SlurmError`` propagates
-    from ``_run`` so the chunking layer can retry once and count the
-    failure without discarding other chunks.
+    parsed with the shared parser/enricher (step rows skipped, blank
+    lines skipped); ``SlurmError`` propagates from ``_run`` so the
+    chunking layer can retry once and count the failure without
+    discarding other chunks.
     """
     cmd = [
         "sacct", "--allusers", "-X",
@@ -583,59 +566,6 @@ def sacct_allocations(start_iso, end_iso, partitions):
             continue  # step rows
         records.append(_enrich_sacct_row(row))
     return records
-
-
-def completed_jobs(start_iso, end_iso, progress=None):
-    """Completed records plus bounded-query completeness metadata.
-
-    Daily chunks keep long all-user queries bounded. Each chunk retries
-    once; successful chunks survive another chunk's failure, and inclusive
-    boundary duplicates are removed by sacct JobID (array task IDs remain
-    distinct). ``progress`` receives a callback after every chunk so a caller
-    can surface batched progress instead of one opaque wait.
-    """
-    start = datetime.datetime.fromisoformat(start_iso)
-    end = datetime.datetime.fromisoformat(end_iso)
-    records, seen = [], set()
-    failed_batches = successful_batches = 0
-    cursor = start
-    chunks = []
-    while cursor < end:
-        chunk_end = min(cursor + datetime.timedelta(days=1), end)
-        chunks.append((cursor, chunk_end))
-        cursor = chunk_end
-    total = len(chunks)
-    if progress:
-        progress({"done": 0, "total": total, "failed_batches": 0})
-    for index, (chunk_start, chunk_end) in enumerate(chunks):
-        chunk_start_iso = chunk_start.isoformat(timespec="seconds")
-        chunk_end_iso = chunk_end.isoformat(timespec="seconds")
-        chunk = None
-        try:
-            for attempt in range(2):
-                try:
-                    chunk = _completed_jobs_batch(chunk_start_iso, chunk_end_iso)
-                    break
-                except SlurmError:
-                    if attempt:
-                        raise
-        except SlurmError:
-            failed_batches += 1
-            if progress:
-                progress({"done": index + 1, "total": total,
-                          "failed_batches": failed_batches})
-            continue
-        successful_batches += 1
-        for record in chunk:
-            if record["jobid"] not in seen:
-                seen.add(record["jobid"])
-                records.append(record)
-        if progress:
-            progress({"done": index + 1, "total": total,
-                      "failed_batches": failed_batches})
-    return records, {"failed_batches": failed_batches,
-                     "successful_batches": successful_batches,
-                     "complete": failed_batches == 0}
 
 
 def sacct_jobs(job_ids, start_iso=None, workers=8):
@@ -658,7 +588,7 @@ def sacct_jobs_resilient(job_ids, start_iso=None, workers=8, progress=None):
     (one slow slurmdbd response must not 502 a 2000-job enrichment).
     ``progress`` receives ``{"done", "total", "failed_batches"}`` before
     the first batch (``done=0``) and once per finished batch — the same
-    batched-progress contract as ``completed_jobs``.
+    batched-progress contract the sacct window dump publishes.
     """
     job_ids = sorted(set(job_ids))
     if not job_ids:

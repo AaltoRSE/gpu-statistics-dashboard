@@ -5,26 +5,30 @@ from fastapi import APIRouter, Query
 import cache
 import deps
 import gpu_groups
+import sources
 from api.schemas import JobDetailResponse, JobsResponse
-from domain.common import (
-    job_window,
-    running_gpu_job_ids,
-    series_payload,
-    series_values,
-    step_for_range,
-    window,
-)
-from domain.jobs import efficiency_histogram, fetch_job_window
+from domain.common import series_payload, series_values, window
+from domain.jobs import efficiency_histogram
 from domain.metadata import (
+    active_jobs,
     apply_metadata,
     enrich,
     resolve_sacct_metadata,
     resolve_scontrol_metadata,
 )
+from domain.views import window_views
+from prom import PrometheusError
 from promql import label_eq, selector
-from slurm import SlurmError
 
 router = APIRouter()
+
+
+def _pinned(since_hours):
+    """The shared pinned window plus its scontrol node-type index."""
+    pinned = sources.pinned_window(since_hours)
+    nodes = deps.route_cache.get_or_set(
+        cache.scontrol_nodes_key(), 30, deps.show_nodes)
+    return pinned, gpu_groups.build_node_index(nodes)
 
 
 @router.get("/api/jobs", response_model=JobsResponse)
@@ -41,34 +45,42 @@ def api_jobs(
     if refresh:
         # Forced refresh bypasses both the app's 60-second window cache
         # and the Prometheus client's 20/60 s response cache instead of
-        # redrawing the same data; it also forces a fresh live-ID query.
+        # redrawing the same data; the next request re-pins the window
+        # and re-reads the live snapshot.
         deps.get_prom().clear_cache()
-        deps.route_cache.invalidate(
-            cache.job_window_key(since_hours, True, user or None))
+        deps.route_cache.invalidate(cache.pinned_window_key(since_hours),
+                                    cache.snapshot_key())
+    live = None
     if running_only:
-        # Live-ID check first: with no running GPU jobs we must not issue
+        # Live snapshot first: with no running GPU jobs we must not issue
         # the broad window range query at all.
-        live = running_gpu_job_ids()
+        try:
+            live = sources.live_snapshot()["live_ids"]
+        except PrometheusError:
+            live = set()
         if not live:
-            start, now = job_window(since_hours)
+            start, now, _ = sources.pinned_window(since_hours)
             return {"window": window(start, now), "count": 0,
                     "total_candidates": 0, "partitions": [], "jobs": [],
                     "efficiency_histogram": efficiency_histogram([])}
-    # The user filter is pushed into the Prometheus query (server-side),
-    # not applied after the fact: a single-user request must not pull and
-    # scan the whole window for everyone else's jobs.
-    jobs, start, now, _ = fetch_job_window(since_hours, user=user or None)
-    node_types = gpu_groups.build_node_index(
-        deps.route_cache.get_or_set(cache.scontrol_nodes_key(), 30, deps.show_nodes))
+    pinned, node_types = _pinned(since_hours)
+    start, now, step = pinned
+    views = window_views(pinned, sources.gpu_util(pinned),
+                         sources.vram_pct(pinned), node_types)
+    # Copies: the view's job dicts are memoized shared state that
+    # /api/users and the VRAM route read raw — enrichment (and the
+    # gpu_group tag) below must never write back into them.
+    jobs = [dict(j) for j in views["jobs"]]
     for j in jobs:
         j["gpu_group"] = gpu_groups.job_gpu_group(j, node_types)
-    if running_only:
+    if live is not None:
         jobs = [j for j in jobs if j["jobid"] in live]
     if partition:
         jobs = [j for j in jobs if j["gpu_group"] == partition]
     if user:
-        # PromQL's exact user matcher is case-sensitive; retain the typed
-        # label case for the query, then accept capitalization drift here.
+        # The typed label is matched in process (casefold), not in the
+        # Prometheus query: every tab reads one shared unfiltered fetch,
+        # and a single-user request must not re-fetch the window.
         jobs = [j for j in jobs if j["user"].casefold() == user.casefold()]
     # Histogram over the full filtered candidate set (before the table
     # limit and sacct enrichment): the chart must not be biased by the
@@ -111,13 +123,11 @@ def api_jobs(
 
 @router.get("/api/jobs/{jobid}", response_model=JobDetailResponse)
 def api_job_detail(jobid: str, since_hours: float = Query(24, gt=0, le=720)):
-    start, now = job_window(since_hours)
-    step = step_for_range(now - start)
-    prom = deps.get_prom()
-
-    sel = selector(label_eq("slurmjobid", jobid))
+    start, now, step = sources.pinned_window(since_hours)
 
     def fetch():
+        prom = deps.get_prom()
+        sel = selector(label_eq("slurmjobid", jobid))
         util = prom.query_range(
             "max by (slurmjobid, instance, gpu) "
             "(slurm_job_utilization_gpu%s)" % sel,
@@ -138,24 +148,22 @@ def api_job_detail(jobid: str, since_hours: float = Query(24, gt=0, le=720)):
     }
     observed = sorted({s["metric"].get("instance", "") for s in util
                        if s["metric"].get("instance")})
-    sacct_meta = deps.route_cache.get_or_set(
-        cache.sacct_key([jobid]), 300, lambda: deps.sacct_jobs([jobid]))
-    try:
-        active = deps.route_cache.get_or_set(
-            cache.scontrol_jobs_key(), 30, deps.show_jobs)
-    except SlurmError:
-        active = {}
+    rows_by_id, active = sources.gather(
+        lambda: sources.sacct_rows([jobid]),
+        active_jobs,
+    )
     meta = (resolve_scontrol_metadata(jobid, observed, active)
-            or resolve_sacct_metadata(jobid, observed, sacct_meta))
+            or resolve_sacct_metadata(jobid, observed,
+                                      rows_by_id.get(jobid)))
     if meta:
         # Copy so the cached sacct row is not mutated; the human-readable
         # start/end strings are preserved as-is.
         meta = dict(meta)
     # Summary-row figures (PLAN-2): mean utilization is a plain time
     # average over every matched GPU series in this window; gpu_hours_eff
-    # starts as the same Prometheus-only estimate fetch_job_window uses,
-    # then apply_metadata below overwrites it with the allocation-based
-    # figure (and sets gpu_hours_alloc) once metadata resolves — the same
+    # starts as the same Prometheus-only estimate job_view uses, then
+    # apply_metadata below overwrites it with the allocation-based figure
+    # (and sets gpu_hours_alloc) once metadata resolves — the same
     # override the Jobs-list endpoint applies, reused here rather than
     # duplicated.
     all_values = [v for s in util for _, v in series_values(s)]

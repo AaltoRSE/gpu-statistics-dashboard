@@ -153,8 +153,14 @@ def test_live_snapshot_derives_everything_from_two_queries(monkeypatch):
     })
     monkeypatch.setattr(deps, "get_prom", lambda: prom)
     monkeypatch.setattr(deps, "route_cache", cache.TtlCache())
-    types = {"gpu1": ["h200"], "gpu2": ["a100"]}
-    snap = sources.live_snapshot(types)
+    # The node index for group attribution is built inside the fetch
+    # from the cached scontrol snapshot — never from a caller argument,
+    # so the cache holds one entry regardless of any caller's index.
+    monkeypatch.setattr(deps, "show_nodes", lambda: [
+        {"name": "gpu1", "gpus": 4, "gres": [("h200", 2)]},
+        {"name": "gpu2", "gpus": 4, "gres": [("a100", 2)]},
+    ])
+    snap = sources.live_snapshot()
     assert set(snap) == {"live_ids", "node_util", "node_vram", "jobs_by_node",
                          "allocs_by_node", "allocs_by_group"}
     assert len(prom.instant_calls) == 2  # two queries, not five
@@ -171,7 +177,7 @@ def test_live_snapshot_derives_everything_from_two_queries(monkeypatch):
     # One exporter series per allocated GPU.
     assert snap["allocs_by_node"] == {"gpu1": 2, "gpu2": 1}
     assert snap["allocs_by_group"] == {"h200": 2, "a100": 1}
-    again = sources.live_snapshot(types)
+    again = sources.live_snapshot()
     assert again is snap  # 30 s snapshot cache
     assert len(prom.instant_calls) == 2
 

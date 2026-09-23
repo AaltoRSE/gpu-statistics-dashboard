@@ -2,89 +2,81 @@
 
 from collections import defaultdict
 
-import cache
-import deps
 import gpu_groups
-from domain.common import job_window, running_gpu_job_ids, series_values, step_for_range
-from domain.jobs import fetch_job_window
-from domain.partitions import progress_store
-from promql import label_in, selector
+import sources
+from domain.metadata import resolve_sacct_metadata
 
 
-def vram_job_records(since_hours, running_only=False, partition="",
-                      node_gpu_types=None, weight="alloc", progress=None,
-                      progress_key=None):
+def _dump_index(records):
+    """``{jobid: row}`` plus ``{jobid_raw: row}`` over the sacct dump.
+
+    Prometheus ``slurmjobid`` labels key on the raw numeric ID, which for
+    an array task is not derivable from the ``jobid`` spelling — both
+    spellings index the same row.
+    """
+    index = {}
+    for row in records:
+        for key in (row.get("jobid", ""), row.get("jobid_raw", "")):
+            if key:
+                index.setdefault(key, row)
+    return index
+
+
+def vram_job_records(jobs, raw_vram, node_gpu_types, weight,
+                     window_records, live=None, partition=""):
     """Per-job VRAM records for the utilization-filtered distribution chart.
 
-    Each record carries the job's canonical GPU group (the Slurm partition,
-    MIG GRES profiles split out), its time-weighted mean utilization, its
-    average per-GPU peak VRAM (GB), and its allocated GPU-hours from sacct.
-    Binning and the utilization range filter happen client-side so the
-    slider can rebin without refetching. A non-empty ``partition`` keeps
-    only jobs of that group, so the candidate ``total`` applies to the
-    selected group. Every candidate is returned: the sacct enrichment
-    runs in bounded 100-ID batches instead of a single oversized query.
-    Returns (records, total, start, now, step, enriched_frac,
-    failed_batches) where ``total`` equals ``len(records)``,
-    ``enriched_frac`` is the fraction of returned records whose
-    allocated GPU-hours the sacct enrichment resolved, and
-    ``failed_batches`` counts 100-ID sacct batches that failed after
-    retrying (their records' gpu_hours stay null).
+    Every input is a source the route already fetched (plan §1/§2) — this
+    function fetches nothing except per-ID row-cache fallbacks for jobs
+    the shared dump cannot enrich: ``jobs`` is the window's job view
+    (domain.views.window_views), ``raw_vram`` the unscoped per-GPU
+    peak-VRAM-GB series (sources.vram_gb), ``window_records`` the shared
+    sacct window dump ``(records, coverage, start, end)`` from
+    sources.sacct_window, and ``live`` the running-only filter (the live
+    snapshot's job-ID set; None keeps every job).
 
-    ``progress_key`` scopes progress publication: the cache-miss leader
-    that actually runs the enrichment seeds
-    ``{"done": 0, "total": 0, "failed_batches": 0}`` under it, the
-    ``progress`` callback replaces it per batch, and a ``finally`` clears
-    it — exactly one publisher per actual batch run, so a follower
-    cannot rewind or erase live batch state. When there are no ``ids``
-    no leader ``fetch`` runs at all, so the key is never seeded and
-    nothing needs clearing; likewise a cache hit skips ``fetch``, so no
-    progress becomes observable. If ``progress_key`` is None, nothing
-    is published.
+    Each record carries the job's canonical GPU group (the Slurm
+    partition, MIG GRES profiles split out), its time-weighted mean
+    utilization, its average per-GPU peak VRAM (GB), and its allocated
+    GPU-hours from sacct. Binning and the utilization range filter happen
+    client-side so the slider can rebin without refetching. A non-empty
+    ``partition`` keeps only jobs of that group, so the candidate
+    ``total`` applies to the selected group.
+
+    Returns (records, total, enriched_frac, failed_batches) where
+    ``total`` equals ``len(records)``, ``enriched_frac`` is the fraction
+    of returned records whose allocated GPU-hours the enrichment
+    resolved, and ``failed_batches`` counts the dump's failed day chunks
+    (their records' gpu_hours stay null).
     """
-    node_gpu_types = node_gpu_types or {}
-    start, now = job_window(since_hours)
-    step = step_for_range(now - start)
-    live = None
-    if running_only:
-        live = running_gpu_job_ids()
-        if not live:
-            return [], 0, start, now, step, 0.0, 0
-    jobs, start, now, step = fetch_job_window(since_hours, include_vram=False)
-    for j in jobs:
-        j["gpu_group"] = gpu_groups.job_gpu_group(j, node_gpu_types)
-    if live is not None:
-        jobs = [j for j in jobs if j["jobid"] in live]
-    if partition:
-        jobs = [j for j in jobs if j["gpu_group"] == partition]
-    sel = "" if live is None else selector(label_in("slurmjobid", live))
-
-    def fetch():
-        return deps.get_prom().query_range(
-            "max by (slurmjobid, instance, gpu) (slurm_job_memory_usage_gpu%s / "
-            "1073741824)" % sel,
-            start, now, step,
-        )
-
-    vram = deps.route_cache.get_or_set(
-        cache.vram_key(since_hours, running_only), 60, fetch)
+    dump_records, coverage = window_records[0], window_records[1]
     # Per-GPU peak VRAM (GB) over the window; a 0 sample means the GPU was
     # never reported with memory and cannot be a peak.
     peaks = defaultdict(list)
-    for s in vram:
+    for s in raw_vram:
         jid = s["metric"].get("slurmjobid", "")
-        vals = [v for _, v in series_values(s) if v > 0]
+        vals = [v for _, v in s["values"] if v > 0]
         if jid and vals:
             peaks[jid].append(max(vals))
+
+    # ``jobs`` is memoized shared state (window_views) — never mutated;
+    # the group rides on the record instead.
     records = []
+    nodes_by_job = {}
     for j in jobs:
+        group = gpu_groups.job_gpu_group(j, node_gpu_types)
+        if live is not None and j["jobid"] not in live:
+            continue
+        if partition and group != partition:
+            continue
         pk = peaks.get(j["jobid"])
         if not pk:
             continue
+        nodes_by_job[j["jobid"]] = j.get("nodes") or []
         records.append({
             "jobid": j["jobid"],
             "user": j["user"],
-            "partition": j["gpu_group"],
+            "partition": group,
             "gpu_type": j["gpu_type"],
             "mean_util": j["mean_util"],
             "vram_gb": round(sum(pk) / len(pk), 1),
@@ -92,42 +84,29 @@ def vram_job_records(since_hours, running_only=False, partition="",
             "gpu_hours_eff": j.get("gpu_hours_eff") or 0.0,
         })
     total = len(records)
-    ids = sorted({r["jobid"] for r in records})
     enriched_frac = 0.0
-    failed_batches = 0
-    if ids:
-        # Progress publication belongs to the cache-miss leader: it is
-        # the only caller whose sacct_jobs_resilient actually runs, so
-        # seeding/clearing here keeps one publisher per batch run and
-        # leaves followers' joins untouched.
-        def fetch():
-            if progress_key is not None:
-                progress_store[progress_key] = {
-                    "done": 0, "total": 0, "failed_batches": 0}
-            try:
-                # Two workers: every candidate means batches scale with
-                # the window, so low concurrency keeps the load bounded
-                # instead of saturating slurmdbd with 8 parallel lookups.
-                return deps.sacct_jobs_resilient(ids, workers=2,
-                                                 progress=progress)
-            finally:
-                if progress_key is not None:
-                    progress_store.pop(progress_key, None)
-
-        meta, failed_batches = deps.route_cache.get_or_set(
-            # A distinct key: sacct_key holds the plain dict the Jobs
-            # paths consume; storing the (dict, failed) tuple under it
-            # would hand the other consumer the wrong shape for the TTL.
-            cache.sacct_resilient_key(ids), 300, fetch)
+    failed_batches = coverage.get("failed_batches", 0)
+    if records:
+        by_id = _dump_index(dump_records)
+        # Array parents have no exact row in the dump (only their task
+        # rows, spelled parent_task); those go to the per-ID row cache in
+        # ONE batched call, then resolve through the same historical
+        # merge the job listings use.
+        misses = sorted({r["jobid"] for r in records if r["jobid"] not in by_id})
+        fallback = sources.sacct_rows(misses) if misses else {}
         enriched = 0
         for r in records:
-            row = meta.get(r["jobid"]) or {}
+            row = by_id.get(r["jobid"])
+            if row is None:
+                rows = fallback.get(r["jobid"]) or []
+                row = resolve_sacct_metadata(
+                    r["jobid"], nodes_by_job.get(r["jobid"], []), rows)
             # Key presence, not truthiness: a valid row with elapsed 0
             # (Slurm reports 00:00:00 for a just-started job) resolved
             # fine and must count as coverage, emitting 0.0 GPU-hours.
             # But elapsed data must be PRESENT: a row without it is an
             # unresolved record, not a zero-hour one.
-            if row.get("gpus") and row.get("elapsed_s") is not None:
+            if row and row.get("gpus") and row.get("elapsed_s") is not None:
                 r["gpu_hours"] = round(row["gpus"] * row["elapsed_s"] / 3600.0, 2)
                 enriched += 1
         # The client discloses enrichment coverage: gpu_hours nulls in the
@@ -135,4 +114,4 @@ def vram_job_records(since_hours, running_only=False, partition="",
         enriched_frac = enriched / len(records)
     wkey = "gpu_hours" if weight == "alloc" else "gpu_hours_eff"
     records.sort(key=lambda r: (r.get(wkey) or 0.0), reverse=True)
-    return records, total, start, now, step, enriched_frac, failed_batches
+    return records, total, enriched_frac, failed_batches

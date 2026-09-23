@@ -147,7 +147,7 @@ def vram_gb(win):
     return _window_source("vram_gb", _VRAM_GB_QUERY, win)
 
 
-def live_snapshot(node_gpu_types=None):
+def live_snapshot():
     """Everything the current-instant views need, from two queries.
 
     ``node_current`` used to make four instant queries and the live-ID
@@ -160,17 +160,22 @@ def live_snapshot(node_gpu_types=None):
     domain.partitions.node_current). Cached 30 s under one key so
     running-only views and the Nodes view read the same instant.
 
-    The derivation assumes ``node_gpu_types`` is the same node index for
-    every caller within the TTL — in practice each builds it from the
-    30 s-cached ``scontrol_nodes()`` snapshot — and the returned dict is
-    shared by all callers of one TTL: treat it as read-only.
+    The node index for the group-attribute resolution is built inside
+    the fetch from the 30 s-cached ``scontrol_nodes()`` snapshot: the
+    cache holds one entry regardless of any caller's index, so the
+    index must come from the same 30 s scontrol snapshot every caller
+    shares, never from a per-caller argument.
 
     Returns ``{"live_ids", "node_util", "node_vram", "jobs_by_node",
-    "allocs_by_node", "allocs_by_group"}``.
+    "allocs_by_node", "allocs_by_group"}``. The dict is shared by all
+    callers of one TTL: treat it as read-only.
     """
-    node_gpu_types = node_gpu_types or {}
 
     def fetch():
+        # Group attribution needs the node index; scontrol_nodes is the
+        # same 30 s-cached, single-flighted snapshot every route reads.
+        node_gpu_types = gpu_groups.build_node_index(scontrol_nodes())
+
         def per_gpu():
             return _parse_instant_result(
                 deps.get_prom().query_instant(_GPU_UTIL_QUERY))
@@ -312,12 +317,11 @@ def sacct_window(since_hours, progress=None, progress_key=None):
                 progress(state)
 
         # Seed both publishers with the initial batched-progress state
-        # (done=0), exactly like slurm.completed_jobs reports today.
+        # (done=0), the same shape the resilient per-ID batches report.
         report(0, 0)
 
         def fetch_fresh(chunk_start_iso, chunk_end_iso):
-            # Mirror the per-chunk retry of slurm.completed_jobs: one
-            # retry on SlurmError, then the chunk counts as failed.
+            # One retry on SlurmError, then the chunk counts as failed.
             for attempt in range(2):
                 try:
                     return deps.sacct_allocations(
@@ -470,3 +474,14 @@ def sacct_rows(ids, workers=2, progress=None):
 
     return _sacct_row_cache.get_batch(
         [str(i) for i in ids], fetch_missing, _sacct_rows_ttl)
+
+
+def reset_caches():
+    """Drop the module-level per-ID row cache.
+
+    The row cache deliberately outlives any single request (its entries
+    are keyed per job ID, not per request), but a test suite must not
+    inherit one test's sacct rows into the next — the conftest calls
+    this between tests.
+    """
+    _sacct_row_cache.clear()

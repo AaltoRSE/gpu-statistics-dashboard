@@ -1,9 +1,9 @@
 """Low-level helpers shared across every domain and route module.
 
 Prometheus response shaping (series/window envelopes), the query-step
-heuristic, and the "which jobs are live right now" check are used by
-jobs, partitions, vram, and every route's response body alike, so they
-have no single domain owner — they live here instead.
+heuristic, and the batch-computed ``max/sum/count by`` aggregation are
+used by jobs, partitions, vram, and every route's response body alike,
+so they have no single domain owner — they live here instead.
 """
 
 import deps
@@ -99,15 +99,3 @@ def aggregate_by(series, labels, op, live=None):
                 "values": values,
             })
     return out
-
-
-def running_gpu_job_ids():
-    """Job IDs with a live Prometheus GPU-utilization series.
-
-    A live series is the shared definition of "running" for both the Jobs
-    and Partitions running-only controls; it avoids an unbounded sacct scan.
-    """
-    series = deps.get_prom().query_instant(
-        "count by (slurmjobid) (slurm_job_utilization_gpu)")
-    return {s["metric"]["slurmjobid"] for s in series
-            if s["metric"].get("slurmjobid")}

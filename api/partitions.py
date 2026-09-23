@@ -1,65 +1,93 @@
-"""Routes: GET /api/partitions, GET /api/partitions/vram."""
-
-from datetime import datetime
-from zoneinfo import ZoneInfo
+"""Routes: GET /api/partitions, /queue, /vram and their progress polls."""
 
 from fastapi import APIRouter, Query
 
 import cache
 import deps
 import gpu_groups
+import sources
 from api.schemas import PartitionQueueResponse, PartitionsResponse, VramResponse
 from domain.common import window
 from domain.partitions import (
     WAIT_TOTAL_KEY,
     completed_wait_summary,
     gpu_capacity,
-    node_current,
-    partition_window,
+    partition_view,
     pending_queue_status,
-    progress_store,
     wait_empty,
 )
+from domain.views import window_views
 from domain.vram import vram_job_records
+from prom import PrometheusError
 from slurm import SlurmError
 
 router = APIRouter()
 
 
-def _queue_snapshot(now, partition_types):
-    """Pending-job rows, per-GPU-type summary, and reachability.
+def _pinned(since_hours):
+    """The shared pinned window plus the scontrol snapshot/index pair."""
+    pinned = sources.pinned_window(since_hours)
+    nodes = deps.route_cache.get_or_set(
+        cache.scontrol_nodes_key(), 30, deps.show_nodes)
+    return pinned, nodes, gpu_groups.build_node_index(nodes)
 
-    A failed or missing squeue is an explicit ``available=False`` state,
-    never an empty queue: an operator must be able to tell "nothing
-    pending" from "the queue is unreadable". squeue runs on every queue
-    request — the queue is a live scheduler snapshot and a time-window
-    change must refetch it rather than redisplay a cached view (the
-    Prometheus side stays cached through ``partition_window``).
-    ``wait_s`` is computed from ``now`` so a displayed waiting age is
-    current at response time. ``partition_types`` (the partition ->
-    GPU-types map from the same cached scontrol node snapshot every
-    other group in this route uses) drives the pending rows' type
-    eligibility — no extra scontrol call.
+
+def _live_ids():
+    """The live snapshot's job-ID set, {} when Prometheus is down."""
+    try:
+        return sources.live_snapshot()["live_ids"]
+    except PrometheusError:
+        return set()
+
+
+def _snapshot_or_none():
+    """The live snapshot for capacity attribution, None on Prometheus failure.
+
+    Capacity rows must still render when the instant queries fail — a
+    dead exporter must not blank the partitions table — so the alloc
+    join falls back to zero allocated instead of raising.
     """
     try:
-        jobs = deps.queue_pending()
-    except SlurmError:
-        return {}, {"unique_pending_jobs": None,
-                    "unique_gpus_requested": None}, [], False
-    summary, totals, waiting_jobs = pending_queue_status(
-        jobs, now, partition_types)
-    return summary, totals, waiting_jobs, True
+        return sources.live_snapshot()
+    except PrometheusError:
+        return None
 
 
 @router.get("/api/partitions", response_model=PartitionsResponse)
 def api_partitions(since_hours: float = Query(24, gt=0, le=720),
                    running_only: bool = Query(False)):
-    nodes = deps.route_cache.get_or_set(cache.scontrol_nodes_key(), 30, deps.show_nodes)
-    node_types = gpu_groups.build_node_index(nodes)
-    groups, trend, instances, occupancy, job_groups, start, now, step = \
-        partition_window(since_hours, running_only, node_gpu_types=node_types)
-    _, _, allocs_by_node, allocs_by_group = node_current(node_types)
-    gpu_capacity(groups, instances, nodes, allocs_by_group)
+    pinned, nodes, node_types = _pinned(since_hours)
+    start, now, step = pinned
+    if running_only:
+        # Live snapshot first: with no running GPU jobs we must not issue
+        # the broad window range query at all.
+        live = _live_ids()
+        if not live:
+            return {"window": window(start, now), "step": step,
+                    "partitions": [], "trend": {}}
+    else:
+        live = None
+    if live is not None:
+        # Running-only keeps only the live jobs' series — the in-process
+        # replacement for the ``slurmjobid=~…`` matcher — and must not
+        # claim configured-but-unmeasured capacity the filtered window
+        # never observed. The snapshot is already in hand (the live-ID
+        # check above); only the shared raw fetch is needed.
+        raw = [s for s in sources.gpu_util(pinned)
+               if s["metric"].get("slurmjobid", "") in live]
+        groups, trend, instances, occupancy, _ = partition_view(
+            raw, node_types, include_configured=False)
+        snap = _snapshot_or_none()
+    else:
+        util, vram, snap = sources.gather(
+            lambda: sources.gpu_util(pinned),
+            lambda: sources.vram_pct(pinned),
+            _snapshot_or_none,
+        )
+        groups, trend, instances, occupancy, _ = window_views(
+            pinned, util, vram, node_types)["partition"]
+    allocs = snap["allocs_by_group"] if snap else {}
+    gpu_capacity(groups, instances, nodes, allocs)
     for g in groups:
         avg_alloc = occupancy.get(g["name"])
         total = g.get("gpus_total") or 0
@@ -83,68 +111,45 @@ def api_partition_queue(since_hours: float = Query(24, gt=0, le=720),
     squeue (live snapshot) and sacct (wait history) are typically slower
     than the Prometheus-backed /api/partitions, so the Partitions tab
     fetches both endpoints concurrently and renders whichever arrives
-    first under its own panel. Reusing ``partition_window`` costs
-    nothing: its ``partition_window_key`` cache and single-flight mean
-    the concurrent core request's Prometheus fetch is shared, and a
-    queue request landing later is a cache hit.
+    first under its own panel. The utilization groups come from the
+    shared window view — one fetch, shared with the concurrent core
+    request through the pinned-window cache.
 
     Current queue and historical wait degrade independently: a dead
     squeue must not hide a valid sacct history and vice versa, and
     neither failure may turn the whole response into an error or
     masquerade as a zero.
     """
-    nodes = deps.route_cache.get_or_set(cache.scontrol_nodes_key(), 30,
-                                        deps.show_nodes)
-    node_types = gpu_groups.build_node_index(nodes)
+    pinned, nodes, node_types = _pinned(since_hours)
+    start, now, _ = pinned
+    if running_only:
+        live = _live_ids()
+        if not live:
+            groups = []
+        else:
+            raw = [s for s in sources.gpu_util(pinned)
+                   if s["metric"].get("slurmjobid", "") in live]
+            groups = partition_view(raw, node_types,
+                                    include_configured=False)[0]
+    else:
+        groups = window_views(
+            pinned, sources.gpu_util(pinned), sources.vram_pct(pinned),
+            node_types)["partition"][0]
     partition_types = gpu_groups.partition_gpu_types(nodes)
-    groups, _, _, _, _, start, now, _ = partition_window(
-        since_hours, running_only, node_gpu_types=node_types)
     queue, totals, waiting_jobs, queue_available = _queue_snapshot(
         now, partition_types)
     try:
-        tz = ZoneInfo("Europe/Helsinki")
-        start_iso = datetime.fromtimestamp(start, tz).replace(
-            tzinfo=None).isoformat(timespec="seconds")
-        end_iso = datetime.fromtimestamp(now, tz).replace(
-            tzinfo=None).isoformat(timespec="seconds")
-        cache_key = cache.completed_jobs_key(since_hours)
-        progress_key = cache.completed_progress_key(since_hours)
-
-        def fetch():
-            # Publish under both identities: the cache key (what this
-            # request can inspect locally) and the stable parameter key
-            # the browser polls. running_only is deliberately excluded —
-            # the accounting cache joins same-window requests regardless
-            # of the flag, so a follower's poll must find this fetch's
-            # state.
-            for key in (cache_key, progress_key):
-                progress_store[key] = {"done": 0, "total": 0,
-                                       "failed_batches": 0}
-
-            def report(state):
-                for key in (cache_key, progress_key):
-                    progress_store[key] = state
-
-            try:
-                records, coverage = deps.completed_jobs(
-                    start_iso, end_iso, report)
-                # Cache the bounds the records were actually fetched for:
-                # the TTL can outlive the request's epoch window, so a
-                # later hit must filter against THESE bounds, not bounds
-                # recomputed from a newer clock.
-                return (records, coverage, start, now)
-            finally:
-                # Failed fetches clear too: a stale in-flight entry would
-                # otherwise read as live progress on every later poll.
-                for key in (cache_key, progress_key):
-                    progress_store.pop(key, None)
-
-        records, accounting_coverage, cached_start, cached_end = \
-            deps.route_cache.get_or_set(cache_key, 300, fetch)
+        # One window-wide sacct dump, shared with the VRAM enrichment
+        # (plan §3); its chunked fetch publishes progress under the
+        # collapsed progress key the browser polls. Records are filtered
+        # against the bounds the dump was actually fetched for — the TTL
+        # can outlive this request's epoch window, so a later hit must
+        # not recompute bounds from a newer clock.
+        records, coverage, fetched_start, fetched_end = sources.sacct_window(
+            since_hours, progress_key=cache.vram_progress_key(since_hours))
         wait_history, wait_history_coverage = completed_wait_summary(
-            records, node_types, cached_start, cached_end,
-            accounting_coverage)
-        wait_history_available = bool(accounting_coverage["successful_batches"])
+            records, node_types, fetched_start, fetched_end, coverage)
+        wait_history_available = bool(coverage["successful_batches"])
     except SlurmError:
         # An unexpected accounting failure leaves live queue data usable.
         wait_history = {}
@@ -204,32 +209,61 @@ def api_partition_queue(since_hours: float = Query(24, gt=0, le=720),
     }
 
 
+def _queue_snapshot(now, partition_types):
+    """Pending-job rows, per-GPU-type summary, and reachability.
+
+    A failed or missing squeue is an explicit ``available=False`` state,
+    never an empty queue: an operator must be able to tell "nothing
+    pending" from "the queue is unreadable". squeue runs on every queue
+    request — the queue is a live scheduler snapshot and a time-window
+    change must refetch it rather than redisplay a cached view (the
+    Prometheus side stays cached through the shared window sources).
+    ``wait_s`` is computed from ``now`` so a displayed waiting age is
+    current at response time. ``partition_types`` (the partition ->
+    GPU-types map from the same cached scontrol node snapshot every
+    other group in this route uses) drives the pending rows' type
+    eligibility — no extra scontrol call.
+    """
+    try:
+        jobs = deps.queue_pending()
+    except SlurmError:
+        return {}, {"unique_pending_jobs": None,
+                    "unique_gpus_requested": None}, [], False
+    summary, totals, waiting_jobs = pending_queue_status(
+        jobs, now, partition_types)
+    return summary, totals, waiting_jobs, True
+
+
 @router.get("/api/partitions/queue/progress")
 def api_partition_queue_progress(since_hours: float = Query(24, gt=0, le=720),
                                  running_only: bool = Query(False)):
-    """Batched accounting progress for the queue's current-window fetch.
+    """Batched accounting progress for the window's shared sacct dump.
 
     The browser polls this while the queue loader is in flight; the
-    accounting fetch records its daily-batch state into ``progress_store``
-    (single-flighted through the same TTL cache as the accounting result).
+    dump's chunked fetch records its daily-batch state into
+    ``progress_store`` (single-flighted through the same TTL cache as
+    the dump itself). Only the cache-miss leader that runs the fetch
+    touches the key, so a poll never observes a finished fetch's stale
+    state.
     """
-    key = cache.completed_progress_key(since_hours)
-    return progress_store.get(key, None)
+    return cache.progress_store.get(
+        cache.vram_progress_key(since_hours))
 
 
 @router.get("/api/partitions/vram/progress")
 def api_part_vram_progress(since_hours: float = Query(24, gt=0, le=720),
                            running_only: bool = Query(False),
                            partition: str = ""):
-    """Batched 100-ID enrichment progress for the VRAM route's fetch.
+    """Batched accounting progress for the VRAM route's sacct enrichment.
 
-    The browser polls this while the VRAM loader is in flight, with the
-    same window/running/partition parameters as the data request; the
-    enrichment records its batch state under the matching
-    ``vram_progress_key``. No in-flight fetch reads as JSON null.
+    The browser polls this while the VRAM loader is in flight. The
+    enrichment reads the same window-wide dump as the queue's wait
+    history (plan §3), so this poll and the queue's progress poll return
+    the same batch state under the one collapsed key. No in-flight fetch
+    reads as JSON null.
     """
-    key = cache.vram_progress_key(since_hours, running_only, partition)
-    return progress_store.get(key, None)
+    return cache.progress_store.get(
+        cache.vram_progress_key(since_hours))
 
 
 @router.get("/api/partitions/vram", response_model=VramResponse)
@@ -237,26 +271,31 @@ def api_part_vram(since_hours: float = Query(24, gt=0, le=720),
                   running_only: bool = Query(False),
                   partition: str = "",
                   weight: str = Query("alloc", pattern="^(alloc|eff)$")):
-    node_types = gpu_groups.build_node_index(
-        deps.route_cache.get_or_set(cache.scontrol_nodes_key(), 30, deps.show_nodes))
-    progress_key = cache.vram_progress_key(since_hours, running_only,
-                                           partition)
-    # Progress lifecycle lives inside the enrichment's cache-miss leader
-    # (the fetch below): a same-scope follower joins that fetch's Future
-    # and must never touch the key — a follower-side reset would rewind
-    # the leader's live batch state to 0, and a follower-side pop on the
-    # finally path could erase it mid-run. Exactly one publisher per
-    # actual batch run.
-    def report(state):
-        progress_store[progress_key] = state
-
-    records, total, start, now, step, enriched_frac, failed_batches = \
-        vram_job_records(since_hours, running_only, partition,
-                         node_types, weight, progress=report,
-                         progress_key=progress_key)
+    pinned, _nodes, node_types = _pinned(since_hours)
+    live = None
+    if running_only:
+        # Live snapshot first: with no running GPU jobs we must not issue
+        # the broad window range queries at all.
+        live = _live_ids()
+        if not live:
+            return {"window": window(pinned[0], pinned[1]),
+                    "step": pinned[2], "total": 0, "enriched_frac": 0.0,
+                    "failed_batches": 0, "jobs": []}
+    raw, vram_gb, vram_pct, window_records = sources.gather(
+        lambda: sources.gpu_util(pinned),
+        lambda: sources.vram_gb(pinned),
+        lambda: sources.vram_pct(pinned),
+        lambda: sources.sacct_window(
+            since_hours,
+            progress_key=cache.vram_progress_key(since_hours)),
+    )
+    views = window_views(pinned, raw, vram_pct, node_types)
+    records, total, enriched_frac, failed_batches = vram_job_records(
+        views["jobs"], vram_gb, node_types, weight, window_records,
+        live=live, partition=partition)
     return {
-        "window": window(start, now),
-        "step": step,
+        "window": window(pinned[0], pinned[1]),
+        "step": pinned[2],
         "total": total,
         "enriched_frac": enriched_frac,
         "failed_batches": failed_batches,

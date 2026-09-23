@@ -4,7 +4,6 @@ Run: .venv/bin/python -m pytest tests/ -q
 """
 
 import os
-import re
 import sys
 import threading
 
@@ -117,18 +116,30 @@ COMPLETED_HISTORY = [{**record, "state": "COMPLETED"}
 
 
 class FakeProm:
-    """Canned responses shaped like the real Prometheus API."""
+    """Canned responses shaped like the real Prometheus API.
+
+    Window queries are answered with the per-GPU raw series the shared
+    source layer fetches (plan §2): one 6-label ``max by`` series per
+    allocated GPU, from which every tab view (job aggregates, partition
+    summary, trend, occupancy) is derived in process. The canned series
+    are chosen so those derived aggregates exactly equal the old
+    hand-aggregated fixtures: job 1's second GPU reports 0 for the whole
+    window (an allocated-but-idle GPU), so the per-job max stays [40, 60]
+    and the group sums/counts match the old ``sum``/``count by`` fixtures.
+    """
 
     api_base = "http://fake/api/v1"
 
     def __init__(self):
         self.calls = []
         self.nodes_calls = 0
-        self.live_ids = {"1", "2", "4"}   # count by (slurmjobid)
-        self.job_start_ids = {"1", "2"}  # count by (slurmjobid){instance="gpu1"}
+        # Live per-GPU instant series: job 1 holds 2 GPUs on gpu1, job 2
+        # 1 GPU on gpu1, job 4 1 MIG slice on gpu49. Job 3 is not running.
+        # The series count per node IS the allocation count.
+        self.live_ids = {"1", "2", "4"}
         self.clear_cache_calls = 0
         # Extra window series appended to the jobs list by tests that
-        # need more candidates than the canned three.
+        # need more candidates than the canned four.
         self.extra_jobs = []
 
     # -- canned range data -------------------------------------------------
@@ -139,75 +150,32 @@ class FakeProm:
          "values": [[1000, "20"], [1120, "80"]]},
     ]
 
-    @staticmethod
-    def _matchers(query):
-        m = re.search(r'slurmjobid=~"\^\(\?:([^)]*)\)\$"', query)
-        return set(m.group(1).split("|")) if m else None
-
-    @staticmethod
-    def _filter(series, ids):
-        if ids is None:
-            return series
-        return [s for s in series if s["metric"].get("slurmjobid") in ids]
     _NODE_DETAIL_UTIL = [
         {"metric": {"slurmjobid": "1", "gpu": "0"},
          "values": [[1000, "50"], [1120, "50"]]},
     ]
-    # Partition summary keeps slurmjobid + instance + gpu_type so job
-    # identity, the capacity join, and the GPU-type grouping survive
-    # aggregation. The exporter's gpu_type label aliases the short
-    # scontrol type (gpu1 reports "NVIDIA H200"); grouping must
-    # canonicalize against the instance's configured types. Job 4 runs
-    # on mixed node gpu49; its MIG-shaped label must split it into the
-    # profile group, and the whole-GPU label must not.
-    _PART_SUMMARY = [
-        {"metric": {"slurmjobid": "1", "instance": "gpu1", "job": "gpu-h200",
+    # The per-GPU raw window series (plan §2): every job/GPU instance of
+    # the exporter's utilization metric. Job 4 runs on mixed node gpu49;
+    # its MIG-shaped label must split it into the profile group.
+    _GPU_UTIL = [
+        {"metric": {"slurmjobid": "1", "instance": "gpu1", "gpu": "0",
+                    "job": "gpu-h200", "user": "alice",
                     "gpu_type": "NVIDIA H200"},
          "values": [[1000, "40"], [1120, "60"]]},
-        {"metric": {"slurmjobid": "2", "instance": "gpu1", "job": "gpu-h200",
-                    "gpu_type": "h200"},
+        # job 1's second GPU: allocated but never utilized in this window
+        {"metric": {"slurmjobid": "1", "instance": "gpu1", "gpu": "1",
+                    "job": "gpu-h200", "user": "alice",
+                    "gpu_type": "NVIDIA H200"},
+         "values": [[1000, "0"], [1120, "0"]]},
+        {"metric": {"slurmjobid": "2", "instance": "gpu1", "gpu": "0",
+                    "job": "gpu-h200", "user": "bob", "gpu_type": "h200"},
          "values": [[1000, "10"]]},
-        {"metric": {"slurmjobid": "3", "instance": "gpu2", "job": "gpu-h100",
-                    "gpu_type": "h100"},
+        {"metric": {"slurmjobid": "3", "instance": "gpu2", "gpu": "0",
+                    "job": "gpu-h100", "user": "carol", "gpu_type": "h100"},
          "values": [[1000, "90"], [1120, "95"]]},
-        {"metric": {"slurmjobid": "4", "instance": "gpu49", "job": "gpu-h200-mig",
+        {"metric": {"slurmjobid": "4", "instance": "gpu49", "gpu": "0",
+                    "job": "gpu-h200-mig", "user": "dave",
                     "gpu_type": "h200_3g.71gb"},
-         "values": [[1000, "80"], [1120, "90"]]},
-    ]
-    # Trend/occupancy preserve instance + raw label so aggregation can
-    # resolve aliases against each node's configured GRES types.
-    _PART_UTIL_SUMS = [
-        {"metric": {"instance": "gpu1", "gpu_type": "NVIDIA H200"},
-         "values": [[1000, "40"], [1120, "60"]]},
-        {"metric": {"instance": "gpu1", "gpu_type": "h200"},
-         "values": [[1000, "10"]]},
-        {"metric": {"instance": "gpu2", "gpu_type": "h100"},
-         "values": [[1000, "90"], [1120, "95"]]},
-        {"metric": {"instance": "gpu49", "gpu_type": "h200_3g.71gb"},
-         "values": [[1000, "80"], [1120, "90"]]},
-    ]
-    _PART_GPU_COUNTS = [
-        {"metric": {"instance": "gpu1", "gpu_type": "NVIDIA H200"},
-         "values": [[1000, "2"], [1120, "2"]]},
-        {"metric": {"instance": "gpu1", "gpu_type": "h200"},
-         "values": [[1000, "1"]]},
-        {"metric": {"instance": "gpu2", "gpu_type": "h100"},
-         "values": [[1000, "1"], [1120, "1"]]},
-        {"metric": {"instance": "gpu49", "gpu_type": "h200_3g.71gb"},
-         "values": [[1000, "1"], [1120, "1"]]},
-    ]
-    _JOBS_UTIL = [
-        {"metric": {"slurmjobid": "1", "instance": "gpu1", "job": "gpu-h200",
-                    "user": "alice", "gpu_type": "NVIDIA H200"},
-         "values": [[1000, "40"], [1120, "60"]]},
-        {"metric": {"slurmjobid": "2", "instance": "gpu1", "job": "gpu-h200",
-                    "user": "bob", "gpu_type": "h200"},
-         "values": [[1000, "10"]]},
-        {"metric": {"slurmjobid": "3", "instance": "gpu2", "job": "gpu-h100",
-                    "user": "carol", "gpu_type": "h100"},
-         "values": [[1000, "90"], [1120, "95"]]},
-        {"metric": {"slurmjobid": "4", "instance": "gpu49", "job": "gpu-h200-mig",
-                    "user": "dave", "gpu_type": "h200_3g.71gb"},
          "values": [[1000, "80"], [1120, "90"]]},
     ]
     # Per-GPU VRAM (GB) over the window, matching the /partitions/vram
@@ -225,6 +193,26 @@ class FakeProm:
         {"metric": {"slurmjobid": "4", "instance": "gpu49", "gpu": "0"},
          "values": [[1000, "20"], [1120, "22"]]},
     ]
+    # Live instant series (the exporter publishes one per allocated GPU):
+    # job 1's two GPUs on gpu1 at 77/70 (node max 77), job 2's GPU at 10,
+    # job 4's slice on gpu49 at 60. Job 3 is absent (not running).
+    _GPU_INSTANT = [
+        {"metric": {"slurmjobid": "1", "instance": "gpu1", "gpu": "0",
+                    "job": "gpu-h200", "user": "alice",
+                    "gpu_type": "NVIDIA H200"},
+         "value": [1, "77.0"]},
+        {"metric": {"slurmjobid": "1", "instance": "gpu1", "gpu": "1",
+                    "job": "gpu-h200", "user": "alice",
+                    "gpu_type": "NVIDIA H200"},
+         "value": [1, "70.0"]},
+        {"metric": {"slurmjobid": "2", "instance": "gpu1", "gpu": "0",
+                    "job": "gpu-h200", "user": "bob", "gpu_type": "h200"},
+         "value": [1, "10.0"]},
+        {"metric": {"slurmjobid": "4", "instance": "gpu49", "gpu": "0",
+                    "job": "gpu-h200-mig", "user": "dave",
+                    "gpu_type": "h200_3g.71gb"},
+         "value": [1, "60.0"]},
+    ]
 
     def query_range(self, query, start, end, step):
         self.calls.append(("range", query))
@@ -233,33 +221,12 @@ class FakeProm:
                 return self._JOB_DETAIL_UTIL
             if 'instance="' in query:  # node detail
                 return self._NODE_DETAIL_UTIL
-            if "count by (instance, gpu_type)" in query:
-                ids = self._matchers(query)
-                if ids is None:
-                    return self._PART_GPU_COUNTS
-                allowed = {(s["metric"]["instance"], s["metric"]["gpu_type"])
-                           for s in self._PART_SUMMARY
-                           if s["metric"]["slurmjobid"] in ids}
-                return [s for s in self._PART_GPU_COUNTS
-                        if (s["metric"]["instance"], s["metric"]["gpu_type"])
-                        in allowed]
-            if "sum by (instance, gpu_type)" in query:
-                ids = self._matchers(query)
-                if ids is None:
-                    return self._PART_UTIL_SUMS
-                allowed = {(s["metric"]["instance"], s["metric"]["gpu_type"])
-                           for s in self._PART_SUMMARY
-                           if s["metric"]["slurmjobid"] in ids}
-                return [s for s in self._PART_UTIL_SUMS
-                        if (s["metric"]["instance"], s["metric"]["gpu_type"])
-                        in allowed]
-            if "max by (slurmjobid, instance, gpu_type)" in query:
-                return self._filter(self._PART_SUMMARY, self._matchers(query))
-            jobs_util = self._JOBS_UTIL + self.extra_jobs
-            return self._filter(jobs_util, self._matchers(query))
+            # The shared per-GPU raw window series (the only utilization
+            # range query the app issues now); extra_jobs ride along.
+            return self._GPU_UTIL + self.extra_jobs
         if "memory" in query:  # vram
-            if "max by (slurmjobid, instance, gpu)" in query:  # job records
-                return self._filter(self._VRAM_GB, self._matchers(query))
+            if "max by (slurmjobid, instance, gpu)" in query:  # vram_gb
+                return self._VRAM_GB
             if 'slurmjobid="' in query:  # job detail
                 return [
                     {"metric": {"instance": "gpu1", "gpu": "0"},
@@ -282,44 +249,17 @@ class FakeProm:
 
     def query_instant(self, query, time=None):
         self.calls.append(("instant", query))
-        if "count by (slurmjobid)" in query:
-            if 'instance="' in query:  # node-detail job-start lookup
-                return [{"metric": {"slurmjobid": j}, "value": [1, "1"]}
-                        for j in sorted(self.job_start_ids)]
-            return [{"metric": {"slurmjobid": j}, "value": [1, "1"]}
-                    for j in sorted(self.live_ids)]
-        if "count by (instance, job, gpu_type)" in query:
-            return [
-                {"metric": {"instance": "gpu1", "job": "gpu-h200",
-                            "gpu_type": "NVIDIA H200"},
-                 "value": [1, "2"]},
-                {"metric": {"instance": "gpu2", "job": "gpu-h100",
-                            "gpu_type": "h100"},
-                 "value": [1, "3"]},
-                {"metric": {"instance": "gpu49", "job": "gpu-h200-mig",
-                            "gpu_type": "h200_3g.71gb"},
-                 "value": [1, "1"]},
-            ]
-        if "max by (instance) (slurm_job_utilization_gpu)" in query:
-            return [
-                {"metric": {"instance": "gpu1"}, "value": [1, "55.5"]},
-                {"metric": {"instance": "gpu2"}, "value": [1, "10.0"]},
-                {"metric": {"instance": "gpu49"}, "value": [1, "60.0"]},
-            ]
+        if "slurmjobid" in query and "max by" in query:
+            # The per-GPU live snapshot: the shared source of live IDs,
+            # per-node utilization, active jobs, and allocation counts.
+            # Tests trim live_ids to simulate an idle cluster.
+            return [s for s in self._GPU_INSTANT
+                    if s["metric"]["slurmjobid"] in self.live_ids]
         if "memory_usage_gpu /" in query:
             return [
                 {"metric": {"instance": "gpu1"}, "value": [1, "41.2"]},
                 {"metric": {"instance": "gpu2"}, "value": [1, "8.0"]},
                 {"metric": {"instance": "gpu49"}, "value": [1, "40.0"]},
-            ]
-        if "slurmjobid, job, user" in query:
-            return [
-                {"metric": {"instance": "gpu1", "slurmjobid": "1", "job": "gpu-h100",
-                            "user": "alice"}, "value": [1, "77.0"]},
-                {"metric": {"instance": "gpu2", "slurmjobid": "3", "job": "gpu-h200",
-                            "user": "carol"}, "value": [1, "90.0"]},
-                {"metric": {"instance": "gpu49", "slurmjobid": "4", "job": "gpu-h200",
-                            "user": "dave"}, "value": [1, "85.0"]},
             ]
         return []
 
@@ -339,18 +279,22 @@ def fake_prom(monkeypatch):
     fake = FakeProm()
     monkeypatch.setattr(deps, "get_prom", lambda: fake)
     monkeypatch.setattr(deps, "route_cache", cache.TtlCache())
-    monkeypatch.setattr(deps, "sacct_jobs",
-                        lambda ids, start_iso=None, **kw: {j: SACCT[j] for j in ids
-                                                           if j in SACCT})
+    # The shared window-wide sacct dump (plan §3): every chunk of the
+    # window returns the completed history; the row dicts carry the raw
+    # ID spelling the dump's index keys on. Each chunk is dated inside
+    # the fetched window, so a job spanning midnight dedupes to its
+    # newest chunk's row.
+    monkeypatch.setattr(
+        deps, "sacct_allocations",
+        lambda start_iso, end_iso, partitions: [
+            dict(record, jobid_raw=record["jobid"])
+            for record in COMPLETED_HISTORY])
+    # Per-ID sacct rows (the row-cache fallback for jobs the dump cannot
+    # enrich): the same records, resolved for exactly the requested IDs.
     monkeypatch.setattr(
         deps, "sacct_jobs_resilient",
         lambda ids, start_iso=None, **kw: (
             {j: SACCT[j] for j in ids if j in SACCT}, 0))
-    monkeypatch.setattr(
-        deps, "completed_jobs",
-        lambda start_iso, end_iso, progress=None: (COMPLETED_HISTORY, {
-            "failed_batches": 0, "successful_batches": 1, "complete": True,
-        }))
     # No active controller jobs by default; tests opt in to a snapshot.
     monkeypatch.setattr(deps, "show_jobs", lambda: {})
     # Empty pending queue by default; tests opt in via deps.queue_pending.
@@ -484,12 +428,11 @@ def test_users_mean_util_weights_samples_not_effective_gpu_hours(client, monkeyp
          "gpu_hours_eff": 0.9, "_util_sum": 90.0, "_util_samples": 1,
          "gpu_type": "h100", "vram_avg": None},
     ]
-    # api_users looks these names up in its own module (api.users), since
-    # it imported them with `from domain.X import Y` — patching the domain
-    # module itself would not affect this already-bound reference.
-    monkeypatch.setattr(api_users, "fetch_job_window",
-                        lambda since_hours: (jobs, 1, 2, 120))
-    monkeypatch.setattr(api_users, "running_gpu_job_ids", lambda: set())
+    # api_users computes its rows from the shared window view; the view
+    # (already imported into the route module) is patched here so the
+    # synthetic equal-duration jobs drive the weighted mean.
+    monkeypatch.setattr(api_users, "window_views",
+                        lambda win, raw, vram, types: {"jobs": jobs})
     data = client.get("/api/users", params={"since_hours": 24}).json()
     assert data["users"][0]["mean_util"] == 50.0
 
@@ -498,26 +441,27 @@ def test_users_window_validation(client):
     assert client.get("/api/users", params={"since_hours": 0}).status_code == 422
 
 
-def test_jobs_user_filter_is_query_scoped(client, fake_prom):
-    # The user must reach the Prometheus selector, not just a post-fetch
-    # filter (a single-user request must not pull every user's window).
+def test_jobs_user_filter_is_in_process(client, fake_prom):
+    # The user filter runs in process over the SHARED unfiltered window
+    # fetch (plan §2) — no per-user Prometheus matcher, so a single-user
+    # request reuses the same fetch every tab reads.
     r = client.get("/api/jobs", params={"since_hours": 24, "user": "alice"})
     assert r.status_code == 200
     data = r.json()
     assert data["count"] == 1
     assert data["jobs"][0]["jobid"] == "1"
-    users = [q for t, q in fake_prom.calls if t == "range"]
-    assert any('user="alice"' in q for q in users)
+    ranges = [q for t, q in fake_prom.calls if t == "range"]
+    assert ranges, "the window fetch must still happen"
+    assert all('user="' not in q for q in ranges), ranges
 
 
-def test_jobs_user_filter_preserves_prometheus_label_case(client, fake_prom):
-    # PromQL exact label matchers are case-sensitive. The endpoint must send
-    # the selected label unchanged, then use casefold only after the query.
+def test_jobs_user_filter_accepts_case_drift(client):
+    # PromQL's user matcher was case-sensitive; the in-process filter
+    # casefolds, so typed capitalization drift still matches the label.
     r = client.get("/api/jobs", params={"since_hours": 24, "user": "Alice"})
     assert r.status_code == 200
     assert r.json()["count"] == 1
-    users = [q for t, q in fake_prom.calls if t == "range"]
-    assert any('user="Alice"' in q for q in users)
+    assert r.json()["jobs"][0]["user"] == "alice"
 
 
 def test_job_detail_200_with_human_readable_meta(client):
@@ -552,7 +496,8 @@ def test_job_detail_summary_fields_null_without_metadata(
     # No sacct/scontrol record resolves for this ID: mean_util still comes
     # from the series alone, but the allocation-based fields have nothing
     # to compute from.
-    monkeypatch.setattr(deps, "sacct_jobs", lambda ids, start_iso=None, **kw: {})
+    monkeypatch.setattr(deps, "sacct_jobs_resilient",
+                        lambda ids, start_iso=None, **kw: ({}, 0))
     data = client.get("/api/jobs/1", params={"since_hours": 24}).json()
     assert data["metadata"] is None
     assert data["mean_util"] == 50.0
@@ -579,7 +524,8 @@ def test_enrich_merges_active_array_tasks(client, fake_prom, monkeypatch):
     # Bare array parent "42": Prometheus sees it on two nodes; scontrol
     # holds the physical tasks (suffix-tolerant IDs). Both must merge into
     # one row instead of being left blank or misattributed.
-    monkeypatch.setattr(deps, "sacct_jobs", lambda ids, start_iso=None, **kw: {})
+    monkeypatch.setattr(deps, "sacct_jobs_resilient",
+                        lambda ids, start_iso=None, **kw: ({}, 0))
     monkeypatch.setattr(deps, "show_jobs", lambda: {
         "42_1": _scontrol_row("42_1", "42", "1", "gpu2",
                               start=JOB2_START, elapsed=7200),
@@ -603,8 +549,8 @@ def test_enrich_merges_active_array_tasks(client, fake_prom, monkeypatch):
 def test_enrich_array_no_node_match_falls_back_without_misattribution(
         client, fake_prom, monkeypatch):
     # 44's only active task ran on a node that did not observe the job.
-    monkeypatch.setattr(deps, "sacct_jobs",
-                        lambda ids, start_iso=None, **kw: {})
+    monkeypatch.setattr(deps, "sacct_jobs_resilient",
+                        lambda ids, start_iso=None, **kw: ({}, 0))
     monkeypatch.setattr(deps, "show_jobs", lambda: {
         "44_0": _scontrol_row("44_0", "44", "0", "gpu2"),
     })
@@ -637,7 +583,8 @@ def test_enrich_merges_historical_array_tasks_in_sacct(
     # knows it. Three of its sacct tasks ran on the observed node and must
     # merge into one metadata row (the reported array-table gap).
     monkeypatch.setattr(deps, "show_jobs", lambda: {})
-    monkeypatch.setattr(deps, "sacct_jobs", lambda ids, start_iso=None, **kw: {
+    monkeypatch.setattr(deps, "sacct_jobs_resilient",
+                        lambda ids, start_iso=None, **kw: ({
         "45_0": {"jobid": "45_0", "name": "hist.sh", "user": "alice",
                  "account": "acc", "partition": "gpu-h100",
                  "state": "COMPLETED", "start": JOB3_START,
@@ -653,7 +600,7 @@ def test_enrich_merges_historical_array_tasks_in_sacct(
                  "state": "COMPLETED", "start": JOB1_START,
                  "end": JOB1_END, "elapsed_s": 7200, "gpus": 2,
                  "gpu_type": "h100", "node_list": "gpu1,gpu2", "ncpus": 8},
-    })
+    }, 0))
     jobs = [{"jobid": "45", "nodes": ["gpu1"], "mean_util": 50.0,
              "gpu_hours_eff": 0.5}]
     domain_metadata.enrich(jobs)
@@ -672,7 +619,8 @@ def test_enrich_array_task_without_node_match_is_not_merged(
     # Parent "46" has sacct tasks, but none ran on the observed node;
     # the metadata must stay blank rather than be misattributed.
     monkeypatch.setattr(deps, "show_jobs", lambda: {})
-    monkeypatch.setattr(deps, "sacct_jobs", lambda ids, start_iso=None, **kw: {
+    monkeypatch.setattr(deps, "sacct_jobs_resilient",
+                        lambda ids, start_iso=None, **kw: ({
         "46_0": {"jobid": "46_0", "name": "other.sh", "user": "bob",
                  "account": "acc", "partition": "gpu-h200",
                  "state": "COMPLETED", "start": JOB3_START,
@@ -683,7 +631,7 @@ def test_enrich_array_task_without_node_match_is_not_merged(
                  "state": "COMPLETED", "start": JOB2_START,
                  "end": JOB2_END, "elapsed_s": 3600, "gpus": 1,
                  "gpu_type": "h200", "node_list": "gpu2", "ncpus": 4},
-    })
+    }, 0))
     jobs = [{"jobid": "46", "nodes": ["gpu1"], "mean_util": 10.0,
              "gpu_hours_eff": 0.1}]
     domain_metadata.enrich(jobs)
@@ -765,10 +713,14 @@ def test_partitions_gpu_capacity(client):
     # (idle gpu3 included, independent of partition membership):
     # h200 = gpu1's 8 + gpu3's 8 + gpu49's 4 whole = 20.
     assert by_name["h200"]["gpus_total"] == 20
-    # allocation is the exact per-group live count (jobs 1+2 on gpu1 = 2).
-    assert by_name["h200"]["gpus_alloc"] == 2
+    # allocation is the exact per-group live count from the live
+    # snapshot's per-GPU series: job 1 holds 2 GPUs + job 2 holds 1 on
+    # gpu1 -> 3 h200 series. (The old canned count-by fixture said 2;
+    # the per-GPU snapshot is the exporter's actual accounting.)
+    assert by_name["h200"]["gpus_alloc"] == 3
     assert by_name["h100"]["gpus_total"] == 8
-    assert by_name["h100"]["gpus_alloc"] == 3
+    # job 3 is not running, so the h100 group has no live allocation.
+    assert by_name["h100"]["gpus_alloc"] == 0
     # the MIG profile group carries only gpu49's slices.
     assert by_name["h200_3g.71gb"]["gpus_total"] == 8
     assert by_name["h200_3g.71gb"]["gpus_alloc"] == 1
@@ -776,25 +728,25 @@ def test_partitions_gpu_capacity(client):
 
 
 
-def test_partitions_running_only_injects_matcher(client, fake_prom):
-    client.get("/api/partitions", params={"since_hours": 24})
-    fake_prom.calls.clear()
+def test_partitions_running_only_filters_series_in_process(client, fake_prom):
     r = client.get("/api/partitions",
                    params={"since_hours": 24, "running_only": "true"})
     assert r.status_code == 200
-    matcher = 'slurmjobid=~"^(?:1|2|4)$"'
-    ranges = [q for t, q in fake_prom.calls if t == "range"]
-    assert any(matcher in q and "sum by (instance, gpu_type)" in q
-               for q in ranges), ranges
-    assert any(matcher in q and "count by (instance, gpu_type)" in q
-               for q in ranges), ranges
+    # The live-ID filter is in process over the shared raw fetch: the only
+    # utilization range query carries no matcher, and no sum/count
+    # aggregation queries exist any more (plan §2).
+    util_ranges = [q for t, q in fake_prom.calls if t == "range"
+                   and "slurm_job_utilization_gpu" in q]
+    assert util_ranges, util_ranges
+    assert all(
+        "max by (slurmjobid, instance, gpu, job, user, gpu_type)" in q
+        and "=~" not in q for q in util_ranges), util_ranges
     # non-running job 3 (h100) is gone; running jobs 1+2 stay h200 and
     # running MIG job 4 is its profile group
     data = r.json()
     by_name = {p["name"]: p for p in data["partitions"]}
     assert set(by_name) == {"h200", "h200_3g.71gb"}
-    # the trend has no slurmjobid label: the matched selector must have
-    # excluded h100 upstream
+    # the trend is derived from the same filtered series
     assert set(data["trend"]) == {"h200", "h200_3g.71gb"}
 
 
@@ -1099,10 +1051,10 @@ def test_partitions_queue_unavailable_is_not_empty(client, fake_prom,
 
 def test_partitions_wait_history_unavailable_keeps_queue(client, fake_prom,
                                                          monkeypatch):
-    def _boom(start_iso, end_iso, progress=None):
+    def _boom(start_iso, end_iso, partitions):
         raise slurm.SlurmError("sacct is not available")
 
-    monkeypatch.setattr(deps, "completed_jobs", _boom)
+    monkeypatch.setattr(deps, "sacct_allocations", _boom)
     data = client.get("/api/partitions/queue",
                       params={"since_hours": 24}).json()
     assert data["wait_history_available"] is False
@@ -1119,11 +1071,15 @@ def test_partitions_wait_history_unavailable_keeps_queue(client, fake_prom,
 
 def test_partitions_partial_wait_history_keeps_successful_metrics(
         client, fake_prom, monkeypatch):
-    monkeypatch.setattr(
-        deps, "completed_jobs",
-        lambda start_iso, end_iso, progress=None: (COMPLETED_HISTORY, {
-            "failed_batches": 1, "successful_batches": 2, "complete": False,
-        }))
+    # One of the window's day chunks failing (after its retry) keeps the
+    # other chunks' records: the wait history stays available and the
+    # coverage discloses the failure.
+    def flaky(start_iso, end_iso, partitions):
+        if start_iso.startswith("2026-08-29"):
+            raise slurm.SlurmError("chunk failed")
+        return COMPLETED_HISTORY
+
+    monkeypatch.setattr(deps, "sacct_allocations", flaky)
     data = client.get("/api/partitions/queue", params={"since_hours": 72}).json()
     assert data["wait_history_available"] is True
     assert data["wait_history_coverage"]["complete"] is False
@@ -1134,12 +1090,11 @@ def test_partitions_partial_wait_history_keeps_successful_metrics(
 def test_partitions_queue_progress_endpoint_serves_batch_state(
         client, fake_prom):
     # The polling contract: /api/partitions/queue/progress must resolve
-    # the SAME stable key the in-flight accounting fetch publishes under.
-    # Seeding that exact key and GETting the route proves the lookup;
-    # an epoch-derived or flag-mismatched key would return None here.
-    import cache as cache_module
-
-    key = cache_module.completed_progress_key(24)
+    # the ONE collapsed key the window's shared sacct dump publishes
+    # under (plan §3). Seeding that exact key and GETting the route
+    # proves the lookup; an epoch-derived or flag-mismatched key would
+    # return None here.
+    key = cache.vram_progress_key(24)
     domain.partitions.progress_store[key] = {
         "done": 4, "total": 7, "failed_batches": 1,
     }
@@ -1160,25 +1115,28 @@ def test_partitions_queue_progress_endpoint_serves_batch_state(
 
 def test_partitions_vram_progress_endpoint_serves_batch_state(
         client, fake_prom):
-    # Same polling contract as the queue's progress route: the VRAM
-    # progress endpoint must resolve the SAME stable, scope-matched key
-    # the in-flight VRAM fetch publishes under.
-    key = cache.vram_progress_key(24, False, "h200")
+    # Same polling contract, and the SAME key: the VRAM enrichment reads
+    # the same window-wide dump as the queue's wait history, so both
+    # progress polls resolve one identity. The old per-partition/flag
+    # key split is gone — the dump's batch work varies only with the
+    # window.
+    key = cache.vram_progress_key(24)
     domain.partitions.progress_store[key] = {
         "done": 3, "total": 5, "failed_batches": 1,
     }
     try:
-        r = client.get("/api/partitions/vram/progress",
-                       params={"since_hours": 24, "partition": "h200"})
-        assert r.status_code == 200
-        assert r.json() == {"done": 3, "total": 5, "failed_batches": 1}
-        # A different partition / window / flag must NOT observe this
-        # fetch's state: the key covers every candidate-affecting param.
-        for wrong in ({"partition": "h100"},
-                      {"partition": "h200", "since_hours": 72},
-                      {"partition": "h200", "running_only": "true"}):
-            assert client.get("/api/partitions/vram/progress",
-                              params=wrong).json() is None
+        # Same window, any partition/running flag: the same in-flight
+        # dump, so the same state.
+        for params in ({"since_hours": 24, "partition": "h200"},
+                       {"since_hours": 24, "partition": "h100"},
+                       {"since_hours": 24, "running_only": "true"}):
+            r = client.get("/api/partitions/vram/progress", params=params)
+            assert r.status_code == 200
+            assert r.json() == {"done": 3, "total": 5, "failed_batches": 1}
+        # A different window is a different dump fetch.
+        assert client.get("/api/partitions/vram/progress",
+                          params={"since_hours": 72,
+                                  "partition": "h200"}).json() is None
         # Nothing in flight reads as null, never a fabricated batch.
         domain.partitions.progress_store.clear()
         assert client.get("/api/partitions/vram/progress",
@@ -1190,14 +1148,12 @@ def test_partitions_vram_progress_endpoint_serves_batch_state(
 
 def test_partitions_vram_progress_clears_after_failed_fetch(
         client, fake_prom, monkeypatch):
-    # A failure inside the enrichment's cache-miss leader must leave no
-    # stale in-flight entry behind: later polls must see null, not a hung
-    # batch state.
+    # A failure inside the dump fetch must leave no stale in-flight
+    # entry behind: later polls must see null, not a hung batch state.
     def boom(*args, progress=None, **kwargs):
-        if progress:
-            progress({"done": 1, "total": 3, "failed_batches": 0})
-        raise appmod.PrometheusError("prometheus down")
+        raise slurm.SlurmError("sacct down")
 
+    monkeypatch.setattr(deps, "sacct_allocations", boom)
     monkeypatch.setattr(deps, "sacct_jobs_resilient", boom)
 
     r = client.get("/api/partitions/vram",
@@ -1210,35 +1166,34 @@ def test_partitions_vram_progress_clears_after_failed_fetch(
 
 def test_partitions_vram_follower_never_rewinds_shared_progress(
         client, fake_prom, monkeypatch):
-    # A same-scope follower joins the leader's enrichment Future, so it
-    # must not touch the shared progress key: a follower-side seed would
-    # rewind the leader's live batch count to 0, and a follower-side
-    # clear would erase it mid-run. Only the cache-miss leader publishes.
-    progress_key = cache.vram_progress_key(24, False, "")
+    # A same-window follower joins the dump fetch's Future (plan §3), so
+    # it must not touch the shared progress key: a follower-side seed
+    # would rewind the leader's live batch count to 0, and a follower-
+    # side clear would erase it mid-run. Only the cache-miss leader that
+    # actually runs the chunked fetch publishes.
+    progress_key = cache.vram_progress_key(24)
     store = domain.partitions.progress_store
-    leader_advanced = threading.Event()
+    leader_started = threading.Event()
     release_leader = threading.Event()
     results = {}
 
-    def slow_resilient(ids, start_iso=None, workers=2, progress=None):
-        assert progress is not None
-        progress({"done": 1, "total": 1, "failed_batches": 0})
-        leader_advanced.set()
-        # Hold the enrichment open so the follower's whole request
-        # lifecycle (route entry through finally) races with it.
+    def slow_chunks(start_iso, end_iso, partitions):
+        leader_started.set()
+        # Hold the chunk open so the follower's whole request lifecycle
+        # (route entry through finally) races with the leader's fetch.
         release_leader.wait(timeout=10)
-        return {j: SACCT[j] for j in ids}, 0
+        return COMPLETED_HISTORY
 
     def run(name, params):
         results[name] = client.get("/api/partitions/vram", params=params)
 
-    monkeypatch.setattr(deps, "sacct_jobs_resilient", slow_resilient)
+    monkeypatch.setattr(deps, "sacct_allocations", slow_chunks)
     params = {"since_hours": 24}
     leader = threading.Thread(target=run, args=("leader", params))
     follower = threading.Thread(target=run, args=("follower", params))
     leader.start()
     try:
-        assert leader_advanced.wait(timeout=10)
+        assert leader_started.wait(timeout=10)
         follower.start()
         # A correct follower joins the leader's Future and stays blocked
         # until the leader is released: still alive, no result yet.
@@ -1247,8 +1202,9 @@ def test_partitions_vram_follower_never_rewinds_shared_progress(
             "follower must block on the leader's Future, not run its own fetch"
         assert "follower" not in results
         # While the follower sat joined on the request, the leader's
-        # live state was neither rewound to 0 nor erased.
-        assert store[progress_key] == {"done": 1, "total": 1,
+        # live state was neither rewound to 0 nor erased (a 24 h window
+        # chunks into 2 edge fetches).
+        assert store[progress_key] == {"done": 0, "total": 2,
                                        "failed_batches": 0}
         release_leader.set()
         leader.join(timeout=10)
@@ -1262,42 +1218,47 @@ def test_partitions_vram_follower_never_rewinds_shared_progress(
     assert store == {}
 
 
-def test_partitions_vram_publishes_progress_from_enrichment(
-        client, fake_prom, monkeypatch):
-    # The enrichment's cache-miss leader must surface the resilient
-    # helper's real batch states: the last observed state is the final
-    # batch with its failure count.
-    states = []
-    def fake_resilient(ids, start_iso=None, workers=2, progress=None):
-        for state in ({"done": 1, "total": 1, "failed_batches": 0},
-                      {"done": 1, "total": 1, "failed_batches": 1}):
-            states.append(state)
-            if progress:
-                progress(state)
-        return {j: SACCT[j] for j in ids}, 1
+def test_sacct_window_publishes_and_clears_progress(client, fake_prom,
+                                                    monkeypatch):
+    # The dump fetch is the only batched part of a window request: the
+    # cache-miss leader publishes {"done", "total", "failed_batches"}
+    # before the first chunk and once per finished chunk, and the
+    # finally clears the key — a poll after completion reads as null,
+    # never as the last batch.
+    import sources
 
-    monkeypatch.setattr(deps, "sacct_jobs_resilient", fake_resilient)
-    data = client.get("/api/partitions/vram", params={"since_hours": 24}).json()
-    assert data["failed_batches"] == 1
-    # The in-flight entry is cleared once the response is built.
-    assert domain.partitions.progress_store == {}
-    # The route published both states; the last one carried the failure.
-    assert states[-1] == {"done": 1, "total": 1, "failed_batches": 1}
-    # A poll after completion sees null progress, not the last batch.
+    states = []
+
+    def flaky(start_iso, end_iso, partitions):
+        if start_iso.startswith("2026-08-29"):
+            raise slurm.SlurmError("chunk failed")
+        return COMPLETED_HISTORY
+
+    monkeypatch.setattr(deps, "sacct_allocations", flaky)
+    records, coverage, start, end = sources.sacct_window(
+        24, progress=states.append,
+        progress_key=cache.vram_progress_key(24))
+    # Both window edges ran; the Aug 29 chunk failed after its retry.
+    assert coverage["failed_batches"] == 1
+    assert coverage["successful_batches"] == 1
+    assert states[0] == {"done": 0, "total": 2, "failed_batches": 0}
+    assert states[-1] == {"done": 2, "total": 2, "failed_batches": 1}
+    # A failed fetch clears too — a stale in-flight entry would
+    # otherwise read as live progress on every later poll.
+    assert cache.progress_store == {}
     assert client.get("/api/partitions/vram/progress",
                       params={"since_hours": 24}).json() is None
 
 
 def test_partitions_queue_progress_clears_after_failed_fetch(
         client, fake_prom, monkeypatch):
-    # A SlurmError during completed_jobs must leave no stale in-flight
-    # entry behind: later polls (either flag) must see null, not a hung
+    # A SlurmError during the dump's chunk fetches must leave no stale
+    # in-flight entry behind: later polls must see null, not a hung
     # batch state.
-    def _boom(start_iso, end_iso, progress=None):
-        progress({"done": 1, "total": 7, "failed_batches": 0})
+    def _boom(start_iso, end_iso, partitions):
         raise slurm.SlurmError("sacct unavailable")
 
-    monkeypatch.setattr(deps, "completed_jobs", _boom)
+    monkeypatch.setattr(deps, "sacct_allocations", _boom)
     data = client.get("/api/partitions/queue",
                       params={"since_hours": 24}).json()
     assert data["wait_history_available"] is False
@@ -1308,41 +1269,41 @@ def test_partitions_queue_progress_clears_after_failed_fetch(
 
 def test_partitions_queue_cache_and_progress_share_window_identity(
         client, fake_prom, monkeypatch):
-    # The accounting cache keys by since_hours (not the captured epoch
-    # window, which changes every second and would never hit the TTL
-    # cache), and progress uses the same identity: two same-window
-    # requests with opposite running_only flags must resolve to one cache
-    # entry and one progress key, not four divergent identities.
+    # The dump cache keys by since_hours (not the captured epoch window,
+    # which changes every second and would never hit the TTL cache), and
+    # progress uses the same collapsed identity: two same-window
+    # requests with opposite running_only flags must resolve to one dump
+    # fetch, not two.
     calls = []
 
-    def fake_completed(start_iso, end_iso, progress=None):
+    def fake_chunks(start_iso, end_iso, partitions):
         calls.append(start_iso)
-        return (COMPLETED_HISTORY, {"failed_batches": 0,
-                                    "successful_batches": 1,
-                                    "complete": True})
+        return COMPLETED_HISTORY
 
-    monkeypatch.setattr(deps, "completed_jobs", fake_completed)
+    monkeypatch.setattr(deps, "sacct_allocations", fake_chunks)
     first = client.get("/api/partitions/queue",
                        params={"since_hours": 24}).json()
     second = client.get("/api/partitions/queue",
                         params={"since_hours": 24,
                                 "running_only": True}).json()
-    # Both requests join the leader's cached fetch: one accounting query.
-    assert len(calls) == 1
+    # Both requests join the leader's cached fetch: one chunk set (the
+    # 24 h window's two edge fetches), not a second fetch.
+    assert len(calls) == 2
     assert first["wait_history_coverage"]["records_examined"] == \
         second["wait_history_coverage"]["records_examined"]
-    # Neither identity may depend on the flag or the captured epoch.
-    assert cache.completed_progress_key(24) == ("completed_progress", 24)
-    assert cache.completed_jobs_key(24) == ("completed_jobs", 24)
+    # The progress identity: one collapsed key, window-scoped only —
+    # running_only and partition are response-shape parameters that
+    # change no fetch (plan §3).
+    assert cache.vram_progress_key(24) == ("vram_progress", 24)
 
 
 def test_partitions_queue_progress_shares_fetch_across_running_flag(
         client, fake_prom, monkeypatch):
-    # The accounting cache joins same-window requests regardless of
-    # running_only, so both flags' polls must read the ONE shared fetch's
-    # state: the progress key omits the flag. If it leaked into the key,
+    # The dump joins same-window requests regardless of running_only, so
+    # both flags' polls must read the ONE shared fetch's state: the
+    # collapsed progress key omits the flag. If it leaked into the key,
     # the opposite-flag poll would miss the leader's entry entirely.
-    key = cache.completed_progress_key(24)
+    key = cache.vram_progress_key(24)
     domain.partitions.progress_store[key] = {
         "done": 2, "total": 7, "failed_batches": 0}
     try:
@@ -1368,21 +1329,19 @@ def test_partitions_queue_empty_when_nothing_pending(client, fake_prom):
 
 def test_partitions_queue_cache_hit_filters_on_fetched_bounds(
         client, fake_prom, monkeypatch):
-    # The 300s accounting TTL outlives any single request's epoch window:
-    # a later cache hit must filter records against the bounds the records
-    # were actually fetched for, not bounds recomputed from an advanced
+    # The 300s dump TTL outlives any single request's epoch window:
+    # a later cache hit must filter records against the bounds the dump
+    # was actually fetched for, not bounds recomputed from an advanced
     # clock (which would silently drop every recent record).
     import cache as cache_module
 
     calls = []
 
-    def fake_completed(start_iso, end_iso, progress=None):
+    def fake_chunks(start_iso, end_iso, partitions):
         calls.append((start_iso, end_iso))
-        return (COMPLETED_HISTORY, {"failed_batches": 0,
-                                    "successful_batches": 1,
-                                    "complete": True})
+        return COMPLETED_HISTORY
 
-    monkeypatch.setattr(deps, "completed_jobs", fake_completed)
+    monkeypatch.setattr(deps, "sacct_allocations", fake_chunks)
     # A 168-hour window contains the newest fixture records: with the
     # cached bounds dropped, the recomputed (advanced-clock) window would
     # start a day later and drop them, so the pre-fix route fails here.
@@ -1392,11 +1351,10 @@ def test_partitions_queue_cache_hit_filters_on_fetched_bounds(
     assert first_samples > 0
     first_examined = first["wait_history_coverage"]["records_examined"]
 
-    # Advance the live clock past the TTL window's tail, and expire the
-    # partition-window cache (60s) by advancing the cache's monotonic
-    # clock 120s (< the 300s accounting TTL): the second request's window
-    # recomputes at the advanced time while the accounting entry stays a
-    # hit serving its fetched bounds.
+    # Advance the live clock past the pinned-window TTL by advancing the
+    # cache's monotonic clock 120s (< the 300s dump TTL): the second
+    # request re-pins its window at the advanced time while the dump
+    # entry stays a hit serving its fetched bounds.
     now_marker = _epoch("2026-09-06T00:00:00")
     monkeypatch.setattr(deps, "now", lambda: now_marker)
     base_mono = cache_module.time.monotonic()
@@ -1404,7 +1362,10 @@ def test_partitions_queue_cache_hit_filters_on_fetched_bounds(
                         lambda: base_mono + 120)
     second = client.get("/api/partitions/queue",
                         params={"since_hours": 168}).json()
-    assert len(calls) == 1  # served from the TTL cache, not refetched
+    # The second request is served entirely from the dump cache: its
+    # records and bounds are the first fetch's, so only the first
+    # request's 8 day chunks (168 h) ever ran.
+    assert len(calls) == 8
     assert second["queue"]["h200"]["wait_samples"] == first_samples
     assert second["wait_history_coverage"]["records_examined"] == \
         first_examined
@@ -1487,10 +1448,13 @@ def test_partitions_vram_records(client):
 def test_partitions_vram_returns_every_candidate(client, fake_prom,
                                                  monkeypatch):
     # No cap: the VRAM chart must see every VRAM-bearing job in the
-    # window. The fixture's four candidates exceed the old cap-shaped
-    # boundary (2), and all of them reach the enrichment and the payload
-    # with total == len(jobs).
+    # window. An empty dump sends all four candidates to the per-ID row
+    # cache in ONE batched call, and all of them reach the payload with
+    # total == len(jobs).
     seen_ids = []
+    monkeypatch.setattr(
+        deps, "sacct_allocations",
+        lambda start_iso, end_iso, partitions: [])
     monkeypatch.setattr(
         deps, "sacct_jobs_resilient",
         lambda ids, start_iso=None, **kw: (
@@ -1507,9 +1471,9 @@ def test_partitions_vram_running_only_filters_live(client, fake_prom):
     assert r.status_code == 200
     ids = {j["jobid"] for j in r.json()["jobs"]}
     assert ids == {"1", "2", "4"}  # job 3 has no live GPU series
-    # the VRAM query carries the live-ID matcher
-    matcher = 'slurmjobid=~"^(?:1|2|4)$"'
-    assert any(matcher in q and "max by (slurmjobid, instance, gpu)" in q
+    # The VRAM series are the shared unscoped fetches: the live-ID filter
+    # is applied in process to the job view, never as a matcher.
+    assert all("=~" not in q
                for t, q in fake_prom.calls if t == "range")
 
 
@@ -1546,19 +1510,23 @@ def test_partitions_vram_partition_filter(client):
 
 def test_partitions_vram_discloses_partial_enrichment(
         client, fake_prom, monkeypatch):
-    # One sacct batch failing must not 502 the whole VRAM endpoint or
-    # erase the other batches: the failed batch's records keep null
-    # gpu_hours and the response discloses the coverage fraction and the
-    # failed-batch count.
-    def partial(ids, start_iso=None, **kw):
-        meta = {j: SACCT[j] for j in ids if j == "1"}
-        return meta, 1  # one of the (single) batches failed
+    # A failed dump (every chunk failing after its retry) must not 502
+    # the whole VRAM endpoint: the failed chunks surface as the dump's
+    # failed-batch count, the per-ID row cache fills what it can, and the
+    # unresolved records keep null gpu_hours.
+    def failing_chunks(start_iso, end_iso, partitions):
+        raise slurm.SlurmError("chunk failed")
 
-    monkeypatch.setattr(deps, "sacct_jobs_resilient", partial)
+    def partial_rows(ids, start_iso=None, **kw):
+        return ({j: SACCT[j] for j in ids if j == "1"}, 1)
+
+    monkeypatch.setattr(deps, "sacct_allocations", failing_chunks)
+    monkeypatch.setattr(deps, "sacct_jobs_resilient", partial_rows)
     data = client.get("/api/partitions/vram",
                       params={"since_hours": 24}).json()
     assert 0 < data["enriched_frac"] < 1
-    assert data["failed_batches"] == 1
+    # both window chunks failed and are counted, not swallowed
+    assert data["failed_batches"] == 2
     by_job = {j["jobid"]: j for j in data["jobs"]}
     assert by_job["1"]["gpu_hours"] is not None
     assert by_job["2"]["gpu_hours"] is None
@@ -1568,10 +1536,9 @@ def test_slurm_error_maps_to_502(client, fake_prom, monkeypatch):
     def boom():
         raise appmod.SlurmError("scontrol is not available")
 
-    # The VRAM pipeline's Prometheus half still raises SlurmError through
-    # running_gpu_job_ids/scontrol; the resilient sacct helper no longer
-    # propagates batch failures, so the 502 mapping is exercised on the
-    # scontrol call instead.
+    # The VRAM pipeline's scontrol snapshot (node types) raises through
+    # _pinned; the dump's chunk failures are counted, not raised, so the
+    # 502 mapping is exercised on the scontrol call.
     monkeypatch.setattr(deps, "show_nodes", boom)
     r = client.get("/api/partitions/vram", params={"since_hours": 24})
     assert r.status_code == 502
@@ -1582,7 +1549,9 @@ def test_partitions_vram_counts_zero_hour_rows_as_enriched(
         client, fake_prom, monkeypatch):
     # A sacct row with a valid allocation and elapsed 00:00:00 (Slurm's
     # just-started report) is resolved accounting, not a gap: it must
-    # count as coverage and emit 0.0 GPU-hours, not null.
+    # count as coverage and emit 0.0 GPU-hours, not null. The dump here
+    # carries nothing for the window, so the rows arrive through the
+    # per-ID fallback.
     def zero_row(ids, start_iso=None, **kw):
         meta = {}
         if "1" in ids:
@@ -1591,6 +1560,9 @@ def test_partitions_vram_counts_zero_hour_rows_as_enriched(
             meta["1"] = row
         return meta, 0
 
+    monkeypatch.setattr(
+        deps, "sacct_allocations",
+        lambda start_iso, end_iso, partitions: [])
     monkeypatch.setattr(deps, "sacct_jobs_resilient", zero_row)
     data = client.get("/api/partitions/vram",
                       params={"since_hours": 24}).json()
@@ -1620,9 +1592,14 @@ def test_nodes_endpoint(client):
     assert data["count"] == 7  # gpu_only: gpu1, gpu2, gpu3, gpu49, gpu50,
     #                              dgx1a, dgx1b
     by_name = {n["name"]: n for n in data["nodes"]}
-    assert by_name["gpu1"]["current_util"] == 55.5
+    # current_util is the per-node max over the live per-GPU series:
+    # gpu1's job 1 reports 77.0 on its first GPU. gpu2 has no live
+    # series (job 3 is not running), so its current_util is null — the
+    # old canned "max by (instance)" fixture said 55.5/10.0.
+    assert by_name["gpu1"]["current_util"] == 77.0
     assert by_name["gpu1"]["current_vram"] == 41.2
     assert by_name["gpu1"]["active_jobs"][0]["jobid"] == "1"
+    assert by_name["gpu2"]["current_util"] is None
     assert by_name["gpu2"]["gpus_alloc"] == 3
 
 
@@ -1650,9 +1627,8 @@ def test_nodes_gpus_alloc_ignores_silent_exporter(client, fake_prom, monkeypatch
     # A node scontrol reports as fully allocated, but whose monitoring
     # exporter has stopped publishing any per-GPU series at all (gpu49 in
     # reality, after its today's mixed-GRES reconfiguration): the live
-    # Prometheus "count by (instance, job, gpu_type)" query has nothing
-    # for this instance, yet gpus_alloc must still read scontrol's true
-    # allocation, not silently drop to 0.
+    # snapshot has nothing for this instance, yet gpus_alloc must still
+    # read scontrol's true allocation, not silently drop to 0.
     monkeypatch.setattr(deps, "show_nodes", lambda: [
         {"name": "gpu99", "state": "MIXED", "state_full": "MIXED",
          "reason": "", "partitions": "gpu-h200-71g-ia", "cpus": 128,
@@ -1685,7 +1661,9 @@ def test_node_detail_job_start_view(client, fake_prom):
 
 
 def test_node_detail_job_start_fallback_no_jobs(client, fake_prom):
-    fake_prom.job_start_ids = set()
+    # No live GPU series anywhere: the snapshot's jobs_by_node is empty
+    # for this node and the six-hour fallback window applies.
+    fake_prom.live_ids = set()
     data = client.get("/api/nodes/gpu1",
                       params={"view": "job_start"}).json()
     assert data["window"]["start"] == NOW - 6 * 3600
@@ -1714,10 +1692,10 @@ def test_nodes_refresh_bypasses_cache(client, fake_prom):
     assert fake_prom.nodes_calls == 1  # served from the 30 s cache
     client.get("/api/nodes", params={"refresh": "true"})
     assert fake_prom.nodes_calls == 2  # forced a fresh scontrol read
-    # refresh also purges the Prometheus node cache: the second fresh read
-    # re-queries all four instant node metrics.
-    ranges = [q for t, q in fake_prom.calls if t == "instant"]
-    assert len(ranges) == 8  # 2 reads x 4 instant queries
+    # refresh also purges the Prometheus node cache: the second fresh
+    # read re-queries the live snapshot's two instant metrics.
+    instants = [q for t, q in fake_prom.calls if t == "instant"]
+    assert len(instants) == 4  # 2 reads x 2 snapshot queries
     assert fake_prom.clear_cache_calls == 1
 
 
@@ -1860,15 +1838,11 @@ def test_partitions_mean_occupancy_running_only(client, fake_prom):
     data = client.get("/api/partitions",
                       params={"since_hours": 24, "running_only": "true"}).json()
     by_name = {p["name"]: p for p in data["partitions"]}
-    # Non-running h100 and idle gh200 are absent. The matched running
-    # whole-H200 samples have counts 3 and 2, so occupancy is 12.5%.
+    # Non-running h100 and idle gh200 are absent. The filtered running
+    # whole-H200 series have counts 3 and 2, so occupancy is 12.5%.
     assert set(by_name) == {"h200", "h200_3g.71gb"}
     assert by_name["h200"]["mean_occupancy"] == 12.5
     assert by_name["h200_3g.71gb"]["mean_occupancy"] == 12.5
-    ranges = [q for t, q in fake_prom.calls if t == "range"]
-    assert any('slurmjobid=~"^(?:1|2|4)$"' in q
-               and "count by (instance, gpu_type)" in q
-               for q in ranges), ranges
 
 
 def test_gpu_capacity_mixed_whole_and_mig_node():
@@ -1965,63 +1939,25 @@ def test_window_routes_span_720_hours_with_1800s_step(client, route):
 
 
 def test_vram_progress_route_resolves_exact_identity(client):
-    # The VRAM poll must resolve ONLY the matching window/running/
-    # partition fetch: a seeded entry is invisible to any other
-    # parameter combination, and an unknown identity reads as null.
-    key = cache.vram_progress_key(24, False, "h200")
+    # The VRAM poll resolves the collapsed dump identity: the same
+    # window's state is visible to every partition/flag combination
+    # (plan §3 — one dump serves all shapes), while a different window
+    # is a different fetch and an unknown identity reads as null.
+    key = cache.vram_progress_key(24)
     domain_partitions.progress_store[key] = {
         "done": 2, "total": 5, "failed_batches": 0}
     try:
-        hit = client.get("/api/partitions/vram/progress",
-                         params={"since_hours": 24, "partition": "h200"})
-        assert hit.status_code == 200
-        assert hit.json() == {"done": 2, "total": 5, "failed_batches": 0}
-        # A flag mismatch must not read the leader's state.
-        flag = client.get("/api/partitions/vram/progress",
-                          params={"since_hours": 24, "partition": "h200",
-                                  "running_only": "true"})
-        assert flag.json() is None
-        # Neither may a different partition or window.
-        other = client.get("/api/partitions/vram/progress",
-                           params={"since_hours": 24, "partition": "h100"})
-        assert other.json() is None
+        for params in ({"since_hours": 24, "partition": "h200"},
+                       {"since_hours": 24, "partition": "h100",
+                        "running_only": "true"}):
+            hit = client.get("/api/partitions/vram/progress",
+                             params=params)
+            assert hit.status_code == 200
+            assert hit.json() == {"done": 2, "total": 5,
+                                  "failed_batches": 0}
+        # A different window is a different dump fetch.
         other = client.get("/api/partitions/vram/progress",
                            params={"since_hours": 72, "partition": "h200"})
         assert other.json() is None
     finally:
         domain_partitions.progress_store.pop(key, None)
-
-
-def test_vram_progress_publishes_and_clears(client, fake_prom, monkeypatch):
-    # The enrichment is the only truly batched part of the VRAM request:
-    # the route publishes an in-flight entry before any work, the batched
-    # helper's callback updates it, and a failed request must leave no
-    # stale state behind.
-    def fake_enrich(ids, start_iso=None, workers=2, progress=None):
-        meta = {j: SACCT[j] for j in ids if j in SACCT}
-        if progress:
-            progress({"done": 0, "total": 1, "failed_batches": 0})
-            progress({"done": 1, "total": 1, "failed_batches": 0})
-        return meta, 0
-
-    monkeypatch.setattr(deps, "sacct_jobs_resilient", fake_enrich)
-    data = client.get("/api/partitions/vram",
-                      params={"since_hours": 24}).json()
-    assert data["failed_batches"] == 0
-    assert domain_partitions.progress_store == {}
-
-    # A fresh 24h window identity: force the enrichment to run again by
-    # dropping the cached (dict, failed) tuple the first request stored,
-    # then make the resilient helper fail outright.
-    deps.route_cache.invalidate(
-        cache.sacct_resilient_key(sorted({"1", "2", "3", "4"})))
-
-    def boom(ids, start_iso=None, workers=2, progress=None):
-        if progress:
-            progress({"done": 1, "total": 3, "failed_batches": 1})
-        raise slurm.SlurmError("sacct unavailable")
-
-    monkeypatch.setattr(deps, "sacct_jobs_resilient", boom)
-    r = client.get("/api/partitions/vram", params={"since_hours": 24})
-    assert r.status_code == 502
-    assert domain_partitions.progress_store == {}

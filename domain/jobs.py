@@ -1,57 +1,37 @@
-"""Job-window aggregation: fetching and ranking jobs over a time window.
+"""Job-window aggregation: the per-job view of the shared window series.
 
-The core Prometheus fetch every Jobs-tab-shaped view builds on (the
-Jobs tab itself, the Users tab's aggregation, and the VRAM
-distribution chart all call ``fetch_job_window``), plus the
-efficiency histogram used by the Jobs tab's chart.
+The per-GPU raw series is fetched once per pinned window by
+``sources.gpu_util``; this module turns the derived per-job series (plus
+optionally the VRAM % series) into the job dicts every Jobs-tab-shaped
+view — the Jobs tab itself, the Users tab's aggregation, and the VRAM
+distribution chart — consumes, plus the efficiency histogram used by the
+Jobs tab's chart.
 """
 
-from collections import defaultdict
-
-import cache
-import deps
-from domain.common import job_window, series_values, step_for_range
-from promql import label_eq, selector
+from domain.common import series_values
 
 
-def fetch_job_window(since_hours, include_vram=True, user=None):
-    """Fetch job-level utilization (and optionally vram) series for a window.
+def job_aggregates(q1_series, step, vram_series=()):
+    """Aggregate per-job/per-instance utilization series into job dicts.
 
-    Returns (jobs, start, end) where jobs is a list of dicts aggregated from
-    Prometheus over the window (no sacct enrichment yet). When ``user`` is
-    given, the utilization query is scoped to that Slurm user so the whole
-    window is never pulled for a single-user request.
+    ``q1_series`` is the ``max by (slurmjobid, instance, job, user,
+    gpu_type)`` shape derived from the per-GPU raw window series (see
+    domain.views.job_view); ``vram_series`` is the optional Q2 VRAM %
+    series whose per-job mean fills ``vram_avg``. The aggregation itself
+    is the one ``fetch_job_window`` always ran — values are merged
+    across a job's instances into per-job sums, and the sample-weighted
+    mean, max, and GPU-hour estimate come off those sums.
+
+    Returns the list sorted by ``gpu_hours_eff`` descending, as before.
     """
-    start, now = job_window(since_hours)
-    step = step_for_range(now - start)
-    sel = selector(label_eq("user", user)) if user else ""
-
-    def fetch():
-        util = deps.get_prom().query_range(
-            "max by (slurmjobid, instance, job, user, gpu_type) "
-            "(slurm_job_utilization_gpu%s)" % sel,
-            start, now, step,
-        )
-        vram = []
-        if include_vram:
-            vram = deps.get_prom().query_range(
-                "avg by (slurmjobid, instance, gpu) (slurm_job_memory_usage_gpu / "
-                "slurm_job_memory_total_gpu * 100)",
-                start, now, step,
-            )
-        return util, vram, start, now, step
-
-    key = cache.job_window_key(since_hours, include_vram, user)
-    util, vram, start, now, step = deps.route_cache.get_or_set(key, 60, fetch)
-
-    vram_by_job = defaultdict(list)
-    for s in vram:
+    vram_by_job = {}
+    for s in vram_series:
         m = s["metric"]
         for ts, v in series_values(s):
-            vram_by_job[m["slurmjobid"]].append(v)
+            vram_by_job.setdefault(m["slurmjobid"], []).append(v)
 
     jobs = {}
-    for s in util:
+    for s in q1_series:
         m = s["metric"]
         jid = m["slurmjobid"]
         values = series_values(s)
@@ -96,7 +76,7 @@ def fetch_job_window(since_hours, include_vram=True, user=None):
             "_util_samples": job["eff_samples"],
         })
     out.sort(key=lambda j: j["gpu_hours_eff"], reverse=True)
-    return out, start, now, step
+    return out
 
 
 def efficiency_histogram(jobs, bin_width=10):
