@@ -17,10 +17,10 @@ def job_aggregates(q1_series, step, vram_series=()):
     ``q1_series`` is the ``max by (slurmjobid, instance, job, user,
     gpu_type)`` shape derived from the per-GPU raw window series (see
     domain.views.job_view); ``vram_series`` is the optional Q2 VRAM %
-    series whose per-job mean fills ``vram_avg``. The aggregation itself
-    is the one ``fetch_job_window`` always ran — values are merged
-    across a job's instances into per-job sums, and the sample-weighted
-    mean, max, and GPU-hour estimate come off those sums.
+    series whose per-job mean fills ``vram_avg``. The aggregation is
+    exactly what the Jobs list always ran — values are merged across a
+    job's instances into per-job sums, and the sample-weighted mean,
+    max, and GPU-hour estimate come off those sums.
 
     Returns the list sorted by ``gpu_hours_eff`` descending, as before.
     """

@@ -537,11 +537,11 @@ def _enrich_sacct_row(row):
 def sacct_allocations(start_iso, end_iso, partitions):
     """All-user allocation records from one bounded sacct interval.
 
-    One window chunk of the shared sacct dump (plan §3): unlike
-    ``completed_jobs`` it takes no ``--state`` filter (wait history and
-    VRAM enrichment both need every state) and takes an explicit
-    partition list — the GPU partitions, resolved from the cached
-    scontrol snapshot by the caller, so CPU jobs never enter the dump.
+    One window chunk of the shared sacct dump (plan §3): it takes no
+    ``--state`` filter (wait history and VRAM enrichment both need every
+    state) and takes an explicit partition list — the GPU partitions,
+    resolved from the cached scontrol snapshot by the caller, so CPU
+    jobs never enter the dump.
     An empty partition list omits ``-r`` (all partitions). Rows are
     parsed with the shared parser/enricher (step rows skipped, blank
     lines skipped); ``SlurmError`` propagates from ``_run`` so the

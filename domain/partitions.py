@@ -206,7 +206,7 @@ def gpu_capacity(groups, instances, nodes, allocs):
     """Join GPU-type groups to scontrol GPU capacity.
 
     ``instances`` maps group -> observed instance names (built in
-    ``partition_window``). Capacity is summed over **all** scontrol nodes
+    ``partition_view``). Capacity is summed over **all** scontrol nodes
     carrying a GRES entry whose type exactly equals the group name —
     whole GPUs and MIG profiles alike, idle capacity included,
     independent of partition membership (several priority partitions
