@@ -334,6 +334,87 @@ def test_sacct_window_failed_chunk_keeps_the_others(monkeypatch):
     assert states[-1] == {"done": 2, "total": 2, "failed_batches": 1}
 
 
+def test_sacct_window_expiry_refetches_edges_keeps_past_day(monkeypatch):
+    # The 300 s window entry outlived by the 1 h day chunks: once the
+    # window entry expires, the two edge chunks (they touch the moving
+    # window bounds, so running jobs' Elapsed/State must be current) are
+    # re-fetched fresh, while the immutable full past day is still served
+    # from its per-day cache.
+    calls = []
+    observed = []  # progress-store state seen inside the chunk fetches
+
+    def alloc(start_iso, end_iso, partitions):
+        calls.append((start_iso, end_iso))
+        state = cache.progress_store.get(("k", 48))
+        observed.append(dict(state) if state else None)
+        return [_row("1", "1", "COMPLETED")]
+
+    monkeypatch.setattr(deps, "now", lambda: NOW)
+    monkeypatch.setattr(deps, "show_nodes", lambda: list(NODES))
+    monkeypatch.setattr(deps, "sacct_allocations", alloc)
+    monkeypatch.setattr(deps, "route_cache", cache.TtlCache())
+    base = cache.time.monotonic()
+    monkeypatch.setattr(cache.time, "monotonic", lambda: base)
+
+    records, coverage, start, end = sources.sacct_window(
+        48, progress_key=("k", 48))
+    # 48 h back from NOW lands on 2026-09-21T15:30: edge, full day, edge.
+    assert calls == [
+        ("2026-09-21T15:30:00", "2026-09-22T00:00:00"),
+        ("2026-09-22T00:00:00", "2026-09-23T00:00:00"),
+        ("2026-09-23T00:00:00", "2026-09-23T15:30:00"),
+    ]
+    assert start == int(NOW) - 48 * 3600 and end == NOW
+    # The leader published its progress-store entry while the chunks ran
+    # (fresh dicts every report, so copying inside the worker is safe).
+    assert all(state and state["total"] == 3 for state in observed)
+    assert coverage == {"failed_batches": 0, "successful_batches": 3,
+                        "complete": True}
+    assert cache.progress_store == {}  # the finally popped the key
+
+    # Past the 300 s window-entry TTL but within the past day's 1 h one:
+    # the edges run again, the full day is still served from its chunk.
+    monkeypatch.setattr(cache.time, "monotonic", lambda: base + 301)
+    sources.sacct_window(48, progress_key=("k", 48))
+    edge_starts = [c[0] for c in calls if c[0] != "2026-09-22T00:00:00"]
+    assert len(edge_starts) == 4  # both edges fetched fresh a second time
+    day_calls = [c for c in calls if c[0] == "2026-09-22T00:00:00"]
+    assert len(day_calls) == 1  # immutable day still cached (1 h TTL)
+
+
+def test_sacct_window_chunks_stay_midnight_aligned_across_dst_fall_back(
+        monkeypatch):
+    # Europe/Helsinki falls back 2026-10-25 04:00 EEST -> 03:00 EET, so
+    # the wall-clock day of Oct 25 lasts 25 real hours. sacct takes naive
+    # local -S/-E bounds, so the chunk grid must stay naive-midnight
+    # aligned — the 25 h day is ONE chunk — not 24-epoch-hour slices.
+    end_epoch = datetime.datetime(
+        2026, 10, 26, 15, 30, tzinfo=HELSINKI).timestamp()
+    calls = []
+
+    def alloc(start_iso, end_iso, partitions):
+        calls.append((start_iso, end_iso))
+        return []
+
+    monkeypatch.setattr(deps, "now", lambda: end_epoch)
+    monkeypatch.setattr(deps, "show_nodes", lambda: list(NODES))
+    monkeypatch.setattr(deps, "sacct_allocations", alloc)
+    monkeypatch.setattr(deps, "route_cache", cache.TtlCache())
+
+    records, coverage, fetched_start, fetched_end = sources.sacct_window(72)
+    # 72 epoch-hours back from Oct 26 15:30 EET is Oct 23 16:30 EEST — the
+    # offset change absorbs one wall hour.
+    assert calls == [
+        ("2026-10-23T16:30:00", "2026-10-24T00:00:00"),
+        ("2026-10-24T00:00:00", "2026-10-25T00:00:00"),
+        ("2026-10-25T00:00:00", "2026-10-26T00:00:00"),
+        ("2026-10-26T00:00:00", "2026-10-26T15:30:00"),
+    ]
+    assert fetched_start == int(end_epoch) - 72 * 3600
+    assert fetched_end == end_epoch
+    assert coverage["complete"] is True and records == []
+
+
 # ---- sacct_rows ------------------------------------------------------
 
 def test_sacct_rows_maps_jobid_raw_and_array_tasks(monkeypatch):

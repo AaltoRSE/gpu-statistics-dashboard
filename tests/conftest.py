@@ -1,7 +1,13 @@
 import pytest
+from test_app import client, fake_prom  # noqa: F401
 
 import slurm
 import sources
+
+# The endpoint fixtures live in test_app; re-exporting them here lets
+# sibling modules (test_shared_fetch) request them without importing the
+# names themselves — a module-level import named like a test argument
+# reads as a redefinition of it (ruff F811).
 
 
 def pytest_addoption(parser):
