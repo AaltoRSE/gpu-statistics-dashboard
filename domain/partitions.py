@@ -526,16 +526,8 @@ def wait_empty():
     return _wait_statistics([])
 
 
-progress_store = {}
-"""Latest batched accounting progress, keyed per fetch scope.
-
-Two consumers publish here and their poll routes read it: the queue's
-long-window wait-history fetch (key from
-``cache.completed_progress_key``) and the VRAM distribution's sacct
-enrichment (key from ``cache.vram_progress_key``). Each fetch updates,
-then clears, its own entry, so a poll never observes a finished or
-failed fetch's stale state.
-"""
+progress_store = cache.progress_store
+"""Backward-compat alias of ``cache.progress_store`` (the same dict)."""
 
 
 def completed_wait_summary(records, node_gpu_types, window_start, window_end,

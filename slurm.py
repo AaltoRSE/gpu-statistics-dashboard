@@ -2,7 +2,9 @@
 
 Explicit ``sacct -j`` lookups enrich Prometheus-discovered jobs. Completed-job
 wait metrics use one bounded ``sacct --allusers -X -S … -E …`` query, avoiding
-scrape-sampling gaps and large concurrent ID batches. All calls are read-only.
+scrape-sampling gaps and large concurrent ID batches. ``sacct_allocations``
+fetches one chunk of the window-wide allocation dump the shared-source layer
+(plan §3) assembles into per-day cached chunks. All calls are read-only.
 """
 
 import datetime
@@ -511,6 +513,11 @@ def _enrich_sacct_row(row):
     gpus, gpu_type = parse_alloc_tres(row.get("AllocTRES"))
     return {
         "jobid": row.get("JobID") or "",
+        # The raw numeric ID a Prometheus slurmjobid label (and thus a
+        # per-ID row cache) actually keys on — for an array task it is
+        # NOT derivable from "jobid" ("20001465_47"), so it must be
+        # carried alongside (plan §1's per-ID sacct row cache).
+        "jobid_raw": row.get("JobIDRaw") or "",
         "name": row.get("JobName") or "",
         "user": row.get("User") or "",
         "account": row.get("Account") or "",
@@ -540,6 +547,40 @@ def _completed_jobs_batch(start_iso, end_iso):
         row = _parse_sacct_row(line.strip().split("|"))
         if not line.strip() or "." in row.get("JobID", ""):
             continue
+        records.append(_enrich_sacct_row(row))
+    return records
+
+
+def sacct_allocations(start_iso, end_iso, partitions):
+    """All-user allocation records from one bounded sacct interval.
+
+    One window chunk of the shared sacct dump (plan §3): unlike
+    ``completed_jobs`` it takes no ``--state`` filter (wait history and
+    VRAM enrichment both need every state) and takes an explicit
+    partition list — the GPU partitions, resolved from the cached
+    scontrol snapshot by the caller, so CPU jobs never enter the dump.
+    An empty partition list omits ``-r`` (all partitions). Rows are
+    parsed with the same parser/enricher as ``_completed_jobs_batch``
+    (step rows skipped, blank lines skipped); ``SlurmError`` propagates
+    from ``_run`` so the chunking layer can retry once and count the
+    failure without discarding other chunks.
+    """
+    cmd = [
+        "sacct", "--allusers", "-X",
+        "-S", start_iso, "-E", end_iso,
+        "-o", ",".join(SACCT_FIELDS), "--parsable2", "--noheader",
+    ]
+    if partitions:
+        cmd[2:2] = ["-r", ",".join(partitions)]
+    out = _run(cmd, timeout=120)
+    records = []
+    for line in out.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        row = _parse_sacct_row(line.split("|"))
+        if "." in row.get("JobID", ""):
+            continue  # step rows
         records.append(_enrich_sacct_row(row))
     return records
 

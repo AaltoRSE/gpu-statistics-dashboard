@@ -340,6 +340,58 @@ def test_sacct_jobs_default_no_date(monkeypatch):
     assert seen["start_iso"] is None
 
 
+def test_sacct_allocations_parses_rows_skips_steps_and_omits_empty_r(
+        monkeypatch):
+    # The window dump's raw dep: GPU partitions from the caller, step
+    # rows skipped, blank lines skipped, and the raw ID carried on every
+    # enriched row (the per-ID row cache indexes array tasks by it).
+    import slurm
+
+    cmds = {}
+
+    def fake_run(cmd, timeout=30):
+        cmds["cmd"] = cmd
+        return "\n".join([
+            "20015894|20015894|train.sh|alice|acc|gpu-h200|RUNNING|"
+            "2026-08-30T10:00:00|2026-08-30T09:30:00|Unknown|01:00:00|"
+            "gres/gpu:h100=1|gpu1|8",
+            "20001465_47|20008872|short|bob|acc|gpu-h200|COMPLETED|"
+            "2026-08-31T11:43:55|2026-08-31T11:00:00|"
+            "2026-09-01T02:50:54|15:06:59|gres/gpu:v100=1|gpu5|2",
+            # step row must be skipped
+            "20015894.extern|20015894.extern|extern|||||||||||",
+            "",
+        ])
+
+    monkeypatch.setattr(slurm, "_run", fake_run)
+    records = slurm.sacct_allocations(
+        "2026-08-30T00:00:00", "2026-09-01T00:00:00",
+        ["gpu-h200", "gpu-v100-32g"])
+    assert cmds["cmd"][2:4] == ["-r", "gpu-h200,gpu-v100-32g"]
+    assert cmds["cmd"][:2] == ["sacct", "--allusers"]
+    assert cmds["cmd"][cmds["cmd"].index("-o") + 1] == ",".join(SACCT_FIELDS)
+    assert "--parsable2" in cmds["cmd"] and "--noheader" in cmds["cmd"]
+    assert [r["jobid"] for r in records] == ["20015894", "20001465_47"]
+    assert records[0]["jobid_raw"] == "20015894"
+    assert records[1]["jobid_raw"] == "20008872"
+    assert records[1]["gpus"] == 1 and records[1]["gpu_type"] == "v100"
+
+
+def test_sacct_allocations_no_partitions_omits_r(monkeypatch):
+    import slurm
+
+    cmds = {}
+
+    def fake_run(cmd, timeout=30):
+        cmds["cmd"] = cmd
+        return ""
+
+    monkeypatch.setattr(slurm, "_run", fake_run)
+    assert slurm.sacct_allocations("2026-08-30T00:00:00",
+                                   "2026-09-01T00:00:00", []) == []
+    assert "-r" not in cmds["cmd"]
+
+
 def test_completed_jobs_retries_chunks_and_retains_array_tasks(monkeypatch):
     import slurm
 
@@ -362,7 +414,8 @@ def test_completed_jobs_retries_chunks_and_retains_array_tasks(monkeypatch):
     assert attempts["2026-09-11T14:40:57"] == 2
     assert coverage == {"failed_batches": 0, "successful_batches": 7,
                         "complete": True}
-    assert records == [{"jobid": "20001465_47", "name": "short",
+    assert records == [{"jobid": "20001465_47", "jobid_raw": "20008872",
+                        "name": "short",
                         "user": "alice", "account": "acc",
                         "partition": "gpu-h200", "state": "COMPLETED",
                         "submit": "2026-09-17T14:35:57",
