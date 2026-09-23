@@ -15,6 +15,9 @@ present or future — only when call sites do ``import deps`` and then
 ``deps.sacct_jobs(...)``.
 """
 
+import grp
+import os
+import pwd
 import time as _time
 
 from fastapi import HTTPException
@@ -51,3 +54,25 @@ def get_prom():
 def now():
     """Current epoch seconds — the one clock read the app makes."""
     return _time.time()
+
+
+def user_in_group(username, group_name):
+    """Whether NSS resolves ``username`` into ``group_name`` (supplementary
+    or primary membership).
+
+    The app's one directory-service boundary: callers patch this function,
+    never grp/pwd directly. A username NSS no longer knows (a stale
+    accounting name) is simply not a member; a missing *group* is a
+    configuration failure the caller must see, not an empty membership
+    list to be read as "nobody is Ellis".
+    """
+    try:
+        target_gid = grp.getgrnam(group_name).gr_gid
+    except KeyError:
+        raise HTTPException(
+            503, "NSS group '%s' is unavailable" % group_name) from None
+    try:
+        entry = pwd.getpwnam(username)
+    except KeyError:
+        return False
+    return target_gid in os.getgrouplist(username, entry.pw_gid)

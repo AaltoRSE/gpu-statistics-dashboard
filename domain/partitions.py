@@ -19,7 +19,7 @@ CLUSTER_TZ = ZoneInfo("Europe/Helsinki")
 them on that wall clock, never the process's (deployment hosts vary)."""
 
 
-def _sacct_epoch(value):
+def sacct_epoch(value):
     """A sacct Europe/Helsinki-naive string to epoch seconds; None when
     missing/invalid."""
     try:
@@ -29,7 +29,6 @@ def _sacct_epoch(value):
     if naive.tzinfo is not None:
         return naive.timestamp()
     return naive.replace(tzinfo=CLUSTER_TZ).timestamp()
-
 
 
 
@@ -335,7 +334,7 @@ def node_job_start(name, now):
         meta = deps.sacct_jobs(sorted(live))
     except SlurmError:
         return fallback_start
-    starts = [e for e in (_sacct_epoch((meta.get(j) or {}).get("start"))
+    starts = [e for e in (sacct_epoch((meta.get(j) or {}).get("start"))
                           for j in live) if e]
     if not starts:
         return fallback_start
@@ -461,7 +460,7 @@ def pending_queue_status(jobs, now, partition_types):
             out[g][kind + "_gpus"] += gpu_demand
         totals["unique_pending_jobs"] += 1
         totals["unique_gpus_requested"] += gpu_demand
-        submitted = _sacct_epoch(job["submit"])
+        submitted = sacct_epoch(job["submit"])
         waiting.append({
             "jobid": job["jobid"],
             "user": job["user"],
@@ -500,7 +499,7 @@ def _median(values):
     return round(mean) if isinstance(a, int) and isinstance(b, int) else mean
 
 
-def _wait_statistics(samples):
+def wait_statistics(samples):
     """Completed-job wait summary: percentiles, average, sample count.
 
     P50 is the ordinary median (mean of the two middle waits when the
@@ -523,8 +522,7 @@ def _wait_statistics(samples):
 
 def wait_empty():
     """The zero-sample wait-statistics shape (all null / all zero)."""
-    return _wait_statistics([])
-
+    return wait_statistics([])
 
 progress_store = {}
 """Latest batched accounting progress, keyed per fetch scope.
@@ -536,6 +534,55 @@ enrichment (key from ``cache.vram_progress_key``). Each fetch updates,
 then clears, its own entry, so a poll never observes a finished or
 failed fetch's stale state.
 """
+
+
+def completed_job_window(since_hours, start, now):
+    """The cached bounded accounting scan shared by every consumer that
+    needs the window's completed-job sacct records.
+
+    Extracted from the queue route verbatim so the Users categories
+    endpoint and ``/api/partitions/queue`` single-flight the SAME fetch
+    (same ``completed_jobs_key`` identity, 300 s TTL) instead of issuing
+    duplicate ``sacct --allusers`` work. Publishes batch progress under
+    both the cache identity and the browser-facing progress key, and
+    returns the bounds the records were actually fetched for: the TTL
+    can outlive the request's epoch window, so a later hit must filter
+    against THESE bounds, not bounds recomputed from a newer clock.
+    """
+    tz = ZoneInfo("Europe/Helsinki")
+    start_iso = datetime.fromtimestamp(start, tz).replace(
+        tzinfo=None).isoformat(timespec="seconds")
+    end_iso = datetime.fromtimestamp(now, tz).replace(
+        tzinfo=None).isoformat(timespec="seconds")
+    cache_key = cache.completed_jobs_key(since_hours)
+    progress_key = cache.completed_progress_key(since_hours)
+
+    def fetch():
+        # Publish under both identities: the cache key (what this
+        # request can inspect locally) and the stable parameter key
+        # the browser polls. running_only is deliberately excluded —
+        # the accounting cache joins same-window requests regardless
+        # of the flag, so a follower's poll must find this fetch's
+        # state.
+        for key in (cache_key, progress_key):
+            progress_store[key] = {"done": 0, "total": 0,
+                                   "failed_batches": 0}
+
+        def report(state):
+            for key in (cache_key, progress_key):
+                progress_store[key] = state
+
+        try:
+            records, coverage = deps.completed_jobs(
+                start_iso, end_iso, report)
+            return (records, coverage, start, now)
+        finally:
+            # Failed fetches clear too: a stale in-flight entry would
+            # otherwise read as live progress on every later poll.
+            for key in (cache_key, progress_key):
+                progress_store.pop(key, None)
+
+    return deps.route_cache.get_or_set(cache_key, 300, fetch)
 
 
 def completed_wait_summary(records, node_gpu_types, window_start, window_end,
@@ -562,8 +609,8 @@ def completed_wait_summary(records, node_gpu_types, window_start, window_end,
         if rec.get("state") != "COMPLETED":
             excluded["state"] += 1
             continue
-        started = _sacct_epoch(rec.get("start"))
-        submitted = _sacct_epoch(rec.get("submit"))
+        started = sacct_epoch(rec.get("start"))
+        submitted = sacct_epoch(rec.get("submit"))
         if started is None or submitted is None:
             excluded["timestamps"] += 1
             continue
@@ -591,7 +638,7 @@ def completed_wait_summary(records, node_gpu_types, window_start, window_end,
 
     summary = {}
     for name in set(waits) | {WAIT_TOTAL_KEY}:
-        entry = _wait_statistics(waits.get(name, []))
+        entry = wait_statistics(waits.get(name, []))
         gpu_hours = gpu_hour_sums.get(name, 0.0)
         entry["wait_per_gpu_hour_weighted"] = (
             round(wait_sums[name] / gpu_hours, 2) if gpu_hours > 0 else None)

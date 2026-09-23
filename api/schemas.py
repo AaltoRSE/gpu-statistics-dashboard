@@ -151,6 +151,9 @@ class JobDetailResponse(BaseModel):
 
 class UserRow(BaseModel):
     user: str
+    user_category: str = Field(
+        description="The user's NSS classification (``Ellis`` or "
+                    "``Non-Ellis``) for the exact ``ellis`` group.")
     jobs: int
     running_jobs: int
     mean_util: float = Field(
@@ -328,6 +331,39 @@ class WaitHistoryCoverage(BaseModel):
     excluded: Dict[str, int] = Field(default_factory=dict)
     failed_batches: int = 0
     complete: bool = True
+
+
+class UserCategoryRow(BaseModel):
+    """One category's completed-job summary over the selected window."""
+    category: str
+    jobs: int = Field(
+        description="Completed GPU-job allocations in the fetched "
+                    "accounting window.")
+    gpu_hours: float = Field(
+        description="Allocated GPU-hours (elapsed x GPUs / 3600) of "
+                    "those jobs — utilization-weighted figures these "
+                    "are not.")
+    wait_per_gpu_hour: Optional[float] = Field(
+        default=None,
+        description="Queue-wait hours per allocated GPU-hour over the "
+                    "wait-valid subset: sum(wait_s) / "
+                    "sum(elapsed_s x GPUs); null with no valid samples.")
+    wait_p50_s: Optional[int] = None
+    wait_p90_s: Optional[int] = None
+    wait_avg_s: Optional[int] = None
+    wait_samples: int = 0
+    mean_util: Optional[float] = Field(
+        default=None,
+        description="Sample-weighted mean utilization of the category's "
+                    "cohort observed by Prometheus; null when none of "
+                    "the cohort was scraped.")
+
+
+class UserCategoriesResponse(BaseModel):
+    window: Window
+    categories: List[UserCategoryRow] = Field(
+        description="Ellis first, then Non-Ellis — always both rows.")
+    coverage: WaitHistoryCoverage
 
 
 class PartitionQueueResponse(BaseModel):

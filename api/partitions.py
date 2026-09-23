@@ -1,8 +1,5 @@
 """Routes: GET /api/partitions, GET /api/partitions/vram."""
 
-from datetime import datetime
-from zoneinfo import ZoneInfo
-
 from fastapi import APIRouter, Query
 
 import cache
@@ -12,6 +9,7 @@ from api.schemas import PartitionQueueResponse, PartitionsResponse, VramResponse
 from domain.common import window
 from domain.partitions import (
     WAIT_TOTAL_KEY,
+    completed_job_window,
     completed_wait_summary,
     gpu_capacity,
     node_current,
@@ -102,45 +100,8 @@ def api_partition_queue(since_hours: float = Query(24, gt=0, le=720),
     queue, totals, waiting_jobs, queue_available = _queue_snapshot(
         now, partition_types)
     try:
-        tz = ZoneInfo("Europe/Helsinki")
-        start_iso = datetime.fromtimestamp(start, tz).replace(
-            tzinfo=None).isoformat(timespec="seconds")
-        end_iso = datetime.fromtimestamp(now, tz).replace(
-            tzinfo=None).isoformat(timespec="seconds")
-        cache_key = cache.completed_jobs_key(since_hours)
-        progress_key = cache.completed_progress_key(since_hours)
-
-        def fetch():
-            # Publish under both identities: the cache key (what this
-            # request can inspect locally) and the stable parameter key
-            # the browser polls. running_only is deliberately excluded —
-            # the accounting cache joins same-window requests regardless
-            # of the flag, so a follower's poll must find this fetch's
-            # state.
-            for key in (cache_key, progress_key):
-                progress_store[key] = {"done": 0, "total": 0,
-                                       "failed_batches": 0}
-
-            def report(state):
-                for key in (cache_key, progress_key):
-                    progress_store[key] = state
-
-            try:
-                records, coverage = deps.completed_jobs(
-                    start_iso, end_iso, report)
-                # Cache the bounds the records were actually fetched for:
-                # the TTL can outlive the request's epoch window, so a
-                # later hit must filter against THESE bounds, not bounds
-                # recomputed from a newer clock.
-                return (records, coverage, start, now)
-            finally:
-                # Failed fetches clear too: a stale in-flight entry would
-                # otherwise read as live progress on every later poll.
-                for key in (cache_key, progress_key):
-                    progress_store.pop(key, None)
-
         records, accounting_coverage, cached_start, cached_end = \
-            deps.route_cache.get_or_set(cache_key, 300, fetch)
+            completed_job_window(since_hours, start, now)
         wait_history, wait_history_coverage = completed_wait_summary(
             records, node_types, cached_start, cached_end,
             accounting_coverage)

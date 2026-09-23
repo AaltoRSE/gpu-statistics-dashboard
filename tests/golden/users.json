@@ -9,6 +9,7 @@
       "mean_util": 92.5,
       "running_jobs": 0,
       "user": "carol",
+      "user_category": "Ellis",
       "util_gpu_hours": 0.06,
       "vram_avg": null
     },
@@ -20,6 +21,7 @@
       "mean_util": 85.0,
       "running_jobs": 1,
       "user": "dave",
+      "user_category": "Non-Ellis",
       "util_gpu_hours": 0.06,
       "vram_avg": null
     },
@@ -31,6 +33,7 @@
       "mean_util": 50.0,
       "running_jobs": 1,
       "user": "alice",
+      "user_category": "Ellis",
       "util_gpu_hours": 0.03,
       "vram_avg": 11.0
     },
@@ -42,6 +45,7 @@
       "mean_util": 10.0,
       "running_jobs": 1,
       "user": "bob",
+      "user_category": "Non-Ellis",
       "util_gpu_hours": 0.0,
       "vram_avg": null
     }

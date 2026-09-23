@@ -38,6 +38,7 @@ CASES = [
      {"since_hours": 24, "partition": "gpu-h100"}),
     ("job_detail", "/api/jobs/1", {"since_hours": 24}),
     ("users", "/api/users", {"since_hours": 24}),
+    ("users_categories", "/api/users/categories", {"since_hours": 72}),
     ("partitions", "/api/partitions", {"since_hours": 24}),
     ("partitions_queue", "/api/partitions/queue", {"since_hours": 24}),
     ("partitions_running_only", "/api/partitions",
