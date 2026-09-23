@@ -13,20 +13,63 @@ export function errBox(show, msg) {
   if (show) box.textContent = msg;
 }
 
+// The panel's label chip is the .results-loading div that is a direct
+// child of the panel; card chips (addCardChips below) are clones inside
+// the panel's .card elements. Checked structurally rather than with a
+// :scope selector so the lookup stays trivial.
+function labelChip(panel) {
+  for (const child of Array.from(panel.children)) {
+    if (child.classList.contains("results-loading")) return child;
+  }
+  return null;
+}
+
+// Every chip a panel currently owns: one clone per card plus the
+// panel-level label. Text updates must reach all of them at once, or a
+// card would keep the last label while its siblings report batch progress.
+function allChips(panel) {
+  const chips = Array.from(panel.querySelectorAll(".card .results-loading"));
+  const label = labelChip(panel);
+  if (label) chips.push(label);
+  return chips;
+}
+
+// Clone the label chip into each card on the panel's first loading state:
+// a single chip at top:38% of a tall panel sat low on the page and left
+// the upper cards (the Partitions tab's bar charts, the node detail's two
+// plots) with no indicator at all. The clones keep the .results-loading
+// class, so the existing loading rule shows them; once they exist,
+// components.css's .has-card-chips rule hides the panel-level original,
+// which would otherwise duplicate the first card's chip over the panel.
+// A panel with no .card children just keeps its own chip.
+function addCardChips(panel) {
+  if (!panel) return;
+  const label = labelChip(panel);
+  if (!label) return;
+  let cloned = false;
+  panel.querySelectorAll(".card").forEach((card) => {
+    if (Array.from(card.children).some((c) => c.classList.contains("results-loading"))) return;
+    card.appendChild(label.cloneNode(true));
+    cloned = true;
+  });
+  if (cloned) panel.classList.add("has-card-chips");
+}
+
 export function setResultsLoadingMessage(resultsId, message) {
   const el = $(resultsId);
-  const chip = el && el.querySelector(".results-loading");
   // Plain text only: assembling "&hellip;" at runtime would render the
   // literal word "hellip" once escaped; a real "…" needs no entity.
-  if (chip) chip.textContent = message;
+  if (el) allChips(el).forEach((chip) => { chip.textContent = message; });
 }
 
 export function setResultsLoading(resultsId, loading, message = null) {
   const el = $(resultsId);
   // Each refresh must restate its panel's own label: a prior load's
   // batch-progress text would otherwise survive as the next load's
-  // first message.
+  // first message. (New card chips are cloned after the restatement, so
+  // they come up carrying the fresh label, not stale batch text.)
   if (loading && message !== null) setResultsLoadingMessage(resultsId, message);
+  if (loading) addCardChips(el);
   el.classList.toggle("loading", loading);
   el.setAttribute("aria-busy", loading ? "true" : "false");
 }

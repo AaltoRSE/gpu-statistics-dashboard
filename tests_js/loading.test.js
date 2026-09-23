@@ -74,3 +74,83 @@ test("re-entering loading resets stale batch-progress copy", async () => {
     global.clearInterval = realClearInterval;
   }
 });
+
+// The panels a tab loads on arrival must never sit blank while their first
+// fetch runs: each starts with the loading class so its chip shows before
+// any JS has run. The display:none detail panels are toggled by their own
+// tabs instead and deliberately carry no initial state.
+test("every data panel starts in the loading state", () => {
+  const dom = new JSDOM(html);
+  const doc = dom.window.document;
+  for (const id of [
+    "jobEfficiencyResults", "jobsResults", "partitionsResults",
+    "queueResults", "vramResults", "usersResults", "nodesResults",
+  ]) {
+    const panel = doc.getElementById(id);
+    assert.ok(panel.classList.contains("loading"), `#${id} starts loading`);
+    assert.ok(panel.querySelector(".results-loading"), `#${id} has its chip`);
+  }
+  for (const id of ["jobDetailResults", "userJobsResults", "nodeDetailResults"]) {
+    assert.ok(!doc.getElementById(id).classList.contains("loading"),
+      `#${id} stays toggle-managed by its tab`);
+  }
+  dom.window.close();
+});
+
+test("a loading panel shows a chip in every card, batch text reaches all of them", async () => {
+  global.setInterval = () => 0;
+  global.clearInterval = () => {};
+  global.document = new JSDOM(html).window.document;
+  try {
+    const panel = await import("../static/js/core/panel.js");
+    panel.setResultsLoading("partitionsResults", true,
+      "Loading GPU utilization history…");
+    const el = global.document.getElementById("partitionsResults");
+    const cards = el.querySelectorAll(".card");
+    assert.ok(cards.length > 1, "the partitions panel has several cards");
+    const chips = el.querySelectorAll(".card .results-loading");
+    assert.equal(chips.length, cards.length, "one chip per card");
+    for (const chip of chips) {
+      assert.equal(chip.textContent, "Loading GPU utilization history…");
+    }
+    // Batch progress (setResultsLoadingMessage) rewrites every chip, so no
+    // card keeps an earlier label while its siblings report batch state.
+    panel.setResultsLoadingMessage("partitionsResults",
+      "Loading wait history: batch 2 of 9…");
+    for (const chip of chips) {
+      assert.equal(chip.textContent, "Loading wait history: batch 2 of 9…");
+      assert.ok(!chip.textContent.includes("hellip"));
+    }
+    // The panel-level chip stands down once card chips exist...
+    assert.ok(el.classList.contains("has-card-chips"));
+    // ...a second loading state reuses them instead of cloning anew...
+    panel.setResultsLoading("partitionsResults", true,
+      "Loading GPU utilization history…");
+    assert.equal(el.querySelectorAll(".card .results-loading").length, cards.length);
+    // ...and clearing the state drops the loading class (CSS hides the chips).
+    panel.setResultsLoading("partitionsResults", false);
+    assert.equal(el.classList.contains("loading"), false);
+  } finally {
+    global.setInterval = realSetInterval;
+    global.clearInterval = realClearInterval;
+  }
+});
+
+test("a panel with no .card children keeps its panel-level chip", async () => {
+  global.setInterval = () => 0;
+  global.clearInterval = () => {};
+  global.document = new JSDOM(html).window.document;
+  try {
+    const panel = await import("../static/js/core/panel.js");
+    const el = global.document.getElementById("jobDetailResults");
+    el.querySelectorAll(".card").forEach((card) => card.remove());
+    panel.setResultsLoading("jobDetailResults", true, "Loading job detail history…");
+    const chip = el.querySelector(".results-loading");
+    assert.ok(chip, "the panel-level chip is the fallback");
+    assert.equal(chip.textContent, "Loading job detail history…");
+    assert.ok(!el.classList.contains("has-card-chips"));
+  } finally {
+    global.setInterval = realSetInterval;
+    global.clearInterval = realClearInterval;
+  }
+});

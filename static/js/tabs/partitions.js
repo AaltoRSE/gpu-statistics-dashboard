@@ -69,6 +69,13 @@ export function applyPartitionSelection(name) {
 
 export async function loadPartitions() {
   const token = ++partitionsToken;
+  // VRAM loads under its own panel and token: start it here, alongside the
+  // core request, instead of awaiting it after the core render — the old
+  // shape serialized it behind the slower core response and left the VRAM
+  // panel with neither chip nor error whenever the core load failed before
+  // reaching that trailing await. Its own token/origin gating (loadVram)
+  // still keeps a superseded VRAM load from clearing a newer one's chip.
+  loadVram();
   setResultsLoading("partitionsResults", true, "Loading GPU utilization history…");
   // The queue is a separate, slower endpoint (squeue + sacct): start it
   // immediately so both requests are in flight together, and never let
@@ -101,11 +108,9 @@ export async function loadPartitions() {
   applyPartitionSelection(selectedPartition);
   renderPartTable();
   loaded.partitions = true;
-  // The summary panel is unblocked as soon as its response renders; the
-  // VRAM distribution then fetches independently under its own panel.
+  // The summary panel is unblocked as soon as its response renders; VRAM
+  // and the queue keep loading under their own panels regardless.
   setResultsLoading("partitionsResults", false);
-  if (token !== partitionsToken) return;
-  await loadVram();
 }
 
 /* ---------------- Live queue (independent endpoint) ----------------
