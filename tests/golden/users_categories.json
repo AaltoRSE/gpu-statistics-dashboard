@@ -1,0 +1,42 @@
+{
+  "categories": [
+    {
+      "category": "Ellis",
+      "gpu_hours": 2.0,
+      "jobs": 1,
+      "mean_util": 50.0,
+      "wait_avg_s": 3600,
+      "wait_p50_s": 3600,
+      "wait_p90_s": 3600,
+      "wait_per_gpu_hour": 0.5,
+      "wait_samples": 1
+    },
+    {
+      "category": "Non-Ellis",
+      "gpu_hours": 3.0,
+      "jobs": 2,
+      "mean_util": 60.0,
+      "wait_avg_s": 5400,
+      "wait_p50_s": 5400,
+      "wait_p90_s": 7200,
+      "wait_per_gpu_hour": 1.0,
+      "wait_samples": 2
+    }
+  ],
+  "coverage": {
+    "complete": true,
+    "excluded": {
+      "start_outside_window": 1
+    },
+    "failed_batches": 0,
+    "records_examined": 4,
+    "valid_samples": {
+      "Ellis": 1,
+      "Non-Ellis": 2
+    }
+  },
+  "window": {
+    "end": 1788100000,
+    "start": 1787840800
+  }
+}

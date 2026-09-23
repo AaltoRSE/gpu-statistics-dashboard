@@ -362,7 +362,13 @@ def test_completed_jobs_retries_chunks_and_retains_array_tasks(monkeypatch):
     assert attempts["2026-09-11T14:40:57"] == 2
     assert coverage == {"failed_batches": 0, "successful_batches": 7,
                         "complete": True}
-    assert records == [{"jobid": "20001465_47", "name": "short",
+    assert records == [{"jobid": "20001465_47",
+                        # JobIDRaw survives for the accounting-to-Prometheus
+                        # join: task 47 of array 20001465 has JobID
+                        # "20001465_47" but the raw numeric ID
+                        # "20008872" Prometheus's slurmjobid actually
+                        # carries.
+                        "jobid_raw": "20008872", "name": "short",
                         "user": "alice", "account": "acc",
                         "partition": "gpu-h200", "state": "COMPLETED",
                         "submit": "2026-09-17T14:35:57",

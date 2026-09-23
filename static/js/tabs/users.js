@@ -5,6 +5,13 @@
  * only on Enter or a table-row click — and only then is the selected
  * user's job list fetched (server-side user-scoped query).
  *
+ * The Ellis/Non-Ellis category summary lives on its own accounting-
+ * backed endpoint with its own request token and panel: mirroring the
+ * Partitions tab's independently loaded queue, a slow or failed sacct
+ * query must never gate, suppress, or blur the Prometheus-backed user
+ * table below. Its cohort is *completed* jobs, so the "Running only"
+ * toggle deliberately does not refetch it.
+ *
  * See tabs/jobs.js for why this module and core/router.js import each
  * other. The user's job table (userJobsTable) is wired to the shared
  * table component here for the first time — its headers carry data-k
@@ -16,8 +23,8 @@
 
 import { $, isPlainClick } from "../core/dom.js";
 import {
-  fmt, fmtInt, pctBar, chipList, escapeHtml, html, raw, tsToDate, fmtSacctTime,
-  jobLink, nodeLinks, partitionLink, stateBadge,
+  fmt, fmtDuration, fmtInt, pctBar, chipList, escapeHtml, html, raw,
+  tsToDate, fmtSacctTime, jobLink, nodeLinks, partitionLink, stateBadge,
 } from "../core/format.js";
 import { setResultsLoading, showPanelError, panelOk } from "../core/panel.js";
 import { api } from "../core/api.js";
@@ -28,11 +35,16 @@ let userRows = [];
 let userSelected = null;   // finalized user name or null
 let userJobs = [];
 let usersToken = 0;
+let userCategoriesToken = 0;
 let userJobsToken = 0;
 
 export async function loadUsers() {
   const token = ++usersToken;
   setResultsLoading("usersResults", true, "Loading user history…");
+  // The categories panel loads independently (never awaited): a slow or
+  // failed accounting query shows its own retry state and must not gate,
+  // suppress, or blur the user table below.
+  loadUserCategories();
   try {
     const data = await api("/api/users?since_hours=" + $("uWindow").value);
     if (token !== usersToken) return;
@@ -52,6 +64,81 @@ export async function loadUsers() {
   }
 }
 
+/* ---------------- Ellis / Non-Ellis categories ----------------
+ * The accounting-backed summary loads under its own panel with its own
+ * token; a window change supersedes an in-flight response, and a stale
+ * window's late response is dropped. */
+async function loadUserCategories() {
+  const token = ++userCategoriesToken;
+  setResultsLoading("userCategoriesResults", true, "Loading user categories…");
+  let data;
+  try {
+    data = await api("/api/users/categories?since_hours=" + $("uWindow").value);
+  } catch (e) {
+    if (token === userCategoriesToken) {
+      setResultsLoading("userCategoriesResults", false);
+      showPanelError("userCategoriesResults", e, loadUserCategories,
+                     "the user categories");
+    }
+    return;
+  }
+  if (token !== userCategoriesToken) return; // a newer window supersedes this
+  panelOk("userCategoriesResults");
+  userCategoryTable.setRows(data.categories);
+  const cov = data.coverage || {};
+  const covHint = $("uCategoryCoverage");
+  covHint.hidden = cov.complete !== false;
+  if (!covHint.hidden) {
+    covHint.textContent =
+      "Partial accounting coverage — " + (cov.failed_batches || 0) +
+      " sacct batch" + ((cov.failed_batches || 0) === 1 ? "" : "es") +
+      " failed; category totals and waits are partial.";
+  }
+  setResultsLoading("userCategoriesResults", false);
+}
+
+function categoryRowHtml(row) {
+  return html`
+    <tr class="row">
+      <td>${row.category}</td>
+      <td class="num">${fmtInt(row.jobs)}</td>
+      <td class="num">${fmt(row.gpu_hours, 2)}</td>
+      <td class="num">${row.wait_per_gpu_hour === null
+        || row.wait_per_gpu_hour === undefined
+        ? "—" : fmt(row.wait_per_gpu_hour, 2) + " h/GPU-h"}</td>
+      <td class="num">${row.wait_p50_s === null || row.wait_p50_s === undefined
+        ? "—" : fmtDuration(row.wait_p50_s)}</td>
+      <td class="num">${row.wait_p90_s === null || row.wait_p90_s === undefined
+        ? "—" : fmtDuration(row.wait_p90_s)}</td>
+      <td class="num">${row.wait_avg_s === null || row.wait_avg_s === undefined
+        ? "—" : fmtDuration(row.wait_avg_s)}</td>
+      <td class="num">${row.mean_util === null || row.mean_util === undefined
+        ? "—" : raw(pctBar(row.mean_util))}</td>
+    </tr>`;
+}
+
+function categoryTableEmptyMessage() {
+  return { text: "No completed GPU jobs in this window.", resetLabel: null };
+}
+
+const userCategoryTable = createTable({
+  el: $("userCategoryTable"),
+  columns: [
+    { key: "category", type: "text" },
+    { key: "jobs", type: "number" },
+    { key: "gpu_hours", type: "number" },
+    { key: "wait_per_gpu_hour", type: "number" },
+    { key: "wait_p50_s", type: "number" },
+    { key: "wait_p90_s", type: "number" },
+    { key: "wait_avg_s", type: "number" },
+    { key: "mean_util", type: "number" },
+  ],
+  defaultSort: { key: "category", dir: "asc" },
+  renderRow: categoryRowHtml,
+  onRowClick: () => {},   // summary rows: no navigation
+  emptyMessage: categoryTableEmptyMessage,
+});
+
 function filteredUsers() {
   const q = $("uSearch").value.trim().toLowerCase();
   return userRows.filter((u) => {
@@ -67,6 +154,7 @@ function userRowHtml(u) {
   return html`
     <tr class="row${selected ? " selected-user" : ""}" data-user="${user}">
       <td><b>${user}</b></td>
+      <td>${u.user_category}</td>
       <td class="num">${fmtInt(u.jobs)}</td>
       <td class="num">${fmtInt(u.running_jobs)}</td>
       <td class="num">${raw(pctBar(u.mean_util))}</td>
@@ -93,8 +181,9 @@ function userTableEmptyMessage() {
 const userTable = createTable({
   el: $("userTable"),
   columns: [
-    { key: "user", type: "text" }, { key: "jobs", type: "number" },
-    { key: "running_jobs", type: "number" }, { key: "mean_util", type: "number" },
+    { key: "user", type: "text" }, { key: "user_category", type: "text" },
+    { key: "jobs", type: "number" }, { key: "running_jobs", type: "number" },
+    { key: "mean_util", type: "number" },
     { key: "util_gpu_hours", type: "number" }, { key: "vram_avg", type: "number" },
     { key: "gpu_types", type: "text" },
   ],

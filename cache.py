@@ -174,3 +174,7 @@ def node_detail_key(name, view, start):
     return ("nodedetail", name, view, start)
 
 
+def user_group_key(username, group_name):
+    """The per-(username, group) NSS classification cache identity,
+    namespaced away from the numeric-only job/sacct keys."""
+    return ("user_group", username, group_name)

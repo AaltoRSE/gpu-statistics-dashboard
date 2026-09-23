@@ -354,6 +354,15 @@ def fake_prom(monkeypatch):
     # No active controller jobs by default; tests opt in to a snapshot.
     monkeypatch.setattr(deps, "show_jobs", lambda: {})
     # Empty pending queue by default; tests opt in via deps.queue_pending.
+    # Deterministic NSS classification: alice and carol are Ellis
+    # (members of the exact "ellis" group), bob and dave are not, and a
+    # username NSS does not know at all (a stale accounting name) reads
+    # as Non-Ellis. The categories endpoint's expected totals derive
+    # from this mapping.
+    _ELLIS_USERS = {"alice", "carol"}
+    monkeypatch.setattr(
+        deps, "user_in_group",
+        lambda username, group_name="ellis": username in _ELLIS_USERS)
     monkeypatch.setattr(deps, "queue_pending", lambda: [])
 
     def _show_nodes():
@@ -372,10 +381,10 @@ def client(fake_prom):
 
 def _epoch(s):
     # sacct/squeue strings are Europe/Helsinki-naive (the cluster wall
-    # clock); interpret them the way domain._sacct_epoch does, not on
+    # clock); interpret them the way domain.sacct_epoch does, not on
     # the process TZ.
-    from domain.partitions import _sacct_epoch
-    return _sacct_epoch(s)
+    from domain.partitions import sacct_epoch
+    return sacct_epoch(s)
 
 
 def test_health(client):
@@ -442,14 +451,17 @@ def test_users_aggregates_per_user(client):
     # step=120 s; per-job util-gpu-hours = sum(values) * step / 3600 / 100:
     # job 1 (alice): (40+60)*120/3600/100 = 0.0333, mean util 50
     # job 2 (bob):   10*120/3600/100 = 0.0033, mean util 10
-    # job 3 (carol): (90+95)*120/3600/100 = 0.0617, mean util 92.5
-    # job 4 (dave):  (80+90)*120/3600/100 = 0.0567, mean util 85
     # Live set is {1, 2, 4}. The list is Prometheus-only (no sacct keys).
     r = client.get("/api/users", params={"since_hours": 24})
     assert r.status_code == 200
     data = r.json()
     assert data["count"] == 4
     by_user = {u["user"]: u for u in data["users"]}
+    # NSS classification rides every row: alice/carol are fixture Ellis
+    # members; bob/dave are not.
+    assert all(u["user_category"] == ("Ellis" if u["user"] in
+                                      {"alice", "carol"} else "Non-Ellis")
+               for u in data["users"])
     alice = by_user["alice"]
     assert alice["jobs"] == 1 and alice["running_jobs"] == 1
     assert alice["util_gpu_hours"] == pytest.approx(0.0333, abs=0.005)
@@ -496,6 +508,300 @@ def test_users_mean_util_weights_samples_not_effective_gpu_hours(client, monkeyp
 
 def test_users_window_validation(client):
     assert client.get("/api/users", params={"since_hours": 0}).status_code == 422
+
+
+def test_users_categories_rows_ordered_with_fixed_math(client):
+    # Default fixture, 72 h window: jobs 1 (alice), 2 (bob), and 4
+    # (dave) all started inside it (job 3, carol, started
+    # 2026-08-27T00:00, before even it). Alice is a fixture Ellis
+    # member; bob/dave are not. GPU h = elapsed x GPUs / 3600:
+    # alice 3600x2 = 2.0 Ellis; bob 7200x1 + dave 3600x1 = 3.0
+    # Non-Ellis. Ellis waits: alice 3600 s, 1 sample, weighted
+    # 3600 / (3600x2) = 0.5. Non-Ellis: bob 3600 s + dave 7200 s ->
+    # P50 5400 (even-count median), P90 7200; (3600+7200) wait-s over
+    # (7200+3600) wait-valid GPU-s = 1.00 h/GPU-h. Utilization joins
+    # the Prometheus _JOBS_UTIL series on the cohort's job IDs —
+    # Ellis: series 1 (sum 100, 2 samples) -> 50.0; Non-Ellis: series 2
+    # (sum 10, 1) + series 4 (sum 170, 2) -> 180/3 = 60.0.
+    data = client.get("/api/users/categories",
+                      params={"since_hours": 72}).json()
+    rows = data["categories"]
+    assert [r["category"] for r in rows] == ["Ellis", "Non-Ellis"]
+    ellis, non = rows
+    assert ellis["jobs"] == 1 and ellis["gpu_hours"] == 2.0
+    assert ellis["wait_p50_s"] == 3600 and ellis["wait_samples"] == 1
+    assert ellis["wait_p90_s"] == 3600 and ellis["wait_avg_s"] == 3600
+    assert ellis["wait_per_gpu_hour"] == 0.5
+    assert ellis["mean_util"] == 50.0
+    assert non["jobs"] == 2
+    assert non["gpu_hours"] == 3.0
+    assert non["wait_p50_s"] == 5400
+    assert non["wait_p90_s"] == 7200
+    assert non["wait_avg_s"] == 5400
+    assert non["wait_samples"] == 2
+    assert non["wait_per_gpu_hour"] == 1.0
+    assert non["mean_util"] == 60.0
+    assert data["coverage"]["complete"] is True
+    assert data["coverage"]["failed_batches"] == 0
+    # The window echoes the accounting fetch's bounds (NOW-72h..NOW).
+    assert data["window"]["end"] == NOW
+
+
+def test_users_categories_unknown_nss_user_is_non_ellis(
+        client, fake_prom, monkeypatch):
+    # A username NSS no longer resolves (stale accounting name) must
+    # classify as Non-Ellis, never crash the summary or vanish.
+    monkeypatch.setattr(
+        deps, "completed_jobs",
+        lambda start_iso, end_iso, progress=None: ([
+            {"jobid": "9", "jobid_raw": "9", "user": "gone_user",
+             "state": "COMPLETED", "start": JOB2_START,
+             "submit": "2026-08-28T23:00:00", "end": JOB2_END,
+             "elapsed_s": 3600, "gpus": 1, "gpu_type": "h200",
+             "node_list": "gpu1", "ncpus": 4},
+        ], {"failed_batches": 0, "successful_batches": 1,
+            "complete": True}))
+    rows = client.get("/api/users/categories",
+                      params={"since_hours": 72}).json()["categories"]
+    assert rows[0]["jobs"] == 0      # Ellis row: zero, still present
+    assert rows[1]["jobs"] == 1      # Non-Ellis: the unknown name
+
+
+def test_users_categories_joins_prometheus_by_raw_array_id(
+        client, fake_prom, monkeypatch):
+    # An array task's display JobID is "parent_task" notation; the
+    # Prometheus series' slurmjobid is the raw numeric JobIDRaw. The
+    # utilization join must match on jobid_raw (falling back to jobid),
+    # else array jobs count for Jobs/GPU-h but never for utilization.
+    monkeypatch.setattr(
+        deps, "completed_jobs",
+        lambda start_iso, end_iso, progress=None: ([
+            {"jobid": "20001465_47", "jobid_raw": "20008872",
+             "user": "alice", "state": "COMPLETED",
+             "start": JOB2_START, "submit": "2026-08-28T23:00:00",
+             "end": JOB2_END, "elapsed_s": 3600, "gpus": 2,
+             "gpu_type": "h200", "node_list": "gpu1", "ncpus": 4},
+        ], {"failed_batches": 0, "successful_batches": 1,
+            "complete": True}))
+    # No series matches: accounting totals stand, utilization is null.
+    ellis = client.get("/api/users/categories",
+                       params={"since_hours": 72}).json()["categories"][0]
+    assert ellis["jobs"] == 1 and ellis["gpu_hours"] == 2.0
+    assert ellis["mean_util"] is None
+    # A series keyed by the RAW id joins and is sample-weighted.
+    monkeypatch.setattr(
+        api_users, "fetch_job_window",
+        lambda since_hours: ([{"jobid": "20008872", "user": "alice",
+                               "_util_sum": 155.0, "_util_samples": 2}],
+                             1, 2, 120))
+    ellis = client.get("/api/users/categories",
+                       params={"since_hours": 72}).json()["categories"][0]
+    assert ellis["mean_util"] == 77.5
+
+
+def test_users_categories_excludes_malformed_records_by_reason(
+        client, fake_prom, monkeypatch):
+    # Malformed records are counted by exclusion reason and never
+    # allowed to alter a denominator; valid neighbors still aggregate.
+    records = [
+        {"jobid": "30", "jobid_raw": "30", "user": "alice",
+         "state": "COMPLETED", "start": JOB2_START,
+         "submit": "2026-08-28T23:00:00", "end": JOB2_END,
+         "elapsed_s": 3600, "gpus": 2, "gpu_type": "h200",
+         "node_list": "gpu1", "ncpus": 4},
+        {"jobid": "31", "jobid_raw": "31", "user": "alice",
+         "state": "COMPLETED", "start": "garbage",
+         "submit": "2026-08-28T23:00:00", "end": "", "elapsed_s": 60,
+         "gpus": 2, "gpu_type": "h200", "node_list": "gpu1", "ncpus": 4},
+        {"jobid": "31", "jobid_raw": "31", "user": "alice",
+         "state": "COMPLETED", "start": JOB2_START,
+         "submit": "2026-08-28T23:00:00", "end": "", "elapsed_s": 0,
+         "gpus": 2, "gpu_type": "h200", "node_list": "gpu1", "ncpus": 4},
+        {"jobid": "32", "jobid_raw": "32", "user": "alice",
+         "state": "COMPLETED", "start": JOB2_START,
+         "submit": "2026-08-28T23:00:00", "end": "", "elapsed_s": 60,
+         "gpus": 0, "gpu_type": "h200", "node_list": "gpu1", "ncpus": 4},
+        {"jobid": "33", "jobid_raw": "33", "user": "",
+         "state": "COMPLETED", "start": JOB2_START,
+         "submit": "2026-08-28T23:00:00", "end": "", "elapsed_s": 60,
+         "gpus": 1, "gpu_type": "h200", "node_list": "gpu1", "ncpus": 4},
+    ]
+    monkeypatch.setattr(
+        deps, "completed_jobs",
+        lambda start_iso, end_iso, progress=None: (
+            records, {"failed_batches": 0, "successful_batches": 1,
+                      "complete": True}))
+    data = client.get("/api/users/categories",
+                      params={"since_hours": 72}).json()
+    ellis = data["categories"][0]
+    assert ellis["jobs"] == 1
+    assert ellis["gpu_hours"] == 2.0
+    assert data["coverage"]["excluded"] == {
+        "timestamps": 1, "nonpositive_elapsed": 1, "nonpositive_gpus": 1,
+        "missing_user": 1,
+    }
+
+
+def test_users_categories_partial_accounting_coverage(
+        client, fake_prom, monkeypatch):
+    # Partially successful batches keep their rows and set
+    # coverage.complete=false with the failed count; a wholly failed
+    # scan (zero successful batches) is an explicit 502, never
+    # fabricated zero rows.
+    monkeypatch.setattr(
+        deps, "completed_jobs",
+        lambda start_iso, end_iso, progress=None: (
+            COMPLETED_HISTORY, {"failed_batches": 2,
+                                "successful_batches": 1,
+                                "complete": False}))
+    data = client.get("/api/users/categories",
+                      params={"since_hours": 72}).json()
+    assert data["coverage"]["complete"] is False
+    assert data["coverage"]["failed_batches"] == 2
+    assert data["categories"][1]["jobs"] == 2
+
+    def _boom(start_iso, end_iso, progress=None):
+        raise slurm.SlurmError("slurmdbd timeout")
+
+    monkeypatch.setattr(deps, "completed_jobs", _boom)
+    # The 300 s accounting TTL would serve the partial fetch above;
+    # expire it so the boom stub actually runs.
+    deps.route_cache.invalidate(cache.completed_jobs_key(72))
+    r = client.get("/api/users/categories", params={"since_hours": 72})
+    assert r.status_code == 502
+
+    def _zero(start_iso, end_iso, progress=None):
+        return ([], {"failed_batches": 3, "successful_batches": 0,
+                     "complete": False})
+
+    monkeypatch.setattr(deps, "completed_jobs", _zero)
+    deps.route_cache.invalidate(cache.completed_jobs_key(72))
+    r = client.get("/api/users/categories", params={"since_hours": 72})
+    assert r.status_code == 502
+
+
+def test_users_categories_shares_completed_jobs_key_with_queue(
+        client, fake_prom, monkeypatch):
+    # The categories endpoint and /api/partitions/queue single-flight the
+    # SAME bounded accounting scan: one same-window fetch serves both
+    # routes, the second is a TTL hit on completed_jobs_key.
+    calls = []
+
+    def fake_completed(start_iso, end_iso, progress=None):
+        calls.append(start_iso)
+        return (COMPLETED_HISTORY, {"failed_batches": 0,
+                                    "successful_batches": 1,
+                                    "complete": True})
+
+    monkeypatch.setattr(deps, "completed_jobs", fake_completed)
+    first = client.get("/api/partitions/queue",
+                       params={"since_hours": 72}).json()
+    second = client.get("/api/users/categories",
+                        params={"since_hours": 72}).json()
+    assert len(calls) == 1  # one sacct scan, two consumers
+    assert second["coverage"]["records_examined"] == \
+        first["wait_history_coverage"]["records_examined"]
+
+
+def test_users_categories_zero_cohort_renders_zero_rows(client):
+    # No records at all: both ordered rows exist with null/zero stats —
+    # a quiet category is data, not an error.
+    import domain.users as domain_users
+    rows, coverage = domain_users.completed_category_summary(
+        [], [], 1000, 2000, {"failed_batches": 0,
+                             "successful_batches": 0, "complete": True})
+    assert [r["category"] for r in rows] == ["Ellis", "Non-Ellis"]
+    assert all(r["jobs"] == 0 and r["gpu_hours"] == 0.0
+               and r["wait_p50_s"] is None and r["wait_samples"] == 0
+               and r["mean_util"] is None
+               for r in rows)
+    assert coverage["records_examined"] == 0
+
+
+def test_completed_category_summary_wait_ratio_uses_wait_valid_subset(
+        monkeypatch):
+    # The wait/GPU-hour denominator covers ONLY wait-valid jobs (the
+    # partition table's formula); a job with an unparsable submit keeps
+    # its Jobs/GPU-h contribution but neither a wait sample nor a
+    # denominator share.
+    import domain.users as domain_users
+    records = [
+        {"jobid": "a", "jobid_raw": "a", "user": "carol",
+         "state": "COMPLETED", "start": "2026-09-01T10:00:00",
+         "submit": "2026-09-01T09:00:00", "elapsed_s": 7200, "gpus": 2},
+        {"jobid": "b", "jobid_raw": "b", "user": "carol",
+         "state": "COMPLETED", "start": "2026-09-01T12:00:00",
+         "submit": "garbage", "elapsed_s": 7200, "gpus": 2},
+    ]
+    monkeypatch.setattr(deps, "user_in_group",
+                        lambda username, group_name="ellis":
+                        username == "carol")
+    rows, coverage = domain_users.completed_category_summary(
+        records, [], _epoch("2026-09-01T00:00:00"),
+        _epoch("2026-09-02T00:00:00"))
+    ellis = rows[0]
+    assert ellis["jobs"] == 2 and ellis["gpu_hours"] == 8.0
+    assert ellis["wait_samples"] == 1
+    # 3600 wait-s / (7200 x 2) GPU-s = 0.25 — job b's 14400 GPU-s NOT
+    # in the denominator (with it, the ratio would read 0.125).
+    assert ellis["wait_per_gpu_hour"] == 0.25
+    assert coverage["excluded"] == {}
+
+
+def test_users_categories_missing_ellis_group_is_503(
+        client, fake_prom, monkeypatch):
+    # A missing "ellis" group makes the required category unknowable:
+    # both user endpoints surface the explicit 503 instead of silently
+    # labeling everyone Non-Ellis.
+    def _missing(username, group_name="ellis"):
+        raise deps.HTTPException(503, "NSS group 'ellis' is unavailable")
+
+    monkeypatch.setattr(deps, "user_in_group", _missing)
+    assert client.get("/api/users/categories",
+                      params={"since_hours": 72}).status_code == 503
+    assert client.get("/api/users",
+                      params={"since_hours": 24}).status_code == 503
+
+
+def test_user_in_group_nss_boundary(monkeypatch):
+    # The NSS boundary contract: supplementary or primary GID membership;
+    # an NSS-absent user is not a member (stale accounting names read as
+    # Non-Ellis); a missing group raises the explicit 503.
+    from types import SimpleNamespace
+
+    class _FakeGrp:
+        @staticmethod
+        def getgrnam(name):
+            if name != "ellis":
+                raise KeyError(name)
+            return SimpleNamespace(gr_gid=4242)
+
+    class _FakePwd:
+        @staticmethod
+        def getpwnam(name):
+            if name == "gone":
+                raise KeyError(name)
+            return SimpleNamespace(pw_gid=100)
+
+    monkeypatch.setattr(deps, "grp", _FakeGrp, raising=False)
+    monkeypatch.setattr(deps, "pwd", _FakePwd, raising=False)
+    monkeypatch.setattr(deps.os, "getgrouplist",
+                        lambda user, gid: [gid, 4242])
+    assert deps.user_in_group("mentus1", "ellis") is True
+    monkeypatch.setattr(deps.os, "getgrouplist", lambda user, gid: [gid])
+    assert deps.user_in_group("mentus1", "ellis") is False
+    assert deps.user_in_group("gone", "ellis") is False
+    from fastapi import HTTPException
+    with pytest.raises(HTTPException) as ei:
+        deps.user_in_group("mentus1", "nosuchgroup")
+    assert ei.value.status_code == 503
+
+
+def test_users_categories_window_validation(client):
+    assert client.get("/api/users/categories",
+                      params={"since_hours": 0}).status_code == 422
+    assert client.get("/api/users/categories",
+                      params={"since_hours": 721}).status_code == 422
 
 
 def test_jobs_user_filter_is_query_scoped(client, fake_prom):
@@ -937,21 +1243,21 @@ def test_wait_statistics_percentiles():
     # P90 is nearest-rank ceil(0.9*n), and no samples reads as null
     # percentiles with a zero sample count. No bucket output remains.
     import domain.partitions as dp
-    out = dp._wait_statistics([3600, 3600])
+    out = dp.wait_statistics([3600, 3600])
     assert out["wait_p50_s"] == 3600
     assert out["wait_p90_s"] == 3600
     # even count with distinct middles: median is their mean
-    out = dp._wait_statistics([100, 200, 300, 400])
+    out = dp.wait_statistics([100, 200, 300, 400])
     assert out["wait_p50_s"] == 250
     # odd sum across an even sample count: integer-ROUNDED, not truncated
     # ([1, 2] -> 1.5 -> 2, not 1)
-    out = dp._wait_statistics([1, 2])
+    out = dp.wait_statistics([1, 2])
     assert out["wait_p50_s"] == 2
     # nearest-rank P90 of 10 samples is the 9th ordered value
-    out = dp._wait_statistics(list(range(1, 11)))
+    out = dp.wait_statistics(list(range(1, 11)))
     assert out["wait_p90_s"] == 9
     # no valid samples: null percentiles and a zero sample count
-    out = dp._wait_statistics([])
+    out = dp.wait_statistics([])
     assert out == {"wait_p50_s": None, "wait_p90_s": None,
                    "wait_avg_s": None, "wait_samples": 0,
                    "wait_per_gpu_hour_weighted": None}

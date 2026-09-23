@@ -511,6 +511,12 @@ def _enrich_sacct_row(row):
     gpus, gpu_type = parse_alloc_tres(row.get("AllocTRES"))
     return {
         "jobid": row.get("JobID") or "",
+        # The accounting row's own raw identifier (JobIDRaw), kept so the
+        # completed-job category summary can join Prometheus's numeric
+        # slurmjobid even for array tasks whose display jobid uses
+        # "parent_task" notation. Internal aggregand, like _util_sum:
+        # existing public job schemas and responses stay unchanged.
+        "jobid_raw": row.get("JobIDRaw") or "",
         "name": row.get("JobName") or "",
         "user": row.get("User") or "",
         "account": row.get("Account") or "",

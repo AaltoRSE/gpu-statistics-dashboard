@@ -306,6 +306,31 @@
         </span>
       </div>
     </div>
+    <div id="userCategoriesResults" class="results-panel">
+      <div class="results-content">
+        <div class="card">
+          <h2>User categories</h2>
+          <div class="table-scroll">
+            <table id="userCategoryTable">
+              <thead><tr>
+                <th data-k="category">Category</th>
+                <th class="num" data-k="jobs">Jobs</th>
+                <th class="num" data-k="gpu_hours">GPU h</th>
+                <th class="num" data-k="wait_per_gpu_hour">Wait H / GPU-H</th>
+                <th class="num" data-k="wait_p50_s">P50 wait</th>
+                <th class="num" data-k="wait_p90_s">P90 wait</th>
+                <th class="num" data-k="wait_avg_s">Average wait</th>
+                <th class="num" data-k="mean_util">Mean utilization</th>
+              </tr></thead>
+              <tbody></tbody>
+            </table>
+          </div>
+          <div class="hint">Completed GPU jobs started in the selected window. GPU h is allocated GPU time; Wait H / GPU-H is total queue wait divided by allocated GPU time. Mean utilization covers matching jobs observed by Prometheus.</div>
+          <div class="hint" id="uCategoryCoverage" hidden></div>
+        </div>
+      </div>
+      <div class="results-loading">Loading user categories&hellip;</div>
+    </div>
     <div id="usersResults" class="results-panel loading">
       <div class="results-content">
         <div class="card">
@@ -320,6 +345,7 @@
             <table id="userTable">
               <thead><tr>
                 <th data-k="user">User</th>
+                <th data-k="user_category">Category</th>
                 <th class="num" data-k="jobs">Jobs</th>
                 <th class="num" data-k="running_jobs">Running</th>
                 <th class="num" data-k="mean_util">Mean util %</th>
