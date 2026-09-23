@@ -59,9 +59,11 @@ OS-level preference applies when no choice has been saved.
   queries as the Jobs tab — no sacct — so it loads cheaply.
 - The **User** box filters the loaded list locally as you type — no fetch
   per keystroke. Pressing **Enter** (or clicking a table row) finalizes
-  the selection; only then is that user's job list fetched, server-side
-  scoped by a `{user="…"}` Prometheus selector, and shown in the jobs
-  card below (same enrichment and detail links as the Jobs tab). Raw text
+  the selection; only then is that user's job list fetched — the window
+  fetch is shared and unfiltered, the user filter is applied server-side
+  in process (no per-user Prometheus query, so the request reuses the same
+  cached fetch every tab reads) — and shown in the jobs card below (same
+  enrichment and detail links as the Jobs tab). Raw text
   that matches no list entry is still sent, so admins can look up users
   with no GPU activity in the window.
 - **Running only** hides users with no live job and re-fetches the
@@ -163,14 +165,54 @@ and Prometheus read queries.
 | `GET /api/jobs?since_hours=&user=&partition=&search=&limit=&running_only=&refresh=` | job table (Prometheus discovery + sacct enrichment; `running_only=true` keeps only jobs with a live GPU series; `refresh=true` bypasses the 60 s window cache) plus `efficiency_histogram` (GPU-hours by 10%-wide mean-utilization bucket, 0-100) |
 | `GET /api/partitions/queue?since_hours=&running_only=` | live pending demand plus bounded completed-job wait metrics. `wait_history_coverage` reports accounting records examined, valid samples by GPU type, exclusions, failed batches, and completeness. |
 | `GET /api/jobs/{jobid}?since_hours=` | per-GPU utilization/VRAM series + metadata (human-readable `start`/`end` preserved as-is) |
-| `GET /api/partitions?since_hours=&running_only=` | utilization per GPU group + trend + `mean_occupancy` (window-average allocated share) + allocated/total GPU capacity **+ pending-job queue** (`queue`: per-group pending counts and GPU demand keyed by group, `__total__` the unique cluster-wide figure, `queue_available=false` when the squeue snapshot failed). A group is the Slurm partition, except MIG GPUs, which form their own group per node MIG GRES profile (`h200_3g.71gb`), so a MIG node never counts against its whole-GPU pool. Capacity is summed over all nodes of the group (idle included); a node shared by several partitions counts toward each |
-| `GET /api/partitions/vram?since_hours=&running_only=&partition=` | per-job VRAM records for the distribution chart (average per-GPU peak VRAM in GB, mean utilization, allocated GPU-hours); `partition` keeps only one GPU group (a Slurm partition or a MIG GRES profile). Binning and the utilization-range filter happen client-side. Every VRAM-bearing candidate is returned (`total` = `len(jobs)`); the sacct enrichment runs in 100-ID batches (two workers, one retry, partial coverage disclosed through `enriched_frac`/`failed_batches`) instead of one oversized query |
-| `GET /api/partitions/vram/progress?since_hours=&running_only=&partition=` | transient batch progress `{done, total, failed_batches}` of the matching in-flight VRAM enrichment, or `null` when nothing is in flight (finished, cached, or failed). Keyed by the same window/flag/partition identity as the data request, so a poll can only observe that request's batches |
+| `GET /api/partitions?since_hours=&running_only=` | utilization per GPU group + trend + `mean_occupancy` (window-average allocated share) + allocated/total GPU capacity; pending-job demand lives in `/api/partitions/queue`. A group is the Slurm partition, except MIG GPUs, which form their own group per node MIG GRES profile (`h200_3g.71gb`), so a MIG node never counts against its whole-GPU pool. Capacity is summed over all nodes of the group (idle included); a node shared by several partitions counts toward each |
+| `GET /api/partitions/vram?since_hours=&running_only=&partition=` | per-job VRAM records for the distribution chart (average per-GPU peak VRAM in GB, mean utilization, allocated GPU-hours); `partition` keeps only one GPU group (a Slurm partition or a MIG GRES profile). Binning and the utilization-range filter happen client-side. Every VRAM-bearing candidate is returned (`total` = `len(jobs)`); the sacct enrichment reads the shared window-wide dump (day chunks, one retry per chunk, partial coverage disclosed through `enriched_frac`/`failed_batches`), and jobs it cannot enrich go through the per-ID row cache |
+| `GET /api/partitions/vram/progress?since_hours=&running_only=&partition=` | transient batch progress `{done, total, failed_batches}` of the window's in-flight sacct dump, or `null` when nothing is in flight (finished, cached, or failed). Keyed by the window only — the enrichment reads the same window-wide dump as the queue's wait history, so this poll and the queue's progress poll return the same batch state |
 | `GET /api/nodes?gpu_only=&refresh=` | node states (state/reason from `scontrol show node`) + live utilization/VRAM + active jobs (`refresh=true` bypasses the 30 s cache) |
 | `GET /api/nodes/{name}?view=job_start\|1\|6\|24` | per-GPU utilization/VRAM series for one node (`job_start` = since the earliest active job started) |
 
 Short in-memory TTL caches (20–300 s, at both the app and Prometheus-client
 layers) avoid re-hitting the same query while the admin drags filters around.
+
+## Data flow
+
+Every external read has exactly one owner function in `sources.py`, each with
+its own cache identity, TTL and single-flight: `TtlCache.get_or_set` makes the
+first caller of a cold key run the fetch while later callers join its
+in-flight result instead of starting their own. All external calls go through
+`deps.*`, so the test seams stay in one place. What the windowed routes
+actually pull for one window read:
+
+- **Pinned windows** — `sources.pinned_window` pins the `(start, end, step)`
+  triple for 60 s, so every tab opened within one TTL reads sources fetched
+  for identical bounds, and each response reports the window its data
+  actually covers.
+- **Per-GPU raw series** — three Prometheus range queries per window
+  (per-GPU utilization, mean VRAM %, peak VRAM GB), each cached 60 s and
+  shared by every tab. The old per-tab PromQL aggregations are gone:
+  `domain/views.py` derives the job and partition views from the raw series
+  in process, memoized per window + scontrol fingerprint, so a tab change
+  costs no upstream query at all.
+- **Live snapshot** — `sources.live_snapshot` replaces the old five instant
+  queries with two (the per-GPU utilization snapshot and the per-node VRAM
+  average), cached 30 s; live IDs, per-node utilization, active jobs and
+  allocation counts are derived from the pair. The `scontrol show nodes` /
+  `show job` snapshots are cached 30 s alongside.
+- **sacct** — one window-wide allocation dump, day-chunked on
+  Europe/Helsinki midnights (GPU partitions only, resolved from the cached
+  scontrol snapshot). Full past days are immutable and cached 1 h, shared
+  across every window size covering them; the two edge chunks at the moving
+  window bounds are always fetched fresh, and the assembled dump is cached
+  300 s. The queue's wait history and the VRAM enrichment read the same
+  dump; jobs it cannot enrich (e.g. array parents) fall back to a per-ID
+  row cache (`KeyedBatchCache`, 300 s per ID, 1 h once terminal).
+- **Fan-out** — each route gathers its independent sources concurrently
+  (`sources.gather`), so no window fetch waits on another.
+- **Progress keys** — the dump's chunked fetch publishes
+  `{done, total, failed_batches}` to `cache.progress_store` under one
+  window-scoped key (`cache.vram_progress_key`) that both progress polls
+  read; only the cache-miss leader writes it, and a finished or failed
+  fetch always clears it.
 
 ## Data semantics (important)
 
@@ -178,8 +220,10 @@ layers) avoid re-hitting the same query while the admin drags filters around.
   Job/partition "mean utilization" is the time-weighted mean of the
   observed device utilization samples.
 - `sacct -j` enriches Prometheus-discovered job metadata. Completed-job wait
-  statistics instead use one bounded `sacct --allusers -X -S … -E …` query,
-  so short completed jobs are not lost between Prometheus scrapes.
+  statistics (and the VRAM enrichment) instead use the shared window-wide
+  allocation dump — one bounded `sacct --allusers -X -S … -E …` query per
+  Helsinki-day chunk of the window (see Data flow), so short completed jobs
+  are not lost between Prometheus scrapes.
 
 ## Tests
 
