@@ -20,7 +20,7 @@ dev = [
 ]
 
 [tool.setuptools]
-py-modules = ["app", "cache", "config", "deps", "gpu_groups", "prom", "promql", "slurm"]
+py-modules = ["app", "cache", "config", "deps", "gpu_groups", "prom", "promql", "slurm", "sources"]
 packages = ["api", "domain"]
 
 [tool.ruff]
