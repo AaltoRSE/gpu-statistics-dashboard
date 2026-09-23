@@ -16,7 +16,7 @@ from domain.partitions import (
     pending_queue_status,
     wait_empty,
 )
-from domain.views import window_views
+from domain.views import job_views, partition_views
 from domain.vram import vram_job_records
 from prom import PrometheusError
 from slurm import SlurmError
@@ -79,13 +79,15 @@ def api_partitions(since_hours: float = Query(24, gt=0, le=720),
             raw, node_types, include_configured=False)
         snap = _snapshot_or_none()
     else:
-        util, vram, snap = sources.gather(
+        # The partition view needs only the raw utilization series (plan
+        # §2) — no VRAM query — and the live snapshot degrades to None
+        # when Prometheus is down.
+        raw, snap = sources.gather(
             lambda: sources.gpu_util(pinned),
-            lambda: sources.vram_pct(pinned),
             _snapshot_or_none,
         )
-        groups, trend, instances, occupancy, _ = window_views(
-            pinned, util, vram, node_types)["partition"]
+        groups, trend, instances, occupancy, _ = partition_views(
+            pinned, raw, node_types)
     allocs = snap["allocs_by_group"] if snap else {}
     gpu_capacity(groups, instances, nodes, allocs)
     for g in groups:
@@ -132,9 +134,9 @@ def api_partition_queue(since_hours: float = Query(24, gt=0, le=720),
             groups = partition_view(raw, node_types,
                                     include_configured=False)[0]
     else:
-        groups = window_views(
-            pinned, sources.gpu_util(pinned), sources.vram_pct(pinned),
-            node_types)["partition"][0]
+        # Full-window view: partition rows only — no VRAM query (plan §2).
+        groups = partition_views(
+            pinned, sources.gpu_util(pinned), node_types)[0]
     partition_types = gpu_groups.partition_gpu_types(nodes)
     queue, totals, waiting_jobs, queue_available = _queue_snapshot(
         now, partition_types)
@@ -281,17 +283,19 @@ def api_part_vram(since_hours: float = Query(24, gt=0, le=720),
             return {"window": window(pinned[0], pinned[1]),
                     "step": pinned[2], "total": 0, "enriched_frac": 0.0,
                     "failed_batches": 0, "jobs": []}
-    raw, vram_gb, vram_pct, window_records = sources.gather(
+    raw, vram_gb, window_records = sources.gather(
         lambda: sources.gpu_util(pinned),
         lambda: sources.vram_gb(pinned),
-        lambda: sources.vram_pct(pinned),
         lambda: sources.sacct_window(
             since_hours,
             progress_key=cache.vram_progress_key(since_hours)),
     )
-    views = window_views(pinned, raw, vram_pct, node_types)
+    # The VRAM chart consumes the job rows' utilization aggregates only
+    # (mean util, effective GPU-hours); the per-GPU VRAM comes from the
+    # ``vram_gb`` series above, so no VRAM % query runs here (plan §2).
+    jobs_view = job_views(pinned, raw, node_types)
     records, total, enriched_frac, failed_batches = vram_job_records(
-        views["jobs"], vram_gb, node_types, weight, window_records,
+        jobs_view, vram_gb, node_types, weight, window_records,
         live=live, partition=partition)
     return {
         "window": window(pinned[0], pinned[1]),

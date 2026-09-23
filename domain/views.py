@@ -6,6 +6,11 @@ occupancy) is one pass over the SAME per-GPU raw series
 memoized per (window, scontrol fingerprint) — replaces the four separate
 PromQL aggregations the tabs each used to run, so a tab change costs no
 upstream query at all.
+
+The two views memoize separately because their callers fetch different
+sources: the job view needs the VRAM % series (``vram_avg``) while the
+partition view needs nothing beyond the raw utilization series — a
+Partitions-tab request must not pay for, or trigger, the VRAM query.
 """
 
 import hashlib
@@ -41,15 +46,12 @@ def _node_fingerprint(node_gpu_types):
     return hashlib.sha1(payload.encode("utf-8")).hexdigest()
 
 
-def window_views(win, raw, vram_series, node_gpu_types):
-    """Memoized per-window views: jobs + partition + bounds, one pass.
+def partition_views(win, raw, node_gpu_types):
+    """Memoized partition-side view of one window (plan §2).
 
     ``win`` is the pinned ``(start, end, step)`` triple; ``raw`` the
-    per-GPU utilization series and ``vram_series`` the VRAM % series
-    (the window's second source, feeding the job view's ``vram_avg``).
-    Returns ``{"jobs", "partition", "start", "end", "step", "raw"}``
-    where ``partition`` is the ``(rows, trend, instances, occupancy,
-    job_groups)`` tuple from domain.partitions.partition_view
+    per-GPU utilization series. Returns ``partition_view``'s
+    ``(rows, trend, instances, occupancy, job_groups)`` tuple
     (configured types included — these are full-window views). The memo
     is keyed by window + node fingerprint, so concurrent tabs share one
     computation and a re-pinned window or changed scontrol index
@@ -57,14 +59,23 @@ def window_views(win, raw, vram_series, node_gpu_types):
     """
     start, end, step = win
     fingerprint = _node_fingerprint(node_gpu_types)
+    return deps.route_cache.get_or_set(
+        cache.partition_views_key(start, end, step, fingerprint), 60,
+        lambda: partition_view(raw, node_gpu_types))
 
-    def compute():
-        return {
-            "jobs": job_view(raw, step, vram_series),
-            "partition": partition_view(raw, node_gpu_types),
-        }
 
-    views = deps.route_cache.get_or_set(
-        cache.window_views_key(start, end, step, fingerprint), 60, compute)
-    return {"jobs": views["jobs"], "partition": views["partition"],
-            "start": start, "end": end, "step": step, "raw": raw}
+def job_views(win, raw, node_gpu_types, vram_series=()):
+    """Memoized job-side view of one window (plan §2).
+
+    Same memo discipline as ``partition_views``; returns the job dicts
+    ``job_view`` builds. ``vram_series`` (the VRAM % series) fills
+    ``vram_avg`` — callers that don't fetch it omit it, and the memo key
+    keeps the with-VRAM and without-VRAM computations distinct so one
+    caller's rows never leak into the other's.
+    """
+    start, end, step = win
+    fingerprint = _node_fingerprint(node_gpu_types)
+    return deps.route_cache.get_or_set(
+        cache.job_views_key(start, end, step, fingerprint,
+                            bool(vram_series)), 60,
+        lambda: job_view(raw, step, vram_series))

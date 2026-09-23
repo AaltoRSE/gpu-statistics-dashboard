@@ -265,16 +265,26 @@ def snapshot_key():
     return ("snapshot",)
 
 
-def window_views_key(start, end, step, fingerprint):
-    """Identity of one memoized window-views computation (plan §2).
+def partition_views_key(start, end, step, fingerprint):
+    """Identity of one memoized partition-view computation (plan §2).
 
-    The per-window aggregation passes over the per-GPU raw series (job
-    aggregates, partition rows, trend, occupancy) run once per window and
-    per scontrol fingerprint — the fingerprint, not the node dict's
-    identity, because every scontrol TTL builds a fresh node list whose
-    group resolutions must not be reused across snapshots.
+    The per-window aggregation pass over the per-GPU raw series runs
+    once per window and per scontrol fingerprint — the fingerprint, not
+    the node dict's identity, because every scontrol TTL builds a fresh
+    node list whose group resolutions must not be reused across
+    snapshots.
     """
-    return ("win_views", start, end, step, fingerprint)
+    return ("part_views", start, end, step, fingerprint)
+
+
+def job_views_key(start, end, step, fingerprint, with_vram):
+    """Identity of one memoized job-view computation (plan §2).
+
+    ``with_vram`` separates the with-VRAM and without-VRAM job rows:
+    callers that skip the VRAM % source must not read rows whose
+    ``vram_avg`` another caller's fetch filled.
+    """
+    return ("job_views", start, end, step, fingerprint, with_vram)
 
 
 def sacct_window_key(since_hours):

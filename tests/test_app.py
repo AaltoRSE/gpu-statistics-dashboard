@@ -428,11 +428,11 @@ def test_users_mean_util_weights_samples_not_effective_gpu_hours(client, monkeyp
          "gpu_hours_eff": 0.9, "_util_sum": 90.0, "_util_samples": 1,
          "gpu_type": "h100", "vram_avg": None},
     ]
-    # api_users computes its rows from the shared window view; the view
+    # api_users computes its rows from the shared job view; the view
     # (already imported into the route module) is patched here so the
     # synthetic equal-duration jobs drive the weighted mean.
-    monkeypatch.setattr(api_users, "window_views",
-                        lambda win, raw, vram, types: {"jobs": jobs})
+    monkeypatch.setattr(api_users, "job_views",
+                        lambda win, raw, types, vram=(): jobs)
     data = client.get("/api/users", params={"since_hours": 24}).json()
     assert data["users"][0]["mean_util"] == 50.0
 

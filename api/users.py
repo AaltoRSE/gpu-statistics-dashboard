@@ -8,7 +8,7 @@ import gpu_groups
 import sources
 from api.schemas import UsersResponse
 from domain.common import window
-from domain.views import window_views
+from domain.views import job_views
 
 router = APIRouter()
 
@@ -36,11 +36,11 @@ def api_users(since_hours: float = Query(24, gt=0, le=720)):
             cache.scontrol_nodes_key(), 30, deps.show_nodes),
     )
     node_types = gpu_groups.build_node_index(nodes)
-    views = window_views(pinned, util, vram, node_types)
+    jobs_view = job_views(pinned, util, node_types, vram)
     live = live_snap["live_ids"]
 
     agg = {}
-    for j in views["jobs"]:
+    for j in jobs_view:
         u = j["user"]
         if not u:
             continue

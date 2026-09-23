@@ -29,7 +29,7 @@ def vram_job_records(jobs, raw_vram, node_gpu_types, weight,
     Every input is a source the route already fetched (plan §1/§2) — this
     function fetches nothing except per-ID row-cache fallbacks for jobs
     the shared dump cannot enrich: ``jobs`` is the window's job view
-    (domain.views.window_views), ``raw_vram`` the unscoped per-GPU
+    (domain.views.job_views), ``raw_vram`` the unscoped per-GPU
     peak-VRAM-GB series (sources.vram_gb), ``window_records`` the shared
     sacct window dump ``(records, coverage, start, end)`` from
     sources.sacct_window, and ``live`` the running-only filter (the live
@@ -59,7 +59,7 @@ def vram_job_records(jobs, raw_vram, node_gpu_types, weight,
         if jid and vals:
             peaks[jid].append(max(vals))
 
-    # ``jobs`` is memoized shared state (window_views) — never mutated;
+    # ``jobs`` is memoized shared state (job_views) — never mutated;
     # the group rides on the record instead.
     records = []
     nodes_by_job = {}

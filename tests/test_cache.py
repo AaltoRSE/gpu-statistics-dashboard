@@ -296,10 +296,16 @@ def test_new_key_builders_and_progress_store():
     assert cache.window_source_key("vram_gb", 1, 2, 120) != \
         cache.window_source_key("gpu_util", 1, 2, 120)
     assert cache.snapshot_key() == ("snapshot",)
-    assert cache.window_views_key(1, 2, 120, "fp") == \
-        ("win_views", 1, 2, 120, "fp")
-    assert cache.window_views_key(1, 2, 120, "fp") != \
-        cache.window_views_key(1, 2, 120, "other")
+    assert cache.partition_views_key(1, 2, 120, "fp") == \
+        ("part_views", 1, 2, 120, "fp")
+    assert cache.partition_views_key(1, 2, 120, "fp") != \
+        cache.partition_views_key(1, 2, 120, "other")
+    assert cache.job_views_key(1, 2, 120, "fp", True) == \
+        ("job_views", 1, 2, 120, "fp", True)
+    # With-VRAM and without-VRAM job rows memoize apart: a caller that
+    # skipped the VRAM source must not read the other's vram_avg.
+    assert cache.job_views_key(1, 2, 120, "fp", True) != \
+        cache.job_views_key(1, 2, 120, "fp", False)
     assert cache.sacct_window_key(24) == ("sacct_window", 24)
     assert cache.day_chunk_key("2026-09-23T00:00:00") == \
         ("sacct_day_chunk", "2026-09-23T00:00:00")

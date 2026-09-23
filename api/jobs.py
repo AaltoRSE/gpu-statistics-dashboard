@@ -16,7 +16,7 @@ from domain.metadata import (
     resolve_sacct_metadata,
     resolve_scontrol_metadata,
 )
-from domain.views import window_views
+from domain.views import job_views
 from prom import PrometheusError
 from promql import label_eq, selector
 
@@ -65,12 +65,18 @@ def api_jobs(
                     "efficiency_histogram": efficiency_histogram([])}
     pinned, node_types = _pinned(since_hours)
     start, now, step = pinned
-    views = window_views(pinned, sources.gpu_util(pinned),
-                         sources.vram_pct(pinned), node_types)
+    # Both window sources fetch concurrently (plan §2): the Jobs tab's
+    # two range queries share one pinned window with every other tab,
+    # and neither may wait on the other.
+    util, vram = sources.gather(
+        lambda: sources.gpu_util(pinned),
+        lambda: sources.vram_pct(pinned),
+    )
+    jobs_view = job_views(pinned, util, node_types, vram)
     # Copies: the view's job dicts are memoized shared state that
     # /api/users and the VRAM route read raw — enrichment (and the
     # gpu_group tag) below must never write back into them.
-    jobs = [dict(j) for j in views["jobs"]]
+    jobs = [dict(j) for j in jobs_view]
     for j in jobs:
         j["gpu_group"] = gpu_groups.job_gpu_group(j, node_types)
     if live is not None:
