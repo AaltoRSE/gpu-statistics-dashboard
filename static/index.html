@@ -379,7 +379,7 @@
         </label>
         <label>Level
           <select id="gLevel">
-            <option value="unit" selected>Unit (research group)</option>
+            <option value="group" selected>Professor group</option>
             <option value="department">Department</option>
           </select>
         </label>
@@ -411,6 +411,7 @@
             <table id="groupTable">
               <thead><tr>
                 <th data-k="group_name">Group</th>
+                <th data-k="leader_name">Leader</th>
                 <th data-k="school_code">School</th>
                 <th class="num" data-k="users">Users</th>
                 <th class="num" data-k="jobs">Jobs</th>
@@ -424,7 +425,7 @@
               <tbody></tbody>
             </table>
           </div>
-          <div class="hint">Mean utilization is weighted by every member job&rsquo;s GPU samples, not averaged per user. GPU-hours = utilization-weighted (the Users tab&rsquo;s figure, summed over members); GPU-hours held = the window GPU time the members&rsquo; GPUs were reserved. The Unaffiliated and Unresolved rows are always shown &mdash; an empty row means nobody is in it, not that nobody exists. Click a row for the group&rsquo;s members. Click a column header to sort.</div>
+          <div class="hint">Rows are professors&rsquo; research groups &mdash; the Aalto AD unit each professor leads, its members read from that unit&rsquo;s NSS groups (<button type="button" class="glossary-btn" data-glossary="prof-groups" title="What is this?">what counts as a member?</button>). Mean utilization is weighted by every member job&rsquo;s GPU samples, not averaged per user. GPU-hours = utilization-weighted (the Users tab&rsquo;s figure, summed over members); GPU-hours held = the window GPU time the members&rsquo; GPUs were reserved. The Unaffiliated and Unresolved rows are always shown &mdash; an empty row means nobody is in it, not that nobody exists. Click a row for the group&rsquo;s members; click the leader&rsquo;s name to open them in the Users tab. Click a column header to sort.</div>
         </div>
       </div>
       <div class="results-loading">Loading group efficiency&hellip;</div>
@@ -437,13 +438,14 @@
             <table id="memberTable">
               <thead><tr>
                 <th data-k="user">User</th>
-                <th data-k="unit_code">Unit</th>
+                <th data-k="group">Group</th>
+                <th data-k="membership">Membership</th>
                 <th class="num" data-k="jobs">Jobs</th>
                 <th class="num" data-k="running_jobs">Running</th>
                 <th class="num" data-k="mean_util">Mean util %</th>
                 <th class="num" data-k="util_gpu_hours">GPU-hours</th>
                 <th class="num" data-k="vram_avg">VRAM %</th>
-                <th data-k="extra_units">Other units</th>
+                <th data-k="extra_groups">Other groups</th>
               </tr></thead>
               <tbody></tbody>
             </table>
@@ -536,6 +538,17 @@
     <dd>Utilization-weighted GPU-hours: mean utilization &times; GPU time.
       Ranks users by how much they actually used, not how much they were
       allocated. Not the same figure as a job's effective GPU-hours below.</dd>
+    <dt id="glossary-prof-groups">Professor group (Groups tab)</dt>
+    <dd>A row is one professor&rsquo;s research group: the Aalto AD unit
+      the professor leads, with members read from that unit&rsquo;s NSS
+      groups &mdash; the laitos group (people paid there), the staff
+      group and the everyone group &mdash; plus the professor
+      themself. Membership shows how a member belongs: leader, paid,
+      staff or everyone. A user in no professor group but with a
+      department (osasto) rolls up under &ldquo;&lt;Department&gt;, no
+      professor group&rdquo;, and the department level collapses
+      everyone into their department &mdash; a group member under their
+      professor&rsquo;s, everyone else under their own.</dd>
     <dt id="glossary-groups-mean-util">Mean utilization (Groups table)</dt>
     <dd>The same time-weighted mean as everywhere else, weighted across
       ALL of the group's member jobs&rsquo; GPU samples &mdash; a group of a

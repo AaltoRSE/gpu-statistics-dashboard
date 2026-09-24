@@ -1,13 +1,15 @@
-/* Groups tab: GPU efficiency per research group / department / school.
+/* Groups tab: GPU efficiency per professor group / department / school.
  *
  * One fetch per window+level+running change; the school filter and the
  * search box filter that response locally (no fetch) and keep the URL in
- * sync (/groups?school=&level=&running=). The Unaffiliated and Unresolved
- * rows always render — an empty row means nobody is in it, never that
- * nobody exists. The coverage banner discloses how much of the window's
- * job owners the directory could classify; a school-colored bar chart
- * shows the top 30 groups by mean utilization, and clicking a row opens
- * the member drill-down whose users link to the Users tab.
+ * sync (/groups?school=&level=&running=). A row is one professor's
+ * research group (the AD unit their prof_groups.conf row names); the
+ * Unaffiliated and Unresolved rows always render — an empty row means
+ * nobody is in it, never that nobody exists. The coverage banner
+ * discloses how much of the window's job owners the directory could
+ * classify; a school-colored bar chart shows the top 30 groups by mean
+ * utilization, and clicking a row opens the member drill-down whose
+ * users link to the Users tab.
  *
  * See tabs/users.js for why this module and core/router.js import each
  * other. */
@@ -65,13 +67,16 @@ export async function loadGroups() {
 export function prefillFromUrl(params) {
   if (params.get("school")) pendingSchool = params.get("school");
   if (params.get("level") === "department") $("gLevel").value = "department";
+  // pre-v2 deep links said level=unit; the professor-group level is the
+  // same idea under its new name
+  if (params.get("level") === "unit") $("gLevel").value = "group";
   if (params.get("running") === "true") $("gRunning").checked = true;
 }
 
 function syncUrl() {
   const params = new URLSearchParams();
   if ($("gSchool").value) params.set("school", $("gSchool").value);
-  if ($("gLevel").value !== "unit") params.set("level", $("gLevel").value);
+  if ($("gLevel").value !== "group") params.set("level", $("gLevel").value);
   if ($("gRunning").checked) params.set("running", "true");
   const q = params.toString();
   setUrl("/groups" + (q ? "?" + q : ""));
@@ -98,15 +103,25 @@ function filteredGroups() {
   return groupRows.filter((g) => {
     if (school && g.school_code !== school) return false;
     if (!q) return true;
-    return [g.group_name, g.dept_name, g.dept_code]
+    return [g.group_name, g.leader_name, g.dept_name, g.dept_code]
       .some((v) => v && v.toLowerCase().includes(q));
   });
+}
+
+// Like userLink but labeled with the leader's display name (the anchor
+// carries the same userlink class, so row clicks route to the Users tab).
+function leaderCell(g) {
+  if (!g.leader) return "—";
+  return raw(html`<a class="entity-link userlink"
+    href="/user/${encodeURIComponent(g.leader)}" data-user="${g.leader}"
+    title="open ${g.leader} in the Users tab">${g.leader_name || g.leader}</a>`);
 }
 
 function groupRowHtml(g) {
   return html`
     <tr class="row" data-gid="${g.group_id}">
       <td><b>${g.group_name}</b></td>
+      <td>${leaderCell(g)}</td>
       <td>${g.school_code || "—"}</td>
       <td class="num">${fmtInt(g.users)}</td>
       <td class="num">${fmtInt(g.jobs)}</td>
@@ -138,7 +153,8 @@ function groupTableEmptyMessage() {
 const groupTable = createTable({
   el: $("groupTable"),
   columns: [
-    { key: "group_name", type: "text" }, { key: "school_code", type: "text" },
+    { key: "group_name", type: "text" }, { key: "leader_name", type: "text" },
+    { key: "school_code", type: "text" },
     { key: "users", type: "number" }, { key: "jobs", type: "number" },
     { key: "running_jobs", type: "number" },
     { key: "mean_util", type: "number" },
@@ -160,15 +176,18 @@ function renderGroupTable() {
 
 // ---- coverage banner -------------------------------------------------
 // Classification completeness, always shown: the mapping quality is part
-// of reading the table. Lookup failures and unmapped codes tint it — a
-// failed user's activity is in no row at all, and an unmapped code is a
-// one-line org_units.conf edit away from a proper name.
+// of reading the table. Lookup failures tint it — a failed user's
+// activity is in no row at all. (Department-only users are not a defect:
+// they are the honest bucket for people whose department has no
+// professor group in prof_groups.conf.)
 function renderCoverage(coverage) {
   const el = $("groupsCoverage");
   const bits = [
-    coverage.affiliated + " of " + coverage.users +
-    " job owners mapped to a group or department",
+    coverage.in_prof_group + " of " + coverage.users +
+    " job owners in a professor group",
   ];
+  if (coverage.dept_only)
+    bits.push(coverage.dept_only + " department-only");
   if (coverage.unaffiliated)
     bits.push(coverage.unaffiliated + " unaffiliated");
   if (coverage.unresolved)
@@ -176,12 +195,8 @@ function renderCoverage(coverage) {
   if (coverage.failed)
     bits.push(coverage.failed + " lookup failures — their activity is " +
       "missing from every figure below");
-  if (coverage.unmapped_codes.length)
-    bits.push("unmapped unit code(s) " + coverage.unmapped_codes.join(", ") +
-      " — add a name to org_units.conf to label them");
   el.textContent = "Group coverage: " + bits.join(" · ");
-  el.classList.toggle("warn",
-    !!(coverage.failed || coverage.unmapped_codes.length));
+  el.classList.toggle("warn", !!coverage.failed);
   el.hidden = false;
 }
 
@@ -233,6 +248,15 @@ export function renderGroupsBar() {
 
 // ---- the members drill-down ------------------------------------------
 function groupRowClick(e, tr) {
+  // the leader's name is a link out to the Users tab, not a drill-down
+  const link = e.target.closest("a.userlink");
+  if (link) {
+    e.stopPropagation();
+    if (!isPlainClick(e)) return;
+    e.preventDefault();
+    openUser(link.dataset.user);
+    return;
+  }
   loadGroupMembers(tr.dataset.gid);
 }
 
@@ -267,13 +291,14 @@ function memberRowHtml(m) {
   return html`
     <tr class="row" data-user="${m.user}">
       <td>${raw(userLink(m.user))}</td>
-      <td>${m.unit_code || "—"}</td>
+      <td>${m.group || "—"}</td>
+      <td>${m.membership || "—"}</td>
       <td class="num">${fmtInt(m.jobs)}</td>
       <td class="num">${fmtInt(m.running_jobs)}</td>
       <td class="num">${raw(pctBar(m.mean_util))}</td>
       <td class="num">${fmt(m.util_gpu_hours, 2)}</td>
       <td class="num">${fmt(m.vram_avg)}</td>
-      <td class="small chip-cell">${raw(chipList((m.extra_units || [])
+      <td class="small chip-cell">${raw(chipList((m.extra_groups || [])
         .map(escapeHtml)))}</td>
     </tr>`;
 }
@@ -300,12 +325,13 @@ function membersEmptyMessage() {
 const memberTable = createTable({
   el: $("memberTable"),
   columns: [
-    { key: "user", type: "text" }, { key: "unit_code", type: "text" },
+    { key: "user", type: "text" }, { key: "group", type: "text" },
+    { key: "membership", type: "text" },
     { key: "jobs", type: "number" }, { key: "running_jobs", type: "number" },
     { key: "mean_util", type: "number" },
     { key: "util_gpu_hours", type: "number" },
     { key: "vram_avg", type: "number" },
-    { key: "extra_units", type: "text" },
+    { key: "extra_groups", type: "text" },
   ],
   defaultSort: { key: "util_gpu_hours", dir: "desc" },
   renderRow: memberRowHtml,
