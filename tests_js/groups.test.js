@@ -45,6 +45,8 @@ const BODY1 = {
     group("kyrkiv1", "Kyrki Ville",
           { leader: "kyrkiv1", leader_name: "Kyrki Ville",
             unit_codes: ["T40106"], school_code: "ELEC", mean_util: 50 }),
+    group("unit:T21204", "Mechatronics (shared unit)",
+          { unit_codes: ["T21204"], school_code: "ENG", mean_util: 40 }),
   ],
 };
 
@@ -265,6 +267,29 @@ test("clicking a group row fetches its members with kind and extra groups", asyn
   const link = tbody.querySelector("a.userlink");
   assert.ok(link, "members link to the Users tab");
   assert.equal(link.getAttribute("href"), "/user/hannuse2");
+});
+
+test("a shared-unit row renders leaderless with its unit code", async (t) => {
+  const ctx = await boot({}, 11);
+  t.after(() => ctx.dom.window.close());
+  const doc = ctx.dom.window.document;
+  await ctx.mod.loadGroups();
+  const tr = doc.querySelector("#groupTable tr.row[data-gid='unit:T21204']");
+  assert.ok(tr, "the shared-unit row rendered");
+  assert.match(tr.textContent, /Mechatronics \(shared unit\)/);
+  // leader=null: the leader cell is the em-dash placeholder, never a
+  // link — a shared unit has no single leader to open in the Users tab
+  const leaderTd = tr.querySelectorAll("td")[1];
+  assert.equal(leaderTd.textContent, "—");
+  assert.equal(leaderTd.querySelector("a"), null);
+  // clicking the row still drills down through the unit:<CODE> id
+  const fetchesBefore = ctx.urls.length;
+  tr.dispatchEvent(new ctx.dom.window.MouseEvent("click", { bubbles: true }));
+  await new Promise((r) => setTimeout(r, 0));
+  assert.ok(
+    ctx.urls.slice(fetchesBefore).some(
+      (u) => u.includes("/api/groups/unit%3AT21204/users")),
+    "row click fetched the drill-down by the unit id");
 });
 
 test("the leader cell links to the Users tab and clicking it does not drill down", async (t) => {

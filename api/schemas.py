@@ -210,17 +210,21 @@ class GroupCoverage(BaseModel):
 
 class GroupRow(BaseModel):
     group_id: str = Field(description="Roll-up row identity: the group "
-          "leader's username, dept:TNNN ('<Department>, no professor "
-          "group' at group level), or the always-present unaffiliated / "
-          "unresolved rows. Use it for the drill-down path.")
+          "leader's username, unit:<CODE> for a shared unit (several "
+          "professors share the unit, so the row has no single leader), "
+          "dept:TNNN ('<Department>, no professor group' at group "
+          "level), or the always-present unaffiliated / unresolved "
+          "rows. Use it for the drill-down path.")
     group_name: str
     leader: Optional[str] = Field(
         default=None,
         description="The professor group's leader username; null for "
-        "department and special rows.")
+        "shared-unit, department and special rows.")
     leader_name: Optional[str] = Field(
         default=None,
-        description="The leader's display name from prof_groups.conf.")
+        description="The leader's display name from prof_groups.conf; "
+        "null for shared-unit, department and special rows (the unit "
+        "name itself is the row's group_name).")
     unit_codes: List[str] = Field(
         default_factory=list,
         description="The AD unit codes the group reads its NSS member "
@@ -281,8 +285,10 @@ class GroupMember(BaseModel):
         "unresolved users.")
     membership: Optional[str] = Field(
         default=None,
-        description="How the user belongs to their primary group: leader, "
-        "paid (the unit's laitos group), staff or everyone.")
+        description="How the user belongs to their primary group: "
+        "leader, paid (the unit's laitos group), external (the unit's "
+        "auto-ext group — a visitor from outside the university), staff "
+        "or everyone.")
     dept_code: Optional[str] = None
     school_code: Optional[str] = None
     own_dept: Optional[str] = Field(

@@ -88,6 +88,25 @@ def test_load_prof_groups_missing_sections_are_empty(conf_file):
     m = org.load_prof_groups(path)
     assert m["departments"] == {}
     assert m["groups"] == {}
+    assert m["units"] == {}
+
+
+def test_load_prof_groups_parses_units_section(conf_file):
+    path = conf_file(
+        "[units]\n"
+        "T21204 = Mechatronics | T212\n"
+        "t21403 = Performance in BDC | \n"   # empty dept: None
+        "\n"
+        "[groups]\n"
+        "kyrkiv1 = Kyrki Ville | T410 | T40106\n")
+    m = org.load_prof_groups(path)
+    assert m["units"]["T21204"] == {"name": "Mechatronics", "dept": "T212"}
+    assert m["units"]["T21403"] == {"name": "Performance in BDC",
+                                    "dept": None}
+    # a lower-case code still resolves upper-cased like every other key
+    m2 = org.load_prof_groups(conf_file("[units]\nt21205 = X | t212\n",
+                                        name="units_only.conf"))
+    assert "T21205" in m2["units"]
 
 
 def test_load_prof_groups_reloads_when_mtime_changes(conf_file):
@@ -150,15 +169,18 @@ def test_dept_name_and_leader_name_fall_back():
 def conf():
     """The synthetic world: Kyrki (T40106, dept T410), Bäckström
     (T40571, dept T412), Alku (T40521, dept T412 — Bäckström sits in
-    Alku's staff list, not their own unit's) and Kaski Sami (T31301,
-    dept T313)."""
+    Alku's staff list, not their own unit's), Kaski Sami (T31301,
+    dept T313) and one shared unit T21204 (Mechatronics, dept T212)."""
     return {
         "schools": {
+            "T2": {"short": "ENG", "full": "School of Engineering"},
             "T3": {"short": "SCI", "full": "School of Science"},
             "T4": {"short": "ELEC",
                    "full": "School of Electrical Engineering"},
         },
         "departments": {
+            "T212": {"name": "Department of Mechanical Engineering",
+                     "school": "T2"},
             "T410": {"name": "Department of Electrical Engineering and "
                              "Automation", "school": "T4"},
             "T412": {"name": "Department of Information and Communications "
@@ -176,27 +198,36 @@ def conf():
             "skaski1": {"name": "Kaski Sami", "dept": "T313",
                         "unit_codes": ["T31301"]},
         },
+        "units": {"T21204": {"name": "Mechatronics", "dept": "T212"}},
     }
 
 
 # The NSS member lists of the configured units' groups. 'pat' is in two
 # units' laitos groups (the strength-tie case); backstt1's own unit's
 # lists deliberately omit them (the leader seed must carry them).
+# auto-ext- carries the unit's external visitors; duoext sits in BOTH
+# the ext and staff lists (external beats staff), mixpaid in a laitos
+# and another unit's ext list (paid beats external).
 MEMBERS = {
-    "laitos-t40106": ["alice", "kyrkiv1", "pat"],
+    "laitos-t40106": ["alice", "bothpaid", "kyrkiv1", "mixpaid", "pat",
+                     "unitos"],
     "t40106-staff": ["kyrkiv1"],
     "t40106-everyone": ["hannuse2"],
+    "auto-ext-t40106": ["extvis"],
     "laitos-t40571": ["linc15", "pat"],
-    "t40571-staff": ["backstt1"],
+    "t40571-staff": ["backstt1", "duoext"],
     "t40571-everyone": ["linc15"],
+    "auto-ext-t40571": ["duoext", "mixpaid"],
     "laitos-t40521": [],
     "t40521-staff": ["backstt1"],
     "t40521-everyone": [],
     "laitos-t31301": ["pete"],
     "t31301-staff": None,          # a unit with no staff group at all
+    "laitos-t21204": ["bothpaid", "unitmike", "unitos"],
     "laitos-t99999": None,         # a group the directory does not know
     "t99999-staff": None,
     "t99999-everyone": None,
+    "auto-ext-t99999": None,
 }
 
 USER_GROUPS_WORLD = {
@@ -207,6 +238,14 @@ USER_GROUPS_WORLD = {
     "carol": ["osasto-t313"],
     "dave": ["triton-users"],
     "ghost": None,                 # unknown to the directory
+    # external visitors carry no osasto group — the unit-code fallback
+    # of own_dept_of is all the department they have
+    "extvis": ["auto-ext-t40106"],
+    "duoext": ["auto-ext-t40571", "t40571-staff"],
+    "mixpaid": ["laitos-t40106", "auto-ext-t40571"],
+    "unitmike": ["laitos-t21204", "osasto-t212"],
+    "bothpaid": ["laitos-t40106", "laitos-t21204", "osasto-t313"],
+    "unitos": ["laitos-t40106", "laitos-t21204", "osasto-t212"],
 }
 
 
@@ -238,19 +277,47 @@ def index(nss):
 
 
 def test_index_strengths_and_leader_seed(index):
-    # alice: paid (laitos, 3); hannuse2: everyone (1); the leader is
+    # alice: paid (laitos, 4); hannuse2: everyone (1); the leader is
     # seeded into their own group even though no member list has them.
-    assert index["alice"] == {"kyrkiv1": 3}
+    assert index["alice"] == {"kyrkiv1": 4}
     assert index["hannuse2"] == {"kyrkiv1": 1}
-    assert index["backstt1"]["backstt1"] == 4
+    assert index["backstt1"]["backstt1"] == 5
     # Bäckström sits in Alku's staff list — a second, weaker membership.
     assert index["backstt1"]["alkut1"] == 2
+
+
+def test_index_external_kind_and_ordering(nss, index):
+    # extvis is ONLY in the unit's auto-ext list: external (3), and no
+    # osasto group exists to fall back on
+    assert index["extvis"] == {"kyrkiv1": 3}
+    r = org.classify("extvis", USER_GROUPS_WORLD["extvis"], index, conf())
+    assert r == {
+        "group": "kyrkiv1", "membership": "external", "dept_code": "T410",
+        "school_code": "ELEC", "own_dept": "T401",
+        "extra_groups": [], "status": "group"}
+    # external (3) beats staff (2) in the same unit
+    assert index["duoext"] == {"backstt1": 3}
+    r = org.classify("duoext", USER_GROUPS_WORLD["duoext"], index, conf())
+    assert r["group"] == "backstt1" and r["membership"] == "external"
+    assert r["extra_groups"] == []
+    # paid (4) beats another unit's external (3)
+    assert index["mixpaid"] == {"kyrkiv1": 4, "backstt1": 3}
+    r = org.classify("mixpaid", USER_GROUPS_WORLD["mixpaid"], index, conf())
+    assert r["group"] == "kyrkiv1" and r["membership"] == "paid"
+    assert r["extra_groups"] == ["backstt1"]
 
 
 def test_index_strongest_strength_wins_within_one_group(index):
     # linc15 is in BOTH the unit's laitos and everyone lists: one group,
     # the strongest strength kept.
-    assert index["linc15"] == {"backstt1": 3}
+    assert index["linc15"] == {"backstt1": 4}
+
+
+def test_index_shared_unit_rows_have_no_leader_seed(index):
+    # a [units] row's key is unit:<CODE>; members land there with the
+    # list kinds, and nothing is seeded (no leader exists)
+    assert index["unitmike"] == {"unit:T21204": 4}
+    assert "unit:T21204" not in index.get("kyrkiv1", {})
 
 
 def test_index_reads_each_member_list_once_per_day(nss, index):
@@ -264,7 +331,7 @@ def test_index_reads_each_member_list_once_per_day(nss, index):
 def test_index_unknown_groups_are_tolerated(index):
     # skaski1's T99999 does not exist in NSS: no members, no error, and
     # the leader is still seeded
-    assert index["skaski1"] == {"skaski1": 4}
+    assert index["skaski1"] == {"skaski1": 5}
 
 
 def test_index_cached_per_conf_version(nss):
@@ -327,10 +394,40 @@ def test_classify_strength_tie_prefers_the_users_own_osasto(index):
 def test_classify_strength_tie_without_osasto_is_deterministic(index):
     groups = ["laitos-t40106", "laitos-t40571"]
     r = org.classify("pat", groups, index, conf())
-    # no osasto to prefer with: lowest leader name, deterministically
+    # no osasto to prefer with (the unit-code fallback gives T401, which
+    # matches neither): lowest leader name, deterministically
     assert r["group"] == "backstt1"
     assert r["extra_groups"] == ["kyrkiv1"]
-    assert r["dept_code"] == "T412" and r["own_dept"] is None
+    assert r["dept_code"] == "T412" and r["own_dept"] == "T401"
+
+
+def test_classify_shared_unit_member(index):
+    # a [units] member: the row is the unit: key, the department is the
+    # unit's configured one, and the row id carries the unit code
+    r = org.classify("unitmike", USER_GROUPS_WORLD["unitmike"], index,
+                     conf())
+    assert r == {
+        "group": "unit:T21204", "membership": "paid", "dept_code": "T212",
+        "school_code": "ENG", "own_dept": "T212", "extra_groups": [],
+        "status": "group"}
+
+
+def test_classify_professor_group_beats_shared_unit_on_a_tie(index):
+    # bothpaid is paid in kyrkiv1's unit AND the shared unit (strength
+    # tie at 4) with an osasto matching neither: professor groups come
+    # before unit: keys, so the professor group owns the row and the
+    # shared unit rides along.
+    r = org.classify("bothpaid", USER_GROUPS_WORLD["bothpaid"], index,
+                     conf())
+    assert r["group"] == "kyrkiv1" and r["membership"] == "paid"
+    assert r["extra_groups"] == ["unit:T21204"]
+    # the user's own osasto is T313, matching neither configured dept
+    assert r["dept_code"] == "T410" and r["own_dept"] == "T313"
+    # the osasto-match term outranks the professor-before-unit term: an
+    # osasto matching the shared unit's department keeps the unit row
+    r = org.classify("unitos", USER_GROUPS_WORLD["unitos"], index, conf())
+    assert r["group"] == "unit:T21204"
+    assert r["extra_groups"] == ["kyrkiv1"]
 
 
 def test_classify_department_only_user(index):
@@ -351,9 +448,25 @@ def test_classify_unaffiliated_and_unresolved(index):
 def test_own_dept_osasto_beats_staff_and_is_case_insensitive():
     assert org.own_dept_of(["osasto-t410", "T412-STAFF"]) == "T410"
     assert org.own_dept_of(["T412-STAFF"]) == "T412"
-    # a unit's tNNNXX-staff (six chars) is NOT a department group
-    assert org.own_dept_of(["t40106-staff"]) is None
-    assert org.own_dept_of(["laitos-t40106", "triton-users"]) is None
+    # a unit's tNNNXX-staff (six chars) is NOT a department group — it
+    # feeds the unit-code fallback instead
+    assert org.own_dept_of(["t40106-staff"]) == "T401"
+    assert org.own_dept_of(["laitos-t40106", "triton-users"]) == "T401"
+
+
+def test_own_dept_unit_code_fallback():
+    # no osasto / legacy staff group: the first four characters of the
+    # LOWEST unit-shaped code are the department
+    assert org.own_dept_of(["laitos-t31354"]) == "T313"
+    assert org.own_dept_of(["auto-ext-t40571"]) == "T405"
+    assert org.own_dept_of(["t21204-everyone"]) == "T212"
+    assert org.own_dept_of(["laitos-t31354", "laitos-t30417"]) == "T304"
+    # osasto and the legacy staff shape still win over the fallback
+    assert org.own_dept_of(["osasto-t410", "laitos-t31354"]) == "T410"
+    assert org.own_dept_of(["T412-STAFF", "laitos-t31354"]) == "T412"
+    # acronym-style and service groups are not clues: none matches
+    assert org.own_dept_of(["triton-users", "auto-student-users",
+                            "csm"]) is None
 
 
 # ---- resolve_users ------------------------------------------------------
@@ -362,8 +475,8 @@ def test_resolve_users_coverage(nss, index):
     mapping, coverage = org.resolve_users(
         USER_GROUPS_WORLD, conf(), index=index)
     assert coverage == {
-        "users": 7, "in_prof_group": 4, "dept_only": 1, "unaffiliated": 1,
-        "unresolved": 1, "failed": 0}
+        "users": 13, "in_prof_group": 10, "dept_only": 1,
+        "unaffiliated": 1, "unresolved": 1, "failed": 0}
     assert mapping["alice"]["group"] == "kyrkiv1"
     assert mapping["ghost"]["status"] == "unresolved"
 
@@ -566,6 +679,33 @@ def test_rollup_department_only_naming_per_level(nss, index):
     rows = org.rollup_groups([user_row("carol")], mapping, [], 120,
                              level="department", conf=conf_)
     assert rows[0]["group_name"] == "Department of Computer Science"
+
+
+def test_rollup_shared_unit_row(nss, index):
+    # a [units] member's row: the unit: key is the group id, the name
+    # carries the "(shared unit)" suffix, and there is no leader
+    conf_ = conf()
+    mapping, coverage = org.resolve_users(["unitmike"], conf_, index)
+    assert coverage["in_prof_group"] == 1
+    rows = org.rollup_groups([user_row("unitmike")], mapping, [], 120,
+                             level="group", conf=conf_)
+    by_id = {r["group_id"]: r for r in rows}
+    unit = by_id["unit:T21204"]
+    assert unit["group_name"] == "Mechatronics (shared unit)"
+    assert unit["leader"] is None and unit["leader_name"] is None
+    assert unit["unit_codes"] == ["T21204"]
+    assert unit["dept_code"] == "T212"
+    assert unit["dept_name"] == "Department of Mechanical Engineering"
+    assert unit["school_code"] == "ENG"
+    assert unit["users"] == 1
+    member = unit["members"][0]
+    assert member["group"] == "unit:T21204" and member["status"] == "group"
+    # at department level the member collapses into the unit's department
+    rows = org.rollup_groups([user_row("unitmike")], mapping, [], 120,
+                             level="department", conf=conf_)
+    by_id = {r["group_id"]: r for r in rows}
+    assert "unit:T21204" not in by_id
+    assert by_id["dept:T212"]["users"] == 1
 
 
 def test_rollup_department_level_merges_group_and_dept_only(nss, index):

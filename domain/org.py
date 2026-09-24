@@ -12,16 +12,21 @@ tools/build_prof_groups.py, hand-editable at the repo root
 (``PROF_GROUPS_FILE`` overrides the location), reloaded whenever its
 mtime changes so a fix never needs a restart.
 
-Strengths order a user's memberships: leader (4) beats paid (3) beats
-staff (2) beats everyone (1). The primary group is the strongest
-membership (ties: the group whose department matches the user's own
-osasto, then the lowest leader name); the rest ride along as
-``extra_groups``. A user in no configured group but with an
+Strengths order a user's memberships: leader (5) beats paid (4) beats
+external (3) beats staff (2) beats everyone (1). The primary group is the
+strongest membership (ties: the group whose department matches the
+user's own osasto, then professor groups before shared-unit rows, then
+the lowest key); the rest ride along as ``extra_groups``. A unit shared
+by several professors (the conf's ``[units]`` section, group key
+``unit:<CODE>``) has no single leader: it is seeded with no leader and
+reads the same four member lists, and its row renders as
+"<Unit> (shared unit)". A user in no configured group but with an
 ``osasto-t*`` group is department-only ("<Department>, no professor
-group"). Users the directory does not know land in the Unresolved row;
-known users with neither land in Unaffiliated — both rows are always
-shown and never merged into another row (the same spirit as never
-rendering an unmeasured job 0%).
+group"); a user with neither still falls back to the department their
+own unit-shaped groups encode (see own_dept_of). Users the directory
+does not know land in the Unresolved row; known users with neither land
+in Unaffiliated — both rows are always shown and never merged into
+another row (the same spirit as never rendering an unmeasured job 0%).
 """
 
 import configparser
@@ -34,13 +39,20 @@ import deps
 
 # The user's own department: osasto-tNNN, else a legacy tNNN-staff role
 # group (four characters — a unit's tNNNXX-staff is six and never
-# matches). Unit groups (laitos-tNNNXX / tNNNXX-staff / tNNNXX-everyone)
-# are NOT parsed from the user's own group list at all: membership comes
-# from the membership index, which reads those groups' member lists once
-# a day (plan §3) — a user's own laitos-tNNNXX group is merely how they
-# got into the index.
+# matches), else — with neither — the department the unit code of the
+# user's own unit-shaped groups encodes (UNIT_GROUP_RE below; the
+# membership index is still what resolves GROUP membership — a user's
+# own laitos-tNNNXX group is merely how they got into the index).
 DEPT_GROUP_RE = re.compile(r"^osasto-([a-z]\d{3})$", re.IGNORECASE)
 STAFF_GROUP_RE = re.compile(r"^([a-z]\d{3})-staff$", re.IGNORECASE)
+# Unit-shaped groups in a user's own list: laitos-tNNNXX, tNNNXX-staff,
+# tNNNXX-everyone, auto-ext-tNNNXX (external visitors) or the bare unit
+# group. Six-character codes only — the 4-char tNNN-staff shape is a
+# department role group and osasto-* always wins first. The unit code's
+# first four characters are its department (T31371 -> T313).
+UNIT_GROUP_RE = re.compile(
+    r"^(?:laitos-|auto-ext-)?([a-z]\d{3}[0-9a-z]{2})(?:-staff|-everyone)?$",
+    re.IGNORECASE)
 
 DEFAULT_FILE = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
@@ -53,7 +65,7 @@ STATUS_UNAFFILIATED = "unaffiliated"  # known user, no relevant groups
 STATUS_UNRESOLVED = "unresolved"    # the directory does not know the user
 
 # How strongly a user belongs to a group (see membership_index()).
-STRENGTH = {"leader": 4, "paid": 3, "staff": 2, "everyone": 1}
+STRENGTH = {"leader": 5, "paid": 4, "external": 3, "staff": 2, "everyone": 1}
 STRENGTH_LABEL = {v: k for k, v in STRENGTH.items()}
 
 _LOCK = threading.Lock()
@@ -94,8 +106,13 @@ def _parse_prof_file(path):
             "dept": dept.strip().upper() or None,
             "unit_codes": [c.upper() for c in codes.split()],
         }
+    units = {}
+    for code, value in section("units").items():
+        name, dept = _split_pipes(value, 2)
+        units[code.upper()] = {"name": name,
+                               "dept": dept.strip().upper() or None}
     return {"schools": schools, "departments": departments,
-            "groups": groups}
+            "groups": groups, "units": units}
 
 
 def prof_groups_path():
@@ -111,6 +128,7 @@ def load_prof_groups(path=None):
     Returns ``{"schools": {PREFIX: {"short", "full"}},
     "departments": {CODE: {"name", "school"}},
     "groups": {LEADER: {"name", "dept", "unit_codes"}},
+    "units": {CODE: {"name", "dept"}},
     "_source": (path, mtime)}`` with every key upper-cased (a
     hand-edited lower-case code still resolves). The cache key includes
     the path, so flipping ``PROF_GROUPS_FILE`` between calls re-reads
@@ -148,15 +166,30 @@ def reset_prof_cache():
 
 # ---- conf lookups -------------------------------------------------------
 
+# Group-key prefix of a shared unit's row ([units]); URL-safe like
+# GROUP_DEPT_PREFIX, so it doubles as the row id and drill-down path.
+GROUP_UNIT_PREFIX = "unit:"
+
+
 def group_dept(leader, conf):
-    """A group's configured department code (its professor's), or None."""
+    """A group's configured department code (its professor's, or the
+    shared unit's ``[units]`` line), or None."""
+    if leader and leader.startswith(GROUP_UNIT_PREFIX):
+        unit = (conf.get("units") or {}).get(
+            leader[len(GROUP_UNIT_PREFIX):])
+        return unit and unit["dept"]
     group = conf["groups"].get(leader)
     return group and group["dept"]
 
 
 def leader_name(leader, conf):
     """A group's display name: the configured leader name, else the
-    username (a hand-added row may carry no name yet)."""
+    username (a hand-added row may carry no name yet); a shared unit's
+    key names the unit with a "(shared unit)" suffix."""
+    if leader and leader.startswith(GROUP_UNIT_PREFIX):
+        unit = (conf.get("units") or {}).get(
+            leader[len(GROUP_UNIT_PREFIX):])
+        return ("%s (shared unit)" % unit["name"]) if unit else leader
     group = conf["groups"].get(leader)
     return (group and group["name"]) or leader
 
@@ -232,35 +265,44 @@ def _group_members_cached(group_name):
 
 
 def membership_index(conf):
-    """``{username: {leader: best strength}}`` — who belongs to which
-    configured group, and how strongly.
+    """``{username: {group key: best strength}}`` — who belongs to which
+    configured group, and how strongly. The key is a professor group's
+    leader username, or ``unit:<CODE>`` for a shared unit.
 
-    For every configured group's unit code the three NSS member groups
-    are read: ``laitos-<code>`` (paid there, strength 3), ``<code>-staff``
-    (2) and ``<code>-everyone`` (1); the leader is seeded into their own
-    group at strength 4 unconditionally — a leader who sits in nobody's
-    member list (Bäckström is in Alku's tNNNXX-staff, not their own
-    unit's) still leads. A user in several lists of one group keeps only
-    that group's strongest strength.
+    For every configured unit code — a professor group's own units and
+    the ``[units]`` shared units — the four NSS member groups are read:
+    ``laitos-<code>`` (paid there, strength 4), ``<code>-staff`` (2),
+    ``<code>-everyone`` (1) and ``auto-ext-<code>`` (external visitors,
+    3). A professor group's leader is seeded into their own group at
+    strength 5 unconditionally — a leader who sits in nobody's member
+    list (Bäckström is in Alku's tNNNXX-staff, not their own unit's)
+    still leads; shared units have no leader to seed. A user in several
+    lists of one group keeps only that group's strongest strength.
     """
     index = {}
 
-    def add(user, leader, strength):
+    def add(user, key, strength):
         known = index.setdefault(user, {})
-        if strength > known.get(leader, 0):
-            known[leader] = strength
+        if strength > known.get(key, 0):
+            known[key] = strength
+
+    def read_unit(code, key):
+        code = code.lower()
+        for name, kind in (("laitos-" + code, "paid"),
+                           (code + "-staff", "staff"),
+                           (code + "-everyone", "everyone"),
+                           ("auto-ext-" + code, "external")):
+            members = _group_members_cached(name)
+            if members:
+                for user in members:
+                    add(user, key, STRENGTH[kind])
 
     for leader, spec in conf["groups"].items():
         add(leader, leader, STRENGTH["leader"])
         for code in spec["unit_codes"]:
-            code = code.lower()
-            for name, kind in (("laitos-" + code, "paid"),
-                               (code + "-staff", "staff"),
-                               (code + "-everyone", "everyone")):
-                members = _group_members_cached(name)
-                if members:
-                    for user in members:
-                        add(user, leader, STRENGTH[kind])
+            read_unit(code, leader)
+    for code in conf.get("units") or {}:
+        read_unit(code, GROUP_UNIT_PREFIX + code)
     return index
 
 
@@ -283,13 +325,24 @@ def _index_cached(conf):
 
 def own_dept_of(groups):
     """The user's own department: their osasto-tNNN group, else a
-    tNNN-staff role group; lowest code wins, None with neither."""
+    tNNN-staff role group; when neither exists, the first four
+    characters of the lowest unit-shaped group code they carry
+    (laitos-tNNNXX / tNNNXX-staff / -everyone / auto-ext-tNNNXX — the
+    department the unit code itself encodes, T31371 -> T313). The
+    acronym-style and resource groups are deliberately not clues. None
+    with neither shape."""
     codes = set()
     for group in groups or ():
         m = DEPT_GROUP_RE.match(group) or STAFF_GROUP_RE.match(group)
         if m:
             codes.add(m.group(1).upper())
-    return sorted(codes)[0] if codes else None
+    if codes:
+        return sorted(codes)[0]
+    for group in groups or ():
+        m = UNIT_GROUP_RE.match(group)
+        if m:
+            codes.add(m.group(1).upper())
+    return sorted(codes)[0][:4] if codes else None
 
 
 def classify(username, groups, index, conf):
@@ -299,12 +352,14 @@ def classify(username, groups, index, conf):
     Returns ``{"group", "membership", "dept_code", "school_code",
     "own_dept", "extra_groups", "status"}``. The primary group is the
     strongest membership, ties preferring the group whose configured
-    department is the user's own osasto, then the lowest leader name; a
-    group member's department is the GROUP's department (the
-    professor's) — the research group is the organizational home the
+    department is the user's own osasto, then professor groups before
+    shared-unit rows, then the lowest key; a group member's department
+    is the GROUP's department (the professor's, or the shared unit's
+    configured one) — the research group is the organizational home the
     row reports, not the member's own cost-centre osasto, which rides
     along as ``own_dept`` for the drill-down. ``membership`` names the
-    strength of the primary membership (leader/paid/staff/everyone).
+    strength of the primary membership (leader/paid/external/staff/
+    everyone).
     """
     if groups is None:
         return dict(_UNRESOLVED)
@@ -317,6 +372,7 @@ def classify(username, groups, index, conf):
                 -memberships[leader],
                 0 if (own_dept and group_dept(leader, conf) == own_dept)
                 else 1,
+                0 if not leader.startswith(GROUP_UNIT_PREFIX) else 1,
                 leader))
         primary = leaders[0]
         dept = group_dept(primary, conf) or own_dept
@@ -423,13 +479,13 @@ LOW_UTIL_THRESHOLD = 30.0
 def group_id_for(result, level):
     """A classification's roll-up row identity at the given level.
 
-    At group level a group member's row is their leader's username; at
-    department level every classified user collapses into their
-    department row (``dept:TNNN``) — a group member their group's
-    department, a department-only user their own osasto. A group member
-    with no department anywhere keeps the group row at both levels (a
-    department row needs a department). The two special rows are their
-    own ids.
+    At group level a group member's row is their leader's username, or
+    the shared unit's ``unit:<CODE>`` key; at department level every
+    classified user collapses into their department row (``dept:TNNN``)
+    — a group member their group's department, a department-only user
+    their own osasto. A group member with no department anywhere keeps
+    the group row at both levels (a department row needs a department).
+    The two special rows are their own ids.
     """
     status = result["status"]
     if result["dept_code"]:
@@ -454,8 +510,10 @@ def rollup_groups(user_rows, mapping, jobs_view, step, level="group",
     observed GPU-hours derive (samples x step). ``level`` is "group"
     (default) or "department".
 
-    At group level a group member's row is named after their professor;
-    a department-only user lands in "<Department>, no professor group".
+    At group level a group member's row is named after their professor
+    (or, for a shared unit's member, "<Unit> (shared unit)" with no
+    leader); a department-only user lands in "<Department>, no professor
+    group".
     At department level both collapse into one department row (a group
     member under their professor's department, everyone else under
     their own osasto) named after the department alone. Rows are ordered
@@ -470,14 +528,19 @@ def rollup_groups(user_rows, mapping, jobs_view, step, level="group",
     rows = {}
 
     def row_for(gid, name, dept_code, leader=None):
+        if gid.startswith(GROUP_UNIT_PREFIX):
+            # a shared unit row: no leader, its own single unit code
+            unit_codes = [gid[len(GROUP_UNIT_PREFIX):]]
+        else:
+            unit_codes = list(
+                conf["groups"].get(leader, {}).get("unit_codes", [])) \
+                if leader else []
         return rows.setdefault(gid, {
             "group_id": gid,
             "group_name": name,
             "leader": leader,
             "leader_name": leader_name(leader, conf) if leader else None,
-            "unit_codes": list(
-                conf["groups"].get(leader, {}).get("unit_codes", []))
-            if leader else [],
+            "unit_codes": unit_codes,
             "dept_code": dept_code,
             "dept_name": dept_name(dept_code, conf) if dept_code else None,
             "school_code": None, "school_name": None,
@@ -503,7 +566,9 @@ def rollup_groups(user_rows, mapping, jobs_view, step, level="group",
             gid = result["group"]
             name = leader_name(gid, conf)
             dept = result["dept_code"]
-            row = row_for(gid, name, dept, leader=gid)
+            row = row_for(gid, name, dept,
+                          leader=None if gid.startswith(GROUP_UNIT_PREFIX)
+                          else gid)
         else:
             dept = result["dept_code"]
             if not dept:

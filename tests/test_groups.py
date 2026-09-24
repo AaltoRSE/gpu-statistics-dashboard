@@ -235,13 +235,13 @@ def test_groups_missing_conf_file_is_502(client, nss, monkeypatch, tmp_path):
 def test_groups_repeat_request_makes_zero_directory_calls(client, nss):
     client.get("/api/groups", params={"since_hours": 24})
     assert len(nss["calls"]) == 4
-    assert len(nss["member_calls"]) == 6   # 2 configured groups x 3 lists
+    assert len(nss["member_calls"]) == 12  # 3 configured units x 4 lists
     client.get("/api/groups", params={"since_hours": 24})
     client.get("/api/groups", params={"since_hours": 24, "level": "department"})
     # per-user group lists and per-group member lists are both cached:
     # same users, same groups, same directory answers
     assert len(nss["calls"]) == 4
-    assert len(nss["member_calls"]) == 6
+    assert len(nss["member_calls"]) == 12
 
 
 def test_groups_running_only_filters_in_process(client, nss, fake_prom):
@@ -309,6 +309,46 @@ def test_groups_member_kind_reflects_the_membership_list(client, nss):
     # carol's row department is the professor's, her own osasto rides along
     assert members["carol"]["dept_code"] == "T410"
     assert members["carol"]["own_dept"] == "T313"
+
+
+def test_groups_auto_ext_member_is_external(client, nss):
+    # an auto-ext-<code> member is the external kind — the membership
+    # list the runtime reads since external visitors carry no osasto
+    nss["members"]["auto-ext-t40106"] = ["carol"]
+    data = client.get("/api/groups", params={"since_hours": 24}).json()
+    rows = by_id(data)
+    # carol leaves her department-only row for kyrki's group row
+    assert rows["kyrkiv1"]["users"] == 2  # alice + carol
+    assert "dept:T313" not in rows  # its only member left: no row at all
+    r = client.get("/api/groups/kyrkiv1/users", params={"since_hours": 24})
+    members = {m["user"]: m for m in r.json()["users"]}
+    member = members["carol"]
+    assert member["membership"] == "external"
+    assert member["group"] == "kyrkiv1"
+
+
+def test_groups_shared_unit_row_and_drilldown(client, nss):
+    # a [units] member: a leaderless shared-unit row named after the
+    # unit, and the drill-down reached through its unit:<CODE> id
+    nss["members"]["laitos-t21204"] = ["bob"]
+    data = client.get("/api/groups", params={"since_hours": 24}).json()
+    rows = by_id(data)
+    unit = rows["unit:T21204"]
+    assert unit["group_name"] == "Mechatronics (shared unit)"
+    assert unit["leader"] is None and unit["leader_name"] is None
+    assert unit["unit_codes"] == ["T21204"]
+    assert unit["dept_code"] == "T212"
+    assert unit["users"] == 1 and unit["jobs"] == 1
+    r = client.get("/api/groups/unit:T21204/users",
+                   params={"since_hours": 24})
+    assert r.status_code == 200
+    data = r.json()
+    assert data["group_id"] == "unit:T21204"
+    assert data["group_name"] == "Mechatronics (shared unit)"
+    member = data["users"][0]
+    assert member["user"] == "bob"
+    assert member["group"] == "unit:T21204"
+    assert member["membership"] == "paid"
 
 
 def test_users_then_groups_add_no_prometheus_query(client, nss, fake_prom):

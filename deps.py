@@ -77,8 +77,9 @@ def group_members(group_name):
     or None for a group the directory does not know.
 
     The Groups tab's membership index reads laitos-tNNNXX / tNNNXX-staff
-    / tNNNXX-everyone for each configured research-group unit; one
-    getgrnam per group, not one per user. Returns None for an unknown
+    / tNNNXX-everyone / auto-ext-tNNNXX (external visitors) for each
+    configured research-group unit and shared unit; one getgrnam per
+    group, not one per user. Returns None for an unknown
     group (an answer — not every unit carries all three spellings) and
     raises DirectoryError when NSS raises OSError. No caching here —
     callers cache per group, whose TTL is theirs to choose.

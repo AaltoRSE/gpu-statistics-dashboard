@@ -73,11 +73,14 @@ OS-level preference applies when no choice has been saved.
 - The Users list rolled up per **professor research group**: a row is one
   professor's group — the Aalto AD unit their row in `prof_groups.conf`
   names — and its members are the people in that unit's NSS groups
-  (`laitos-tNNNXX` = paid there, `tNNNXX-staff`, `tNNNXX-everyone`) plus
-  the professor themself. Membership comes from `groups <user>`-style
-  NSS reads on the dashboard host (no AD call at runtime); names come
-  from `prof_groups.conf` (see Configuration). A user in several groups
-  lands in the strongest one (leader > paid > staff > everyone); a user
+  (`laitos-tNNNXX` = paid there, `tNNNXX-staff`, `tNNNXX-everyone`,
+  `auto-ext-tNNNXX` = external visitors) plus the professor themself.
+  Membership comes from `groups <user>`-style NSS reads on the dashboard
+  host (no AD call at runtime); names come from `prof_groups.conf` (see
+  Configuration). A user in several groups lands in the strongest one
+  (leader > paid > external > staff > everyone); a unit AD ties to
+  several professors gets its own leaderless **shared-unit** row
+  (`unit:<CODE>`, named "<Unit> (shared unit)"); a user
   with no professor group but an `osasto-t*` department rolls up under
   "<Department>, no professor group".
 - Rows show the **leader** (linked to the Users tab), school, users,
@@ -94,7 +97,8 @@ OS-level preference applies when no choice has been saved.
   link: `/groups?school=SCI&level=department` (old `level=unit` links
   land on the professor-group level).
 - Click a row for the member drill-down — every member with their group
-  and **membership kind** (leader / paid / staff / everyone), their own
+  and **membership kind** (leader / paid / external / staff / everyone),
+  their own
   department, and any **extra groups**, each user linking to the Users
   tab.
 - The **Unaffiliated** and **Unresolved** rows (no relevant groups; user
@@ -211,13 +215,19 @@ T4 = ELEC | School of Electrical Engineering
 [departments]  ; CODE = Name | school PREFIX (name from the AD `department` attribute)
 T410 = Department of Electrical Engineering and Automation | T4
 
+[units]        ; CODE = Unit name | DEPT — a unit AD ties to several
+T21204 = Mechatronics | T212   ; professors: one leaderless shared-unit row
+
 [groups]       ; leader-user = Leader Name | DEPT | unit codes
 kyrkiv1 = Kyrki Ville | T410 | T40106
 ```
 
 A group's members are read at runtime from its units' NSS groups
-(`laitos-t<code>`, `t<code>-staff`, `t<code>-everyone`); the leader is
-always a member of their own group. A row with no unit codes still
+(`laitos-t<code>`, `t<code>-staff`, `t<code>-everyone`,
+`auto-ext-t<code>` = external visitors); the leader is
+always a member of their own group. A `[units]` row reads the same four
+lists and has no leader — it renders as "<Unit> (shared unit)" under the
+group id `unit:<CODE>`. A row with no unit codes still
 works (only its leader belongs). A professor the builder could not
 resolve is left as a commented line — uncomment and fill in their unit
 codes.
@@ -243,14 +253,24 @@ $ .venv/bin/python tools/build_prof_groups.py
 ```
 
 writes `prof_groups.conf` and prints a report: professors with no unit
-found (written as commented lines to fill by hand), lecturer-led units
-no professor claims, and units claimed by two professors. A professor's
-own unit is the AD group `managedBy` them, else the one whose
-description carries their name (surname + given name when surnames
-collide) — never their `laitos-t*` group, which is a cost centre.
-Re-run after a fresh dump; hand-edits to the committed file survive a
-re-run only if re-applied, so prefer fixing the rules/report loop over
-editing generated sections.
+found (written as commented lines to fill by hand), rule-d claims
+(professors who claimed their DN-leaf-OU unit — review these),
+leaderless shared units (written to `[units]`), lecturer-led units
+no professor claims, units claimed by two professors, and hand lines
+kept from a previous build. A professor's
+own unit is the AD group `managedBy` them (rule a), else the one whose
+description carries their name (rule b; surname + given name when
+surnames collide), else — when AD ties the professor to it another way
+(their DN leaf OU, exactly one professor per unit, confirmed by their AD
+department matching a unit description or their laitos/-staff
+membership) — that unit (rule d, `dn-ou` in the report) — never their
+`laitos-t*` group, which is a cost centre.
+Re-run after a fresh dump: uncommented `[groups]`/`[units]` hand lines
+in the existing file survive when the new build produces no codes for
+that key (or does not know it at all — non-professors such as a
+lecturer-led group's leader), and every kept line is listed in the
+report. Prefer fixing the rules/report loop over editing generated
+sections.
 
 ## API
 
@@ -265,7 +285,7 @@ editing generated sections.
 | `GET /api/partitions/vram/progress?since_hours=&running_only=&partition=` | transient batch progress `{done, total, failed_batches}` of the window's in-flight sacct dump, or `null` when nothing is in flight (finished, cached, or failed). Keyed by the window only — the enrichment reads the same window-wide dump as the queue's wait history, so this poll and the queue's progress poll return the same batch state |
 | `GET /api/nodes?gpu_only=&refresh=` | node states (state/reason from `scontrol show node`) + live utilization/VRAM + active jobs (`refresh=true` bypasses the 30 s cache) |
 | `GET /api/nodes/{name}?view=job_start\|1\|6\|24` | per-GPU utilization/VRAM series for one node (`job_start` = since the earliest active job started) |
-| `GET /api/groups?since_hours=&running_only=&level=group\|department` | GPU efficiency per professor research group over the window: the Users aggregation rolled up by professor group (the AD unit a `prof_groups.conf` row names; membership from that unit's NSS groups) or department, classified from each job owner's NSS groups. Rows carry leader/leader_name/unit_codes, group/department/school naming, sample-weighted `mean_util`, `util_gpu_hours` (members' Users-tab GPU-hours summed), observed `gpu_hours`, `low_eff_jobs` (<30%), `top_users`; the response adds `schools`, `coverage` (`in_prof_group`/`dept_only`/`unaffiliated`/`unresolved`/`failed` users) and `window`. The `unaffiliated` and `unresolved` rows are always present. No new upstream fetch: the window sources are the shared ones, per-user group lists are cached 24 h (1 h for unknown users) and per-group member lists 24 h |
+| `GET /api/groups?since_hours=&running_only=&level=group\|department` | GPU efficiency per professor research group over the window: the Users aggregation rolled up by professor group (the AD unit a `prof_groups.conf` row names; membership from that unit's NSS groups, `auto-ext-` included for external visitors), a leaderless `unit:<CODE>` shared-unit row (several professors, one unit), or department, classified from each job owner's NSS groups. Rows carry leader/leader_name/unit_codes (null/— for shared-unit rows), group/department/school naming, sample-weighted `mean_util`, `util_gpu_hours` (members' Users-tab GPU-hours summed), observed `gpu_hours`, `low_eff_jobs` (<30%), `top_users`; the response adds `schools`, `coverage` (`in_prof_group`/`dept_only`/`unaffiliated`/`unresolved`/`failed` users) and `window`. The `unaffiliated` and `unresolved` rows are always present. No new upstream fetch: the window sources are the shared ones, per-user group lists are cached 24 h (1 h for unknown users) and per-group member lists 24 h |
 | `GET /api/groups/{group_id}/users?since_hours=&running_only=&level=` | the drill-down: one roll-up row's members with their own classification (`group`, `membership` kind, `dept_code`, `own_dept`, `extra_groups`); 404 for a group id absent from the window |
 
 Short in-memory TTL caches (20–300 s, at both the app and Prometheus-client
