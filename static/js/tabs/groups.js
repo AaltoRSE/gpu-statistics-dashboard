@@ -31,6 +31,16 @@ import { plotTheme, renderPlot } from "../core/plot.js";
 // table, legend and colors in agreement.
 const OTHER = "Other";
 
+// Aalto brand colors per school
+// (brand.aalto.fi/en/brand/visual-guidelines/colours), keyed by the
+// [schools] short names prof_groups.conf carries (tools/build_prof_groups.py
+// SCHOOL_BY_PREFIX generates them). A school missing from this map falls
+// back to the theme palette.
+const SCHOOL_COLORS = {
+  ENG: "#DC6ADE", ELEC: "#A987FF", CHEM: "#5DD089",
+  ARTS: "#FFC341", BIZ: "#9BD84C", SCI: "#FF8D4F",
+};
+
 let groupRows = [];        // the /api/groups rows for the current fetch
 let schools = [];          // [{code, short, full}] from the response
 let pendingSchool = null;  // deep-linked school before options exist
@@ -213,14 +223,16 @@ function renderCoverage(coverage) {
 }
 
 // ---- mean-utilization bar chart, colored by school --------------------
-// Stable per-school colors (config order, one hue per distinct short
-// name); the schoolless Other bucket (unaffiliated / unmatched prefix)
-// draws in the idle gray.
+// Aalto brand colors per school; a school missing from the brand set
+// falls back to the theme palette, and the schoolless Other bucket draws
+// in the theme's neutral gray — visible on both themes and clearly apart
+// from the six saturated brand hues.
 function schoolColorMap() {
   const th = plotTheme();
-  const map = { [OTHER]: th.idle };
-  [...new Set(schools.map((s) => s.short))].forEach((short, i) => {
-    map[short] = th.colors[i % th.colors.length];
+  const map = { [OTHER]: th.other };
+  let i = 0;
+  [...new Set(schools.map((s) => s.short))].forEach((short) => {
+    map[short] = SCHOOL_COLORS[short] || th.colors[i++ % th.colors.length];
   });
   return map;
 }

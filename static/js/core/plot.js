@@ -30,6 +30,11 @@ export function plotTheme() {
     bad: light ? "#d32f2f" : "#ef5350",
     acc: light ? "#0288d1" : "#4fc3f7",
     idle: light ? "#c9d3e3" : "#2a3552",
+    // Neutral gray for the Groups tab's schoolless Other bucket: clearly
+    // apart from the six saturated Aalto school colors, at ≈4.8:1 on the
+    // light panel and ≈6.9:1 on the dark #171e2e panel. (idle stays as it
+    // is — Partitions uses it for "no data".)
+    other: light ? "#6b7280" : "#9ca3af",
   };
 }
 
