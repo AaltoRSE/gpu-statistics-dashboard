@@ -149,7 +149,6 @@ function groupRowHtml(g) {
       <td class="num">${fmtInt(g.jobs)}</td>
       <td class="num">${fmtInt(g.running_jobs)}</td>
       <td class="num">${raw(pctBar(g.mean_util))}</td>
-      <td class="num">${fmt(g.util_gpu_hours, 2)}</td>
       <td class="num">${fmt(g.gpu_hours, 2)}</td>
       <td class="num">${fmt(g.vram_avg)}</td>
       <td class="num">${fmtInt(g.low_eff_jobs)}</td>
@@ -180,11 +179,10 @@ const groupTable = createTable({
     { key: "users", type: "number" }, { key: "jobs", type: "number" },
     { key: "running_jobs", type: "number" },
     { key: "mean_util", type: "number" },
-    { key: "util_gpu_hours", type: "number" },
     { key: "gpu_hours", type: "number" }, { key: "vram_avg", type: "number" },
     { key: "low_eff_jobs", type: "number" },
   ],
-  defaultSort: { key: "util_gpu_hours", dir: "desc" },
+  defaultSort: { key: "gpu_hours", dir: "desc" },
   renderRow: groupRowHtml,
   onRowClick: groupRowClick,
   emptyMessage: groupTableEmptyMessage,
@@ -269,7 +267,7 @@ export function renderGroupsBar() {
     hovertemplate: rows.map((g) =>
       "<b>" + escapeHtml(g.group_name) + "</b><br>mean %{x:.1f}%<br>" +
       escapeHtml(g.users + " users · " + g.jobs + " jobs · " +
-        g.util_gpu_hours + " GPU-h<extra></extra>")),
+        g.gpu_hours + " GPU-h held<extra></extra>")),
   }], {
     height: h,
     margin: { l: 10, r: 20, t: 10, b: 40 },

@@ -85,8 +85,7 @@ OS-level preference applies when no choice has been saved.
   "<Department>, no professor group".
 - Rows show the **leader** (linked to the Users tab), school, users,
   jobs, running jobs, **mean utilization** (weighted by every member
-  job's GPU samples — not averaged per user), the Users tab's
-  utilization-weighted **GPU-hours** summed over members, the observed
+  job's GPU samples — not averaged per user), the observed
   **GPU-hours held** (the window GPU time the members' GPUs were
   reserved), mean VRAM, and how many member jobs sit under 30%
   utilization. A **top-30 bar chart** of mean utilization is colored by

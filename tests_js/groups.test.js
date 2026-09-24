@@ -273,6 +273,22 @@ test("rows without a school read as Other — cell, filter, legend agree", async
   assert.equal(ctx.urls.length, fetchesAfterLoad, "no fetch on the filter");
 });
 
+test("the group table lists GPU-hours held, not utilization-weighted GPU-hours", async (t) => {
+  const ctx = await boot({}, 13);
+  t.after(() => ctx.dom.window.close());
+  const doc = ctx.dom.window.document;
+  await ctx.mod.loadGroups();
+  const headers = [...doc.querySelectorAll("#groupTable th")].map(
+    (th) => th.dataset.k);
+  assert.ok(!headers.includes("util_gpu_hours"),
+    "the utilization-weighted GPU-hours column is gone");
+  assert.ok(headers.includes("gpu_hours"), "GPU-hours held stays");
+  // GPU-hours held is the default sort
+  assert.equal(
+    doc.querySelector("#groupTable th[data-k='gpu_hours']")
+      .classList.contains("sorted-desc"), true);
+});
+
 test("clicking a group row fetches its members with kind and extra groups", async (t) => {
   const ctx = await boot({}, 5);
   t.after(() => ctx.dom.window.close());
