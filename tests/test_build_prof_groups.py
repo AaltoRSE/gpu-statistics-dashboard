@@ -266,6 +266,35 @@ def test_dn_cn_fallback_when_dump_has_no_dn():
     assert not bpg._managed_by_matches(units["T40555"], other)
 
 
+def test_word_boundary_surnames_do_not_substring_match():
+    # 'Li' must claim 'Li Wei group' but never 'Lindqvist Johan group'
+    # or 'Salmelin' — short surnames substring-matched dozens of units in
+    # the real AD data until this was a whole-word rule.
+    units = bpg.load_units(bpg.parse_dump("\n\n".join([
+        unit("laitos-t31301", description="Li Wei group"),
+        unit("laitos-t31302", description="Lindqvist Johan group"),
+        unit("laitos-t31303", description="Salmelin Mikko group")])))
+    li = {"sn": "Li", "given": "Wei", "dn": "", "name": "Li Wei"}
+    matched, how = bpg.own_units(li, units, [], {"li": 1})
+    assert matched == ["T31301"] and how == "description"
+
+
+def test_department_falls_back_to_the_dn_ou(monkeypatch):
+    # A professor without a Triton account (not in this host's NSS)
+    # still carries their department in their DN: OU=<unit>,OU=<dept>.
+    monkeypatch.setattr(deps, "user_groups", lambda user: None)
+    profs_text = professor(
+        "nssless", "Noacct Professor", "Noacct", "Pat",
+        dept="Department of Testing",
+        dn="CN=Noacct Professor,OU=T49999,OU=T499,OU=Staff,OU=users,"
+           "OU=root,DC=org,DC=aalto,DC=fi")
+    lines, _ = bpg.build(profs_text,
+                         unit("laitos-t49999", description="Noacct group"))
+    conf = "\n".join(lines)
+    assert "nssless = Noacct Professor | T499 | T49999" in conf
+    assert "T499 = Department of Testing | T4" in conf
+
+
 def test_school_keyword_order_elec_before_eng():
     # "Electrical Engineering" contains "Engineering" too: Electrical wins
     prof = {"company": "School of Electrical Engineering", "division": ""}
@@ -273,8 +302,15 @@ def test_school_keyword_order_elec_before_eng():
                                            "Engineering")
     prof = {"company": "", "division": "School of Chemical Engineering"}
     assert bpg.school_of(prof, "T100")[0] == "CHEM"
-    prof = {"company": "", "division": ""}
-    assert bpg.school_of(prof, "T299") == ("T2", "")  # prefix fallback
+    # real AD company values are OU codes, so the prefix falls through
+    # the static school table (the old org_units.conf school facts)
+    prof = {"company": "T213", "division": ""}
+    assert bpg.school_of(prof, "T213") == ("ENG", "School of Engineering")
+    prof = {"company": "E706", "division": ""}
+    assert bpg.school_of(prof, "E706") == ("BIZ", "School of Business")
+    prof = {"company": "A803", "division": ""}
+    assert bpg.school_of(prof, "A803") == ("ARTS", "School of Arts, Design "
+                                           "and Architecture")
 
 
 def test_nss_outage_raises(monkeypatch):
