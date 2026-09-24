@@ -12,7 +12,7 @@ collection) from:
 - **Prometheus** (`stats.triton.aalto.fi`) — `slurm_job_*` exporter metrics:
   per-GPU utilization and VRAM, live and historical
 
-The frontend is a plain-JS single page (Plotly.js via CDN) with three
+The frontend is a plain-JS single page (Plotly.js via CDN) with five
 interactive tabs.
 
 A **light/dark theme** toggle sits in the header (top right). Dark is the
@@ -69,6 +69,37 @@ OS-level preference applies when no choice has been saved.
 - **Running only** hides users with no live job and re-fetches the
   selected user's running jobs.
 
+### Groups tab
+- The Users list rolled up per **organisational group**: the research
+  group (unit) each user's `laitos-tNNNXX` NSS group names, its
+  department (`osasto-tNNN`), and the school the department belongs to.
+  Membership comes from `groups <user>` on the dashboard host (NSS/sssd
+  — no AD call at runtime); names come from `org_units.conf` (see
+  Configuration). A user's own `osasto-t*` group always wins over the
+  file when they differ.
+- Rows show users, jobs, running jobs, **mean utilization** (weighted by
+  every member job's GPU samples — not averaged per user), the Users
+  tab's utilization-weighted **GPU-hours** summed over members, the
+  observed **GPU-hours held** (the window GPU time the members' GPUs
+  were reserved), mean VRAM, and how many member jobs sit under 30%
+  utilization. A **top-30 bar chart** of mean utilization is colored by
+  school.
+- **School** filter and **search** run client-side over the fetched rows
+  (no fetch) and keep the URL in sync; the **Level** toggle
+  (Unit / Department) and **Running only** re-fetch. Deep link:
+  `/groups?school=SCI&level=department`.
+- Click a row for the member drill-down — every member with their own
+  unit/department classification, each linking to the Users tab.
+- The **Unaffiliated** and **Unresolved** rows (no org groups; user
+  unknown to the directory) always render, even empty — an empty row is
+  never read as "everyone is classified". The **coverage banner** states
+  how much of the window's job owners were mapped, discloses partial NSS
+  failures (whose activity is in no row, never folded into Unaffiliated)
+  and lists **unmapped unit codes** — a hint to add their names to
+  `org_units.conf`. When every lookup fails (or the config file is
+  unreadable) the tab shows a 502 (`directory_unreachable`), never a
+  silent all-unaffiliated table.
+
 ### Partitions tab
 - Per-Slurm-partition view: mean utilization per partition (time-weighted
   over the window), a utilization trend chart, a mean-occupancy chart
@@ -120,9 +151,10 @@ OS-level preference applies when no choice has been saved.
 - Shareable URLs: `/job/<id>` (Jobs tab + job detail), `/node/<name>`
   (Nodes tab + node detail), `/partition/<name>` (Partitions tab scoped
   to that partition — trend and VRAM), `/user/<name>` (Users tab with
-  that user's jobs fetched), plus `/jobs`, `/partitions`, `/users`,
-  `/nodes` for the plain tabs (plain `/partitions` clears any partition
-  selection).
+  that user's jobs fetched), `/groups?school=&level=&running=` (Groups
+  tab with those filters pre-applied), plus `/jobs`, `/partitions`,
+  `/users`, `/groups`, `/nodes` for the plain tabs (plain `/partitions`
+  clears any partition selection).
 - Cross-tab links: in the **Jobs** and **Users** job tables the **User**,
   **Partition**, and **Node** cells link to the Users, Partitions, and
   Nodes tabs respectively; in the **Nodes** tab each node name links to
@@ -155,7 +187,42 @@ Prometheus connection settings are read in this order:
 Cluster access is **strictly read-only**: the app uses explicit `sacct -j`
 lookups for job metadata, a bounded `sacct --allusers -X -S … -E …`
 query for completed-job wait statistics, `scontrol show nodes`, `squeue -t PD`,
-and Prometheus read queries.
+and Prometheus read queries. The Groups tab additionally reads the local
+NSS user directory (the same `groups <user>` the shell does) — never AD
+directly.
+
+### `org_units.conf` (Groups tab names)
+
+`org_units.conf` at the repo root (override with `ORG_UNITS_FILE`) holds
+the display names for the Groups tab. It is **hand-editable** and
+reloaded whenever its mtime changes — no restart. Format (INI, values
+split on their last `|`):
+
+```ini
+[schools]      ; PREFIX = SHORT | Full name — longest prefix of a department code wins
+T4 = ELEC | School of Electrical Engineering
+
+[departments]  ; CODE = Name (osasto-tNNN)
+T410 = Electrical Engineering and Automation
+
+[units]        ; CODE = Name | DEPT (laitos-tNNNXX; an empty name shows the raw code)
+T40106 = Kyrki Ville group | T410
+```
+
+A unit's `DEPT` is the Staff-OU parent that is a current department,
+else the unit's own prefix; at runtime a user's own `osasto-t*` group
+overrides it. Units with no name anywhere in AD have an empty name —
+the tab shows their raw code and lists them under `coverage.unmapped_codes`
+as a hint to fill one in. The file was generated once from an AD dump
+(raw dumps are never committed); to regenerate:
+
+```console
+$ net ads search '(&(objectClass=organizationalUnit)(ou=T*))' ou description distinguishedName
+$ net ads search '(|(cn=laitos-t*)(cn=osasto-t*))' cn description
+```
+
+and curate the three sections from the result, keeping the file's
+header comment (it documents the format and the department rule).
 
 ## API
 
@@ -170,6 +237,8 @@ and Prometheus read queries.
 | `GET /api/partitions/vram/progress?since_hours=&running_only=&partition=` | transient batch progress `{done, total, failed_batches}` of the window's in-flight sacct dump, or `null` when nothing is in flight (finished, cached, or failed). Keyed by the window only — the enrichment reads the same window-wide dump as the queue's wait history, so this poll and the queue's progress poll return the same batch state |
 | `GET /api/nodes?gpu_only=&refresh=` | node states (state/reason from `scontrol show node`) + live utilization/VRAM + active jobs (`refresh=true` bypasses the 30 s cache) |
 | `GET /api/nodes/{name}?view=job_start\|1\|6\|24` | per-GPU utilization/VRAM series for one node (`job_start` = since the earliest active job started) |
+| `GET /api/groups?since_hours=&running_only=&level=unit\|department` | GPU efficiency per org group over the window: the Users aggregation rolled up by unit (`laitos-tNNNXX`) or department (`osasto-tNNN`), classified from each job owner's NSS groups and `org_units.conf`. Rows carry group/department/school naming, sample-weighted `mean_util`, `util_gpu_hours` (members' Users-tab GPU-hours summed), observed `gpu_hours`, `low_eff_jobs` (<30%), `top_users`; the response adds `schools`, `coverage` (mapped/unaffiliated/unresolved/failed users and `unmapped_codes`) and `window`. The `unaffiliated` and `unresolved` rows are always present. No new upstream fetch: the window sources are the shared ones and the per-user classification is cached 24 h (1 h for unknown users) |
+| `GET /api/groups/{group_id}/users?since_hours=&running_only=&level=` | the drill-down: one roll-up row's members with their own classification (`unit_code`, `dept_code`, `extra_units`); 404 for a group id absent from the window |
 
 Short in-memory TTL caches (20–300 s, at both the app and Prometheus-client
 layers) avoid re-hitting the same query while the admin drags filters around.
@@ -208,6 +277,13 @@ actually pull for one window read:
   row cache (`KeyedBatchCache`, 300 s per ID, 1 h once terminal).
 - **Fan-out** — each route gathers its independent sources concurrently
   (`sources.gather`), so no window fetch waits on another.
+- **Org classification** — the Groups tab's only external read beyond
+  the shared sources is per-user NSS (`deps.user_groups`, the same
+  `groups <user>` the shell resolves), classified against the mtime-cached
+  `org_units.conf` and cached per user for 24 h (1 h for a user the
+  directory does not know), so a repeat request makes zero directory
+  calls and `/api/users` + `/api/groups` in one window add no upstream
+  query at all.
 - **Progress keys** — the dump's chunked fetch publishes
   `{done, total, failed_batches}` to `cache.progress_store` under one
   window-scoped key (`cache.vram_progress_key`) that both progress polls
