@@ -20,6 +20,8 @@ const EXPECTED = {
   queueResults: "Loading current queue and wait history…",
   vramResults: "Loading VRAM history…",
   usersResults: "Loading user history…",
+  groupsResults: "Loading group efficiency…",
+  groupMembersResults: "Loading group members…",
   userJobsResults: "Loading selected-user job history…",
   nodeDetailResults: "Loading node history…",
 };
@@ -84,13 +86,15 @@ test("every data panel starts in the loading state", () => {
   const doc = dom.window.document;
   for (const id of [
     "jobEfficiencyResults", "jobsResults", "partitionsResults",
-    "queueResults", "vramResults", "usersResults", "nodesResults",
+    "queueResults", "vramResults", "usersResults", "groupsResults",
+    "nodesResults",
   ]) {
     const panel = doc.getElementById(id);
     assert.ok(panel.classList.contains("loading"), `#${id} starts loading`);
     assert.ok(panel.querySelector(".results-loading"), `#${id} has its chip`);
   }
-  for (const id of ["jobDetailResults", "userJobsResults", "nodeDetailResults"]) {
+  for (const id of ["jobDetailResults", "userJobsResults",
+                    "groupMembersResults", "nodeDetailResults"]) {
     assert.ok(!doc.getElementById(id).classList.contains("loading"),
       `#${id} stays toggle-managed by its tab`);
   }
