@@ -34,7 +34,7 @@ def _grouped(since_hours, running_only, level):
     a. pinned window, b. the shared window sources in parallel, c. the
     memoized job view, d. the per-user aggregation, e. classification,
     f. the roll-up. Returns ``(pinned, conf, rows, mapping, coverage)``
-    — rows ordered, both special rows always present.
+    — rows ordered, the Unaffiliated row always present.
     """
     pinned = sources.pinned_window(since_hours)
     util, vram, live_snap, nodes = sources.gather(

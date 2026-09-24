@@ -1,6 +1,6 @@
-"""/api/groups endpoint tests: roll-up math, the always-present special
-rows, department level, NSS failure semantics, and the shared-fetch
-guarantee (a groups request must add no Prometheus query).
+"""/api/groups endpoint tests: roll-up math, the always-present
+Unaffiliated row, department level, NSS failure semantics, and the
+shared-fetch guarantee (a groups request must add no Prometheus query).
 
 Run: .venv/bin/python -m pytest tests/test_groups.py -q
 """
@@ -58,9 +58,9 @@ def test_groups_rollup_math(client, nss):
     data = r.json()
     assert data["level"] == "group"
     rows = by_id(data)
-    # The always-present rows exist even when empty.
+    # The always-present row exists even when empty.
     assert {"kyrkiv1", "dept:T300", "dept:T313",
-            "unaffiliated", "unresolved"} <= set(rows)
+            "unaffiliated"} <= set(rows)
     kyrki = rows["kyrkiv1"]
     assert kyrki["group_name"] == "Kyrki Ville"
     assert kyrki["leader"] == "kyrkiv1"
@@ -98,19 +98,13 @@ def test_groups_rollup_math(client, nss):
     assert unaff["users"] == 1 and unaff["jobs"] == 1
     assert unaff["mean_util"] == pytest.approx(85.0)
     assert unaff["school_code"] is None
-    # nobody unknown in this window: the row is a genuine zero row
-    assert rows["unresolved"]["users"] == 0
-    assert rows["unresolved"]["jobs"] == 0
-    assert rows["unresolved"]["mean_util"] == 0.0
-    assert rows["unresolved"]["vram_avg"] is None
     assert data["coverage"] == {
         "users": 4, "in_prof_group": 1, "dept_only": 2, "unaffiliated": 1,
         "unresolved": 0, "failed": 0,
     }
     # rows are ordered by util_gpu_hours desc (ties by name)
     ids = [row["group_id"] for row in data["groups"]]
-    assert ids == ["dept:T313", "unaffiliated", "kyrkiv1", "dept:T300",
-                   "unresolved"]
+    assert ids == ["dept:T313", "unaffiliated", "kyrkiv1", "dept:T300"]
     # the school filter options ride along
     assert {s["code"] for s in data["schools"]} == {"T1", "T2", "T3",
                                                     "T4", "T5", "T6"}
@@ -160,25 +154,24 @@ def test_groups_department_level(client, nss):
     t300 = rows["dept:T300"]
     assert t300["group_name"] == "Department of Computer Science"
     assert t300["users"] == 1  # bob's own osasto
-    # the special rows survive the level change
+    # the always-present row survives the level change
     assert rows["unaffiliated"]["users"] == 1
-    assert rows["unresolved"]["users"] == 0
 
 
-def test_groups_unaffiliated_and_unresolved_always_render(client, nss):
-    # everyone classified: both rows still present — "no row" must never
+def test_groups_unaffiliated_always_render(client, nss):
+    # everyone classified: the row is still present — "no row" must never
     # be read as "everyone is classified"
     data = client.get("/api/groups", params={"since_hours": 24}).json()
     rows = by_id(data)
-    assert "unaffiliated" in rows and "unresolved" in rows
+    assert "unaffiliated" in rows
     assert rows["unaffiliated"]["users"] == 1
-    assert rows["unresolved"]["users"] == 0
-    assert rows["unresolved"]["mean_util"] == 0.0
 
 
-def test_groups_unknown_user_is_unresolved(client, nss, monkeypatch):
-    # a user the directory does not know is Unresolved — an answer, not
-    # a failure — and never lands in Unaffiliated.
+def test_groups_unknown_user_folds_into_unaffiliated(client, nss,
+                                                     monkeypatch):
+    # a user the directory does not know is unresolved in coverage — an
+    # answer, not a failure — and rolls up under the Unaffiliated row
+    # (never a fake group of its own).
     def unknown_dave(username):
         if username == "dave":
             return None
@@ -187,10 +180,10 @@ def test_groups_unknown_user_is_unresolved(client, nss, monkeypatch):
     monkeypatch.setattr(deps, "user_groups", unknown_dave)
     data = client.get("/api/groups", params={"since_hours": 24}).json()
     rows = by_id(data)
-    assert rows["unaffiliated"]["users"] == 0
-    assert rows["unresolved"]["users"] == 1
-    assert rows["unresolved"]["jobs"] == 1
-    assert rows["unresolved"]["mean_util"] == pytest.approx(85.0)
+    assert "unresolved" not in rows
+    assert rows["unaffiliated"]["users"] == 1
+    assert rows["unaffiliated"]["jobs"] == 1
+    assert rows["unaffiliated"]["mean_util"] == pytest.approx(85.0)
     assert data["coverage"]["unresolved"] == 1
 
 

@@ -3,7 +3,7 @@
 // the level toggle re-fetches server-side (group → department), the
 // coverage banner renders the professor-group buckets and warns on
 // lookup failures, pre-v2 level=unit deep links still land on the group
-// level, and the Unaffiliated/Unresolved rows render even when empty.
+// level, and the Unaffiliated row renders even when empty.
 // The member drill-down fetches on row click, shows each member's
 // extra groups, and links members (and the group leader's name) to the
 // Users tab.
@@ -56,7 +56,7 @@ const BODY2 = {
   groups: [
     group("dept:T410", "Department of Electrical Engineering and Automation",
           { school_code: "ELEC" }),
-    group("unresolved", "Unresolved",
+    group("unaffiliated", "Unaffiliated",
           { users: 0, jobs: 0, running_jobs: 0, mean_util: 0 }),
   ],
 };
@@ -175,7 +175,7 @@ test("a stale response is dropped and keeps the panel loading", async (t) => {
   // the rendered rows are body2's, including the always-present row
   const tbody = doc.querySelector("#groupTable tbody");
   assert.match(tbody.textContent, /Electrical Engineering and Automation/);
-  assert.match(tbody.textContent, /Unresolved/);
+  assert.match(tbody.textContent, /Unaffiliated/);
 });
 
 test("the level toggle re-fetches with level=department", async (t) => {
@@ -212,6 +212,21 @@ test("the coverage banner shows the professor-group buckets and warns only on fa
   assert.match(banner.textContent, /2 of 4 job owners in a professor group/);
   assert.match(banner.textContent, /1 department-only/);
   assert.match(banner.textContent, /1 unaffiliated/);
+  // no unknowns in this window: no parenthesis
+  assert.doesNotMatch(banner.textContent, /unknown to the directory/);
+  // unaffiliated + unresolved fold into one row: one figure matching
+  // the row's user count, the unknown count in parentheses
+  const folded = {
+    ...BODY1,
+    coverage: { ...BODY1.coverage, unaffiliated: 2, unresolved: 1 },
+  };
+  const ctx3 = await boot({ bodies: [folded] }, 15);
+  t.after(() => ctx3.dom.window.close());
+  await ctx3.mod.loadGroups();
+  const banner3 = ctx3.dom.window.document.getElementById("groupsCoverage");
+  assert.match(banner3.textContent, /2 of 4 job owners in a professor group/);
+  assert.match(banner3.textContent,
+    /3 unaffiliated \(1 unknown to the directory\)/);
   // department-only users are the honest bucket, not a warning
   assert.equal(banner.classList.contains("warn"), false);
   // lookup failures tint the banner: their activity is in no row
@@ -228,22 +243,22 @@ test("the coverage banner shows the professor-group buckets and warns only on fa
   assert.equal(banner2.classList.contains("warn"), true);
 });
 
-test("both special rows render when the server sends them", async (t) => {
+test("the Unaffiliated row renders when the server sends it", async (t) => {
   const ctx = await boot({}, 8);
   t.after(() => ctx.dom.window.close());
   const doc = ctx.dom.window.document;
   await ctx.mod.loadGroups();
   const tbody = doc.querySelector("#groupTable tbody");
   assert.match(tbody.textContent, /Unaffiliated/);
-  // BODY1 has no unresolved row: the SERVER always sends one, but this
-  // body omits it — the client renders what the API sends, so the
-  // always-present contract belongs to the API (covered in the golden
-  // and endpoint tests). BODY2 carries it.
+  // BODY1's Unaffiliated row is populated; BODY2's is empty — either
+  // way the client renders what the API sends, so the always-present
+  // contract belongs to the API (covered in the golden and endpoint
+  // tests).
   const ctx2 = await boot({ bodies: [BODY2] }, 9);
   t.after(() => ctx2.dom.window.close());
   await ctx2.mod.loadGroups();
   assert.match(ctx2.dom.window.document.querySelector("#groupTable tbody")
-    .textContent, /Unresolved/);
+    .textContent, /Unaffiliated/);
 });
 
 test("rows without a school read as Other — cell, filter, legend agree", async (t) => {

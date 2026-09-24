@@ -116,7 +116,8 @@ COMPLETED_HISTORY = [{**record, "state": "COMPLETED"}
 
 # The Groups tab's NSS directory (deps.user_groups): each canned user's
 # group list; users outside this map are unknown to the directory (the
-# Unresolved row). Membership in a professor group does NOT come from
+# unresolved status — their activity rolls up under the Unaffiliated
+# row). Membership in a professor group does NOT come from
 # these lists — it comes from the member lists of the configured units'
 # NSS groups (GROUP_MEMBERS below); a user's own groups only ever name
 # their osasto department. dave holds no osasto group at all — the

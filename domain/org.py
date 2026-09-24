@@ -23,10 +23,12 @@ reads the same four member lists, and its row renders as
 "<Unit> (shared unit)". A user in no configured group but with an
 ``osasto-t*`` group is department-only ("<Department>, no professor
 group"); a user with neither still falls back to the department their
-own unit-shaped groups encode (see own_dept_of). Users the directory
-does not know land in the Unresolved row; known users with neither land
-in Unaffiliated — both rows are always shown and never merged into
-another row (the same spirit as never rendering an unmeasured job 0%).
+own unit-shaped groups encode (see own_dept_of). Users with neither —
+including users the directory does not know (status unresolved) — land
+in the Unaffiliated row, which is always shown and never merged into
+another row (the same spirit as never rendering an unmeasured job 0%);
+the unresolved status itself still drives the 1 h NSS re-ask and
+coverage.unresolved.
 """
 
 import configparser
@@ -63,6 +65,9 @@ STATUS_GROUP = "group"              # member (or leader) of a prof group
 STATUS_DEPT = "dept"                # department only, no prof group
 STATUS_UNAFFILIATED = "unaffiliated"  # known user, no relevant groups
 STATUS_UNRESOLVED = "unresolved"    # the directory does not know the user
+                                    # (rolls up under Unaffiliated; still
+                                    # drives the 1 h NSS re-ask and
+                                    # coverage.unresolved)
 
 # How strongly a user belongs to a group (see membership_index()).
 STRENGTH = {"leader": 5, "paid": 4, "external": 3, "staff": 2, "everyone": 1}
@@ -471,7 +476,6 @@ def resolve_users(usernames, conf=None, index=None):
 
 GROUP_DEPT_PREFIX = "dept:"
 GROUP_UNAFFILIATED = "unaffiliated"
-GROUP_UNRESOLVED = "unresolved"
 
 LOW_UTIL_THRESHOLD = 30.0
 
@@ -485,7 +489,8 @@ def group_id_for(result, level):
     — a group member their group's department, a department-only user
     their own osasto. A group member with no department anywhere keeps
     the group row at both levels (a department row needs a department).
-    The two special rows are their own ids.
+    A non-group user without a department — unaffiliated, or unresolved
+    (the directory does not know them) — shares the Unaffiliated row.
     """
     status = result["status"]
     if result["dept_code"]:
@@ -494,7 +499,7 @@ def group_id_for(result, level):
         return result["group"]
     if status == STATUS_GROUP:
         return result["group"]
-    return status
+    return GROUP_UNAFFILIATED
 
 
 def rollup_groups(user_rows, mapping, jobs_view, step, level="group",
@@ -518,10 +523,12 @@ def rollup_groups(user_rows, mapping, jobs_view, step, level="group",
     member under their professor's department, everyone else under
     their own osasto) named after the department alone. Rows are ordered
     by util_gpu_hours descending (ties by name), with the Unaffiliated
-    and Unresolved rows ALWAYS present — even empty — so "no such users"
+    row ALWAYS present — even empty — so "no such users"
     can never be read as "everyone is classified" (the same spirit as
-    the no-data gh200 row). Members ride along under ``members`` for the
-    drill-down; the response schema keeps only ``top_users``.
+    the no-data gh200 row); a user the directory does not know (status
+    unresolved) rolls up under it too. Members ride along under
+    ``members`` for the drill-down; the response schema keeps only
+    ``top_users``.
     """
     if conf is None:
         conf = load_prof_groups()
@@ -552,10 +559,9 @@ def rollup_groups(user_rows, mapping, jobs_view, step, level="group",
             "members": [],
         })
 
-    # The two always-present rows are seeded before any member lands, so
-    # an empty window still reports them as genuine zeros.
+    # The always-present row is seeded before any member lands, so an
+    # empty window still reports it as a genuine zero.
     row_for(GROUP_UNAFFILIATED, "Unaffiliated", None)
-    row_for(GROUP_UNRESOLVED, "Unresolved", None)
 
     for m in user_rows:
         result = mapping.get(m["user"])
@@ -572,9 +578,13 @@ def rollup_groups(user_rows, mapping, jobs_view, step, level="group",
         else:
             dept = result["dept_code"]
             if not dept:
-                gid = status  # unaffiliated / unresolved
-                name = "Unaffiliated" if status == STATUS_UNAFFILIATED \
-                    else "Unresolved"
+                # no professor group and no department anywhere: the
+                # Unaffiliated row. A user the directory does not know
+                # (status unresolved) folds in here too — one honest
+                # outside-every-row bucket; coverage.unresolved and the
+                # member's own status still say which is which.
+                gid = GROUP_UNAFFILIATED
+                name = "Unaffiliated"
             else:
                 gid = GROUP_DEPT_PREFIX + dept
                 name = dept_name(dept, conf) + (

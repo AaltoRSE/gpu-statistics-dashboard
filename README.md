@@ -98,8 +98,9 @@ OS-level preference applies when no choice has been saved.
 - Click a row for the member drill-down — every member with their
   group, their own department, and any **extra groups**, each user
   linking to the Users tab.
-- The **Unaffiliated** and **Unresolved** rows (no relevant groups; user
-  unknown to the directory) always render, even empty — an empty row is
+- The **Unaffiliated** row (no professor group or department; users
+  unknown to the directory roll up under it too) always renders, even
+  empty — an empty row is
   never read as "everyone is classified". The **coverage banner** states
   how many of the window's job owners are in a professor group and
   discloses partial NSS failures (whose activity is in no row, never

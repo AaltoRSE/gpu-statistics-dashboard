@@ -4,7 +4,8 @@
  * search box filter that response locally (no fetch) and keep the URL in
  * sync (/groups?school=&level=&running=). A row is one professor's
  * research group (the AD unit their prof_groups.conf row names); the
- * Unaffiliated and Unresolved rows always render — an empty row means
+ * Unaffiliated row always renders (unresolved users — the directory
+ * does not know them — roll up under it) — an empty row means
  * nobody is in it, never that nobody exists. The coverage banner
  * discloses how much of the window's job owners the directory could
  * classify; a school-colored bar chart shows the top 30 groups by mean
@@ -202,16 +203,21 @@ function renderGroupTable() {
 // professor group in prof_groups.conf.)
 function renderCoverage(coverage) {
   const el = $("groupsCoverage");
+  // Unaffiliated and unresolved fold into one row, so one figure — N
+  // matches the row's user count — with the unknown count in
+  // parentheses only when there are unknowns.
+  const unaffiliated = coverage.unaffiliated + coverage.unresolved;
   const bits = [
     coverage.in_prof_group + " of " + coverage.users +
     " job owners in a professor group",
   ];
   if (coverage.dept_only)
     bits.push(coverage.dept_only + " department-only");
-  if (coverage.unaffiliated)
-    bits.push(coverage.unaffiliated + " unaffiliated");
-  if (coverage.unresolved)
-    bits.push(coverage.unresolved + " unknown to the directory");
+  if (unaffiliated)
+    bits.push(unaffiliated + " unaffiliated" +
+      (coverage.unresolved
+        ? " (" + coverage.unresolved + " unknown to the directory)"
+        : ""));
   if (coverage.failed)
     bits.push(coverage.failed + " lookup failures — their activity is " +
       "missing from every figure below");

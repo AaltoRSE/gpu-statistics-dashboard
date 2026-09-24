@@ -201,7 +201,8 @@ class GroupCoverage(BaseModel):
                               "professor group and no osasto-t* group; "
                               "their row always renders.")
     unresolved: int = Field(description="Users the directory does not "
-                            "know; their row always renders.")
+                            "know; their activity rolls up under the "
+                            "always-present Unaffiliated row.")
     failed: int = Field(description="Users whose NSS lookup errored "
                         "(partial directory outage). Their activity is in "
                         "no row — disclosed here, not folded into "
@@ -213,8 +214,9 @@ class GroupRow(BaseModel):
           "leader's username, unit:<CODE> for a shared unit (several "
           "professors share the unit, so the row has no single leader), "
           "dept:TNNN ('<Department>, no professor group' at group "
-          "level), or the always-present unaffiliated / unresolved "
-          "rows. Use it for the drill-down path.")
+          "level), or the always-present unaffiliated row — unresolved "
+          "users (the directory does not know them) roll up under it "
+          "too. Use it for the drill-down path.")
     group_name: str
     leader: Optional[str] = Field(
         default=None,
@@ -236,7 +238,7 @@ class GroupRow(BaseModel):
         default=None,
         description="School short name (SCI, ELEC, ...), Other when the "
         "department code matches no school prefix, null for the "
-        "unaffiliated/unresolved rows.")
+        "Unaffiliated row.")
     school_name: Optional[str] = None
     users: int
     jobs: int
@@ -281,8 +283,9 @@ class GroupMember(BaseModel):
     group: Optional[str] = Field(
         default=None,
         description="The user's primary professor group (the leader's "
-        "username); null for department-only, unaffiliated and "
-        "unresolved users.")
+        "username); null for department-only and Unaffiliated users — "
+        "unresolved users (the directory does not know them) among "
+        "them.")
     membership: Optional[str] = Field(
         default=None,
         description="How the user belongs to their primary group: "

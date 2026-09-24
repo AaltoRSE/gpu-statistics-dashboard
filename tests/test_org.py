@@ -566,7 +566,7 @@ def test_user_groups_returns_sorted_unique_names(monkeypatch):
 
 def test_user_groups_unknown_user_is_none_not_error(monkeypatch):
     looked_up = _patch_nss(monkeypatch, {"alice": [10]})
-    # An unknown user is an ANSWER (the Unresolved row), not a failure.
+    # An unknown user is an ANSWER (the unresolved status), not a failure.
     assert deps.user_groups("ghost") is None
     assert looked_up == ["ghost"]
 
@@ -655,13 +655,12 @@ def test_rollup_group_level_rows(nss, index):
     assert kyrki["members"][0]["group"] == "kyrkiv1"
     assert kyrki["members"][0]["membership"] in ("paid", "everyone")
     assert kyrki["members"][0]["own_dept"] in ("T410", "T411")
-    # the special rows are always present, even empty
+    # the always-present row exists even when empty
     assert by_id["unaffiliated"]["users"] == 0
-    assert by_id["unresolved"]["users"] == 0
-    assert by_id["unresolved"]["mean_util"] == 0.0
-    assert by_id["unresolved"]["vram_avg"] is None
-    assert by_id["unresolved"]["leader"] is None
-    assert by_id["unresolved"]["unit_codes"] == []
+    assert by_id["unaffiliated"]["mean_util"] == 0.0
+    assert by_id["unaffiliated"]["vram_avg"] is None
+    assert by_id["unaffiliated"]["leader"] is None
+    assert by_id["unaffiliated"]["unit_codes"] == []
 
 
 def test_rollup_department_only_naming_per_level(nss, index):
@@ -718,7 +717,7 @@ def test_rollup_department_level_merges_group_and_dept_only(nss, index):
         [user_row("pete"), user_row("carol", mean=10.0, util_h=0.01)],
         mapping, [], 120, level="department", conf=conf_)
     by_id = {r["group_id"]: r for r in rows}
-    assert set(by_id) == {"dept:T313", "unaffiliated", "unresolved"}
+    assert set(by_id) == {"dept:T313", "unaffiliated"}
     t313 = by_id["dept:T313"]
     assert t313["users"] == 2 and t313["leader"] is None
     assert t313["members"][0]["group"] == "skaski1"
@@ -741,7 +740,7 @@ def test_rollup_orders_by_util_and_counts_low_eff(nss, index):
          user_row("dave", mean=85.0, util_h=0.06)],
         mapping, jobs_view, 120, level="group", conf=conf_)
     ids = [r["group_id"] for r in rows]
-    assert ids == ["dept:T313", "unaffiliated", "kyrkiv1", "unresolved"]
+    assert ids == ["dept:T313", "unaffiliated", "kyrkiv1"]
     by_id = {r["group_id"]: r for r in rows}
     assert by_id["kyrkiv1"]["low_eff_jobs"] == 1
     assert by_id["kyrkiv1"]["top_users"] == [
