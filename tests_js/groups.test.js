@@ -289,6 +289,17 @@ test("the group table lists GPU-hours held, not utilization-weighted GPU-hours",
       .classList.contains("sorted-desc"), true);
 });
 
+test("the group table carries one glossary trigger — by the table title", async (t) => {
+  const ctx = await boot({}, 14);
+  t.after(() => ctx.dom.window.close());
+  const doc = ctx.dom.window.document;
+  await ctx.mod.loadGroups();
+  const btns = [...doc.querySelectorAll("#tab-groups .glossary-btn")];
+  assert.equal(btns.length, 1, "a single ? — on the table title, not per column");
+  assert.equal(btns[0].dataset.glossary, "prof-groups");
+  assert.equal(btns[0].closest("h2").textContent.includes("Group table"), true);
+});
+
 test("clicking a group row fetches its members with kind and extra groups", async (t) => {
   const ctx = await boot({}, 5);
   t.after(() => ctx.dom.window.close());

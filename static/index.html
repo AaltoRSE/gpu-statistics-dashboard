@@ -406,7 +406,7 @@
           <div class="legend" id="groupsSchoolLegend"></div>
         </div>
         <div class="card" style="margin-top:14px">
-          <h2>Group table <span class="small" id="gCount"></span></h2>
+          <h2>Group table <span class="small" id="gCount"></span><button type="button" class="glossary-btn" data-glossary="prof-groups" title="What is this?">?</button></h2>
           <div class="table-scroll">
             <table id="groupTable">
               <thead><tr>
@@ -416,15 +416,15 @@
                 <th class="num" data-k="users">Users</th>
                 <th class="num" data-k="jobs">Jobs</th>
                 <th class="num" data-k="running_jobs">Running</th>
-                <th class="num" data-k="mean_util">Mean util %<button type="button" class="glossary-btn" data-glossary="groups-mean-util" title="What is this?">?</button></th>
-                <th class="num" data-k="gpu_hours">GPU-hours held<button type="button" class="glossary-btn" data-glossary="gpu-hours-held" title="What is this?">?</button></th>
+                <th class="num" data-k="mean_util">Mean util %</th>
+                <th class="num" data-k="gpu_hours">GPU-hours held</th>
                 <th class="num" data-k="vram_avg">VRAM %</th>
-                <th class="num" data-k="low_eff_jobs" title="member jobs whose mean utilization is under 30%">&lt;30% jobs<button type="button" class="glossary-btn" data-glossary="low-eff-jobs" title="What is this?">?</button></th>
+                <th class="num" data-k="low_eff_jobs" title="member jobs whose mean utilization is under 30%">&lt;30% jobs</th>
               </tr></thead>
               <tbody></tbody>
             </table>
           </div>
-          <div class="hint">Rows are professors&rsquo; research groups &mdash; the Aalto AD unit each professor leads, its members read from that unit&rsquo;s NSS groups (<button type="button" class="glossary-btn" data-glossary="prof-groups" title="What is this?">what counts as a member?</button>). Mean utilization is weighted by every member job&rsquo;s GPU samples, not averaged per user. GPU-hours held = the window GPU time the members&rsquo; GPUs were reserved. The Unaffiliated and Unresolved rows are always shown &mdash; an empty row means nobody is in it, not that nobody exists. Click a row for the group&rsquo;s members; click the leader&rsquo;s name to open them in the Users tab. Click a column header to sort.</div>
+          <div class="hint">Rows are professors&rsquo; research groups &mdash; the Aalto AD unit each professor leads, its members read from that unit&rsquo;s NSS groups. Mean utilization is weighted by every member job&rsquo;s GPU samples, not averaged per user. GPU-hours held = the window GPU time the members&rsquo; GPUs were reserved. The Unaffiliated and Unresolved rows are always shown &mdash; an empty row means nobody is in it, not that nobody exists. Click a row for the group&rsquo;s members; click the leader&rsquo;s name to open them in the Users tab. Click a column header to sort.</div>
         </div>
       </div>
       <div class="results-loading">Loading group efficiency&hellip;</div>
