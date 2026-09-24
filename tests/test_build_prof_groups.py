@@ -212,6 +212,220 @@ def test_conf_is_parseable_ini(built):
     assert not cp.has_option("groups", "#ghostp1")
 
 
+# ---- rule d (DN leaf OU) and [units] ------------------------------------
+# A second synthetic world: professors whose DN leaf OU IS the unit (the
+# shape AD uses when no managedBy/description names them), plus the
+# rejects (shared leaf, no evidence, unit already claimed by rule a) and
+# the shared-unit units (>= 2 leaf professors, not …00, not "common").
+
+def _dnprof(user, name, sn, given, dept_attr, leaf):
+    return professor(
+        user, name, sn, given, dept=dept_attr,
+        dn="CN=%s,OU=%s,OU=T499,OU=Staff,OU=users,OU=root,"
+           "DC=org,DC=aalto,DC=fi" % (name, leaf))
+
+
+DNOU_PROFESSORS_DUMP = "\n\n".join([
+    _dnprof("dnou1", "Dnou One", "Dnou", "One", "Optics Group", "T49901"),
+    _dnprof("dnou2", "Dnou Two", "Dnou", "Two", "Photonics", "T49902"),
+    _dnprof("dnou3", "Dnou Three", "Dnou", "Three", "Shared Things",
+            "T49903"),
+    _dnprof("dnou4", "Dnou Four", "Dnou", "Four", "Shared Things",
+            "T49903"),
+    _dnprof("dnou5", "Dnou Five", "Dnou", "Five", "Nothing", "T49905"),
+    _dnprof("dnou7", "Dnou Seven", "Dnou", "Seven", "Cold fusion",
+            "T40555"),
+    # rule b's match ("Eight Nina group") AND a rule-d-claimable leaf:
+    # rule b must win
+    professor("rulebw1", "Eight Nina", "Eight", "Nina",
+              dept="Eight Nina group",
+              dn="CN=Eight Nina,OU=T49909,OU=T499,OU=Staff,OU=users,"
+                 "DC=org,DC=aalto,DC=fi"),
+    # accepted via the unit's -staff NSS list
+    _dnprof("dnou8", "Dnou Eight", "Dnou", "Eight", "Photonics", "T49904"),
+    # two-professor leaves that must become (or stay out of) [units]
+    _dnprof("dnou9", "Dnou Nine", "Dnou", "Nine", "Costly", "T49900"),
+    _dnprof("dnou10", "Dnou Ten", "Dnou", "Ten", "Costly", "T49900"),
+    _dnprof("dnou11", "Dnou Eleven", "Dnou", "Eleven", "Common", "T49910"),
+    _dnprof("dnou12", "Dnou Twelve", "Dnou", "Twelve", "Common", "T49910"),
+    # claims T40555 through rule a (managedBy), blocking dnou7's leaf
+    professor("mallik1", "Mallik Virtanen", "Mallik", "Virtanen",
+              dept="Department of Information and Communications "
+                   "Engineering",
+              company="School of Electrical Engineering"),
+])
+
+DNOU_UNIT_DUMP = "\n\n".join([
+    unit("laitos-t49901", description="Optics Group"),
+    unit("laitos-t49902", description="Laser Lab"),
+    unit("laitos-t49903", description="Shared Things"),
+    unit("laitos-t49904", description="Beamline"),
+    unit("laitos-t49905", description="Unrelated Unit"),
+    unit("laitos-t40555", description="Cold fusion project",
+         managed_by="CN=Mallik Virtanen,OU=Users,DC=example,DC=org"),
+    unit("laitos-t49900", description="Costly Centre"),
+    unit("laitos-t49909", description="Eight Nina group"),
+    unit("laitos-t49910", description="Common Facilities"),
+])
+
+DNOU_NSS_GROUPS = {
+    "dnou1": ["osasto-t499"],
+    "dnou2": ["osasto-t499"],
+    "dnou3": ["osasto-t499"],
+    "dnou4": ["osasto-t499"],
+    "dnou5": ["osasto-t499"],
+    "dnou7": ["osasto-t412"],
+    "rulebw1": ["laitos-t49909", "osasto-t499"],
+    "dnou8": ["osasto-t499"],
+    "dnou9": ["osasto-t499"],
+    "dnou10": ["osasto-t499"],
+    "dnou11": ["osasto-t499"],
+    "dnou12": ["osasto-t499"],
+    "mallik1": ["laitos-t40555", "osasto-t412"],
+}
+
+DNOU_GROUP_MEMBERS = {
+    "laitos-t49902": ["dnou2"],
+    "t49904-staff": ["dnou8"],
+}
+
+
+@pytest.fixture()
+def built_dn(monkeypatch):
+    monkeypatch.setattr(deps, "user_groups",
+                        lambda user: DNOU_NSS_GROUPS.get(user))
+    monkeypatch.setattr(deps, "group_members",
+                        lambda name: DNOU_GROUP_MEMBERS.get(name))
+    lines, report = bpg.build(DNOU_PROFESSORS_DUMP, DNOU_UNIT_DUMP)
+    return "\n".join(lines), report
+
+
+def test_rule_d_accepts_on_department_match(built_dn):
+    conf, report = built_dn
+    # T49901's description names nobody; the professor's AD department
+    # equals the description and their DN leaf OU is the unit
+    assert "dnou1 = Dnou One | T499 | T49901" in conf
+    assert "rule-d claims" in "\n".join(report)
+    assert "dnou1" in "\n".join(report)
+
+
+def test_rule_d_accepts_on_nss_membership(built_dn):
+    conf, _ = built_dn
+    # no department match ("Photonics" vs "Laser Lab"): the laitos list
+    assert "dnou2 = Dnou Two | T499 | T49902" in conf
+    # and the -staff list
+    assert "dnou8 = Dnou Eight | T499 | T49904" in conf
+
+
+def test_rule_d_rejects_shared_leaf_no_evidence_and_claimed(built_dn):
+    conf, _ = built_dn
+    # T49903 has TWO leaf professors: no single leader is derivable and
+    # nobody claims it, even though both departments match the name
+    assert "# dnou3 = Dnou Three | T499 | (no own unit found" in conf
+    assert "# dnou4 = Dnou Four | T499 | (no own unit found" in conf
+    # department != description and no laitos/-staff membership
+    assert "# dnou5 = Dnou Five | T499 | (no own unit found" in conf
+    # T40555 was claimed through rule a already
+    assert "mallik1 = Mallik Virtanen | T412 | T40555" in conf
+    assert "# dnou7 = Dnou Seven | T412 | (no own unit found" in conf
+
+
+def test_rules_a_and_b_win_over_rule_d(built_dn):
+    conf, report = built_dn
+    # rule b's description match owns the row even though the DN leaf OU
+    # claim would succeed too — the second pass only sees unit-less
+    # professors, and the report stays silent about resolved ones
+    assert "rulebw1 = Eight Nina | T499 | T49909" in conf
+    assert "rulebw1" not in "\n".join(report)
+
+
+def test_shared_units_go_to_the_units_section(built_dn):
+    conf, _ = built_dn
+    assert "T49903 = Shared Things | T499" in conf
+    # cost centres (…00) and "common" units are never shared-unit rows
+    assert "T49900" not in conf
+    assert "T49910" not in conf
+
+
+def test_report_sections_for_rule_d_and_shared_units(built_dn):
+    _, report = built_dn
+    text = "\n".join(report)
+    assert "rule-d claims" in text
+    for user in ("dnou1", "dnou2", "dnou8"):
+        assert user in text, user
+    assert "shared units" in text
+    assert "T49903" in text
+
+
+def test_main_preserves_hand_lines(tmp_path, monkeypatch, capsys):
+    dump_dir = tmp_path / "ad_dump"
+    dump_dir.mkdir()
+    (dump_dir / "ad_professors.txt").write_text(PROFESSORS_DUMP,
+                                                encoding="utf-8")
+    (dump_dir / "ad_unit_groups.txt").write_text(UNIT_GROUPS_DUMP,
+                                                 encoding="utf-8")
+    monkeypatch.setattr(deps, "user_groups",
+                        lambda user: NSS_GROUPS.get(user))
+    monkeypatch.setattr(deps, "group_members", lambda name: None)
+    # conftest's autouse fixture writes the runtime TEST_PROF_GROUPS to
+    # tmp_path/"prof_groups.conf" — the built file needs its own name so
+    # preservation never mistakes that for a previous build.
+    out = tmp_path / "built.conf"
+    bpg.main(["--dump-dir", str(dump_dir), "--out", str(out)])
+    text = out.read_text(encoding="utf-8")
+    # hand edits: a non-professor leader, a hand-filled unit, a resolved
+    # no-unit professor given codes, and a line the build itself resolves.
+    # Splice into the build's own (always-present, empty) [units] header —
+    # a second [units] section would make the preservation parser fail.
+    text = text.replace(
+        "\n[units]\n\n[groups]\n",
+        "\n[units]\nT39999 = Hand Unit | T313\n\n[groups]\n"
+        "hellsa1 = Hellas Arto | T313 | T313AD\n"
+        "ghostp1 = Ghost Professor | T313 | T31398\n")
+    text = text.replace("kyrkiv1 = Kyrki Ville | T410 | T40106",
+                        "kyrkiv1 = Hand Edited | T410 | T40106")
+    out.write_text(text, encoding="utf-8")
+    bpg.main(["--dump-dir", str(dump_dir), "--out", str(out)])
+    text = out.read_text(encoding="utf-8")
+    # the hand lines the new build cannot produce survive, sorted in
+    assert "hellsa1 = Hellas Arto | T313 | T313AD" in text
+    assert "ghostp1 = Ghost Professor | T313 | T31398" in text
+    assert "# ghostp1" not in text      # the placeholder is dropped
+    assert "T39999 = Hand Unit | T313" in text
+    # a key the build resolves: the generated line wins
+    assert "kyrkiv1 = Kyrki Ville | T410 | T40106" in text
+    assert "Hand Edited" not in text
+    # and the report lists every kept line
+    assert "kept hand lines" in capsys.readouterr().out
+
+
+def test_main_preserves_nothing_without_an_existing_conf(
+        tmp_path, monkeypatch, capsys):
+    dump_dir = tmp_path / "ad_dump"
+    dump_dir.mkdir()
+    (dump_dir / "ad_professors.txt").write_text(PROFESSORS_DUMP,
+                                                encoding="utf-8")
+    (dump_dir / "ad_unit_groups.txt").write_text(UNIT_GROUPS_DUMP,
+                                                 encoding="utf-8")
+    monkeypatch.setattr(deps, "user_groups",
+                        lambda user: NSS_GROUPS.get(user))
+    monkeypatch.setattr(deps, "group_members", lambda name: None)
+    out = tmp_path / "built.conf"  # not conftest's prof_groups.conf
+    assert bpg.main(["--dump-dir", str(dump_dir), "--out", str(out)]) == 0
+    assert "kept hand lines" not in capsys.readouterr().out
+    assert "hellsa1" not in out.read_text(encoding="utf-8")
+
+
+def test_dn_leaf_unit_shapes():
+    dn = "CN=Ala-Nissilä Tapio,OU=T30402,OU=T304,OU=Staff,OU=users"
+    assert bpg.dn_leaf_unit(dn) == "T30402"
+    # a 4-char leaf OU is a department, not a unit
+    assert bpg.dn_leaf_unit("CN=X,OU=Users,OU=T410,DC=x") is None
+    assert bpg.dn_leaf_unit("CN=X,OU=T304,DC=x") is None
+    assert bpg.dn_leaf_unit("") is None
+    assert bpg.dn_leaf_unit(None) is None
+
+
 # ---- dump parsing corners -----------------------------------------------
 
 def test_parse_dump_continuation_and_multi_value():
@@ -348,7 +562,7 @@ def test_main_writes_conf_and_report(tmp_path, monkeypatch, capsys):
                                                  encoding="utf-8")
     monkeypatch.setattr(deps, "user_groups",
                         lambda user: NSS_GROUPS.get(user))
-    out = tmp_path / "prof_groups.conf"
+    out = tmp_path / "built.conf"
     rc = bpg.main(["--dump-dir", str(dump_dir), "--out", str(out)])
     assert rc == 0
     text = out.read_text(encoding="utf-8")
