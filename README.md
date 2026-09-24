@@ -95,11 +95,9 @@ OS-level preference applies when no choice has been saved.
   (Professor group / Department) and **Running only** re-fetch. Deep
   link: `/groups?school=SCI&level=department` (old `level=unit` links
   land on the professor-group level).
-- Click a row for the member drill-down — every member with their group
-  and **membership kind** (leader / paid / external / staff / everyone),
-  their own
-  department, and any **extra groups**, each user linking to the Users
-  tab.
+- Click a row for the member drill-down — every member with their
+  group, their own department, and any **extra groups**, each user
+  linking to the Users tab.
 - The **Unaffiliated** and **Unresolved** rows (no relevant groups; user
   unknown to the directory) always render, even empty — an empty row is
   never read as "everyone is classified". The **coverage banner** states

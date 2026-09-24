@@ -5,8 +5,8 @@
 // lookup failures, pre-v2 level=unit deep links still land on the group
 // level, and the Unaffiliated/Unresolved rows render even when empty.
 // The member drill-down fetches on row click, shows each member's
-// membership kind and extra groups, and links members (and the group
-// leader's name) to the Users tab.
+// extra groups, and links members (and the group leader's name) to the
+// Users tab.
 //
 // Node's own test runner + jsdom against the app's real index.html, same
 // harness shape as partitions-parallel.test.js: timers are stubbed so
@@ -316,7 +316,9 @@ test("clicking a group row fetches its members with kind and extra groups", asyn
   assert.equal(panel.style.display, "block");
   const tbody = doc.querySelector("#memberTable tbody");
   assert.match(tbody.textContent, /hannuse2/);
-  assert.match(tbody.textContent, /everyone/, "membership kind renders");
+  // the membership column is gone from the drill-down
+  assert.ok(![...doc.querySelectorAll("#memberTable th")].some(
+    (th) => th.dataset.k === "membership"), "no Membership header");
   assert.match(tbody.textContent, /backstt1/, "extra groups render as chips");
   const link = tbody.querySelector("a.userlink");
   assert.ok(link, "members link to the Users tab");

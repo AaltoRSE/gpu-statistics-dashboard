@@ -333,7 +333,6 @@ function memberRowHtml(m) {
     <tr class="row" data-user="${m.user}">
       <td>${raw(userLink(m.user))}</td>
       <td>${m.group || "—"}</td>
-      <td>${m.membership || "—"}</td>
       <td class="num">${fmtInt(m.jobs)}</td>
       <td class="num">${fmtInt(m.running_jobs)}</td>
       <td class="num">${raw(pctBar(m.mean_util))}</td>
@@ -367,7 +366,6 @@ const memberTable = createTable({
   el: $("memberTable"),
   columns: [
     { key: "user", type: "text" }, { key: "group", type: "text" },
-    { key: "membership", type: "text" },
     { key: "jobs", type: "number" }, { key: "running_jobs", type: "number" },
     { key: "mean_util", type: "number" },
     { key: "util_gpu_hours", type: "number" },
