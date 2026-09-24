@@ -28,6 +28,7 @@
   <button data-tab="jobs" class="active">Jobs<span class="tab-badge" id="jobsLimitBadge" hidden></span></button>
   <button data-tab="partitions">Partitions</button>
   <button data-tab="users">Users</button>
+  <button data-tab="groups">Groups</button>
   <button data-tab="nodes">Nodes</button>
 </nav>
 <main>
@@ -356,6 +357,101 @@
         </div>
       </div>
       <div class="results-loading">Loading selected-user job history&hellip;</div>
+    </div>
+  </section>
+
+  <!-- ============ GROUPS ============ -->
+  <section class="tabpage" id="tab-groups">
+    <div class="filter-card">
+      <h2>Groups</h2>
+      <div class="controls" style="margin-bottom:0">
+        <label>Window
+          <select id="gWindow">
+            <option value="24" selected>last 24 h</option>
+            <option value="72">last 3 days</option>
+            <option value="168">last 7 days</option>
+            <option value="336">last 14 days</option>
+            <option value="720">last 30 days</option>
+          </select>
+        </label>
+        <label>School
+          <select id="gSchool"><option value="">all schools</option></select>
+        </label>
+        <label>Level
+          <select id="gLevel">
+            <option value="unit" selected>Unit (research group)</option>
+            <option value="department">Department</option>
+          </select>
+        </label>
+        <label class="row"><input id="gRunning" type="checkbox"> Running only</label>
+        <label>Search (group / department)
+          <input id="gSearch" class="user-search" type="text"
+                 placeholder="type to filter — no fetch">
+        </label>
+        <button id="gRefresh" title="re-fetch the group list"><span aria-hidden="true">&#8635;</span> refresh</button>
+        <span class="control-meta">
+          <span class="meta-count" id="gMetaCount"></span>
+          <span class="small" id="gMeta"></span>
+          <span class="small" data-fresh-for="groupsResults"></span>
+        </span>
+      </div>
+    </div>
+    <div class="hint coverage-banner" id="groupsCoverage" hidden></div>
+    <div id="groupsResults" class="results-panel loading">
+      <div class="results-content">
+        <div class="card">
+          <h2>Mean utilization by group <span class="small" id="gChartNote"></span></h2>
+          <div class="chart" id="groupsBarPlot"></div>
+          <div class="empty-state" id="groupsBarEmpty" hidden>No groups match the current filters.</div>
+          <div class="legend" id="groupsSchoolLegend"></div>
+        </div>
+        <div class="card" style="margin-top:14px">
+          <h2>Group table <span class="small" id="gCount"></span></h2>
+          <div class="table-scroll">
+            <table id="groupTable">
+              <thead><tr>
+                <th data-k="group_name">Group</th>
+                <th data-k="school_code">School</th>
+                <th class="num" data-k="users">Users</th>
+                <th class="num" data-k="jobs">Jobs</th>
+                <th class="num" data-k="running_jobs">Running</th>
+                <th class="num" data-k="mean_util">Mean util %</th>
+                <th class="num" data-k="util_gpu_hours">GPU-hours</th>
+                <th class="num" data-k="gpu_hours">GPU-hours held</th>
+                <th class="num" data-k="vram_avg">VRAM %</th>
+                <th class="num" data-k="low_eff_jobs" title="member jobs whose mean utilization is under 30%">&lt;30% jobs</th>
+              </tr></thead>
+              <tbody></tbody>
+            </table>
+          </div>
+          <div class="hint">Mean utilization is weighted by every member job&rsquo;s GPU samples, not averaged per user. GPU-hours = utilization-weighted (the Users tab&rsquo;s figure, summed over members); GPU-hours held = the window GPU time the members&rsquo; GPUs were reserved. The Unaffiliated and Unresolved rows are always shown &mdash; an empty row means nobody is in it, not that nobody exists. Click a row for the group&rsquo;s members. Click a column header to sort.</div>
+        </div>
+      </div>
+      <div class="results-loading">Loading group efficiency&hellip;</div>
+    </div>
+    <div id="groupMembersResults" class="results-panel" style="display:none">
+      <div class="results-content">
+        <div class="card" id="groupMembersCard">
+          <h2 id="groupMembersTitle">Members</h2>
+          <div class="table-scroll compact">
+            <table id="memberTable">
+              <thead><tr>
+                <th data-k="user">User</th>
+                <th data-k="unit_code">Unit</th>
+                <th class="num" data-k="jobs">Jobs</th>
+                <th class="num" data-k="running_jobs">Running</th>
+                <th class="num" data-k="mean_util">Mean util %</th>
+                <th class="num" data-k="util_gpu_hours">GPU-hours</th>
+                <th class="num" data-k="vram_avg">VRAM %</th>
+                <th data-k="extra_units">Other units</th>
+              </tr></thead>
+              <tbody></tbody>
+            </table>
+          </div>
+          <div class="hint">Click a user to open them in the Users tab. Extra units lists the member&rsquo;s other laitos groups when they hold several &mdash; the roll-up uses the one their department matches.</div>
+        </div>
+      </div>
+      <div class="results-loading">Loading group members&hellip;</div>
     </div>
   </section>
 
