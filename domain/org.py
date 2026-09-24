@@ -91,14 +91,24 @@ def load_org_map(path=None):
     resolves). The cache key includes the path, so flipping
     ``ORG_UNITS_FILE`` between calls re-reads instead of reusing the
     previous file's parse.
+
+    Raises DirectoryError when the file is unreadable or unparseable:
+    the Groups tab's whole classification depends on it, so a missing
+    config must fail loudly (a 502) rather than silently classifying
+    everyone as unaffiliated.
     """
     global _cache
     path = path or org_units_path()
-    mtime = os.stat(path).st_mtime
-    with _LOCK:
-        if _cache is not None and _cache[0] == (path, mtime):
-            return _cache[1]
-    parsed = _parse_org_file(path)
+    try:
+        mtime = os.stat(path).st_mtime
+        parsed = None
+        with _LOCK:
+            if _cache is not None and _cache[0] == (path, mtime):
+                return _cache[1]
+        parsed = _parse_org_file(path)
+    except (OSError, configparser.Error) as exc:
+        raise deps.DirectoryError(
+            "org file %r unavailable: %s" % (path, exc)) from exc
     with _LOCK:
         _cache = ((path, mtime), parsed)
     return parsed
@@ -131,18 +141,28 @@ def unit_name(unit_code, org_map):
     return (unit and unit["name"]) or unit_code
 
 
-def school_for_dept(dept_code, org_map):
-    """Longest-prefix match of the department code against [schools];
-    ``None`` when there is no department, ``"Other"`` when nothing
-    matches (T5/T6 legacy prefixes are themselves named Other)."""
+def school_pair(dept_code, org_map):
+    """``(short, full)`` for a department code: ``(None, None)`` without
+    a department, ``("Other", None)`` when no configured prefix matches
+    (legacy T5/T6 prefixes carry their own Other full name)."""
     if not dept_code:
-        return None
+        return None, None
     best = None
     for prefix in org_map["schools"]:
         if dept_code.startswith(prefix) and (
                 best is None or len(prefix) > len(best)):
             best = prefix
-    return org_map["schools"][best]["short"] if best else "Other"
+    if best is None:
+        return "Other", None
+    school = org_map["schools"][best]
+    return school["short"], school["full"]
+
+
+def school_for_dept(dept_code, org_map):
+    """Longest-prefix match of the department code against [schools];
+    ``None`` when there is no department, ``"Other"`` when nothing
+    matches (T5/T6 legacy prefixes are themselves named Other)."""
+    return school_pair(dept_code, org_map)[0]
 
 
 # ---- classification ----------------------------------------------------
@@ -287,3 +307,161 @@ def resolve_users(usernames, org_map=None):
         "unmapped_codes": sorted(unmapped),
     }
     return mapping, coverage
+
+
+# ---- the Groups roll-up (plan commit 6 f) ------------------------------
+
+GROUP_UNIT_PREFIX = "unit:"
+GROUP_DEPT_PREFIX = "dept:"
+GROUP_UNAFFILIATED = "unaffiliated"
+GROUP_UNRESOLVED = "unresolved"
+
+LOW_UTIL_THRESHOLD = 30.0
+
+
+def group_id_for(result, level):
+    """A classification's roll-up row identity at the given level.
+
+    At unit level a unit user's own group and a unit-less user a
+    department row (``dept:T410``); at department level both statuses
+    collapse into the user's department (their own osasto wins over the
+    unit's configured DEPT). The two special rows are their own ids.
+    """
+    status = result["status"]
+    if status == STATUS_UNIT and level != "department":
+        return GROUP_UNIT_PREFIX + result["unit_code"]
+    if result["dept_code"]:
+        return GROUP_DEPT_PREFIX + result["dept_code"]
+    return status
+
+
+def rollup_groups(user_rows, mapping, jobs_view, step, level="unit",
+                  org_map=None):
+    """Roll per-user aggregates up to Groups-tab rows (commit 6 f).
+
+    ``user_rows`` is aggregate_users()' output; ``mapping`` the
+    classification map from resolve_users (users whose lookup failed are
+    absent — their activity stays out of every row and is disclosed
+    through coverage.failed, never folded into Unaffiliated);
+    ``jobs_view`` the window's job view for the per-job low-utilization
+    count; ``step`` the window's query step, from which a member's
+    observed GPU-hours derive (samples x step). ``level`` is "unit" or
+    "department".
+
+    Rows are ordered by util_gpu_hours descending (ties by name), with
+    the Unaffiliated and Unresolved rows ALWAYS present — even empty —
+    so "no such users" can never be read as "everyone is classified"
+    (the same spirit as the no-data gh200 row). Members ride along under
+    ``members`` for the drill-down; the response schema keeps only
+    ``top_users``.
+    """
+    if org_map is None:
+        org_map = load_org_map()
+    rows = {}
+
+    def row_for(gid, name, dept_code):
+        return rows.setdefault(gid, {
+            "group_id": gid,
+            "group_name": name,
+            "dept_code": dept_code,
+            "dept_name": dept_name(dept_code, org_map) if dept_code else None,
+            "school_code": None, "school_name": None,
+            "users": 0, "jobs": 0, "running_jobs": 0,
+            "_util_sum": 0.0, "_util_samples": 0,
+            "util_gpu_hours": 0.0, "gpu_hours": 0.0,
+            "vram_sum": 0.0, "vram_n": 0,
+            "low_eff_jobs": 0,
+            "members": [],
+        })
+
+    # The two always-present rows are seeded before any member lands, so
+    # an empty window still reports them as genuine zeros.
+    row_for(GROUP_UNAFFILIATED, "Unaffiliated", None)
+    row_for(GROUP_UNRESOLVED, "Unresolved", None)
+
+    for m in user_rows:
+        result = mapping.get(m["user"])
+        if result is None:
+            continue  # failed lookup: coverage.failed, not a fake row
+        status = result["status"]
+        if status == STATUS_UNIT and level != "department":
+            gid = GROUP_UNIT_PREFIX + result["unit_code"]
+            code = result["unit_code"]
+            name = unit_name(code, org_map)
+            dept = unit_dept(code, org_map)
+        else:
+            dept = result["dept_code"]
+            if not dept:
+                gid = status  # unaffiliated / unresolved
+                name = "Unaffiliated" if status == STATUS_UNAFFILIATED \
+                    else "Unresolved"
+                code = None
+            else:
+                gid = GROUP_DEPT_PREFIX + dept
+                code = None
+                name = dept_name(dept, org_map) + (
+                    "" if level == "department" else " (no unit)")
+        row = row_for(gid, name, dept)
+        short, full = school_pair(dept, org_map)
+        row["school_code"] = short
+        row["school_name"] = full
+        row["users"] += 1
+        row["jobs"] += m["jobs"]
+        row["running_jobs"] += m["running_jobs"]
+        row["_util_sum"] += m["_util_sum"]
+        row["_util_samples"] += m["_util_samples"]
+        row["util_gpu_hours"] += m["util_gpu_hours"]
+        # Observed GPU-hours: the window GPU time the member series
+        # covered — the denominator of the utilization weighting, and
+        # the only allocation figure the Prometheus-only pipeline has.
+        row["gpu_hours"] += m["_util_samples"] * step / 3600.0
+        row["vram_sum"] += m.get("_vram_sum", 0.0)
+        row["vram_n"] += m.get("_vram_n", 0)
+        row["members"].append({
+            "user": m["user"],
+            "jobs": m["jobs"],
+            "running_jobs": m["running_jobs"],
+            "mean_util": m["mean_util"],
+            "util_gpu_hours": m["util_gpu_hours"],
+            "vram_avg": m["vram_avg"],
+            "gpu_types": m["gpu_types"],
+            "unit_code": result["unit_code"],
+            "dept_code": result["dept_code"],
+            "school_code": result["school_code"],
+            "extra_units": result["extra_units"],
+            "status": status,
+        })
+
+    gids_of = {}
+    for user, result in mapping.items():
+        status = result["status"]
+        if status == STATUS_UNIT and level != "department":
+            gids_of[user] = GROUP_UNIT_PREFIX + result["unit_code"]
+        elif result["dept_code"]:
+            gids_of[user] = GROUP_DEPT_PREFIX + result["dept_code"]
+        else:
+            gids_of[user] = status
+    for j in jobs_view:
+        gid = gids_of.get(j["user"])
+        row = rows.get(gid)
+        if row is not None and (j.get("mean_util") or 0.0) < LOW_UTIL_THRESHOLD:
+            row["low_eff_jobs"] += 1
+
+    out = []
+    for row in rows.values():
+        row["mean_util"] = (
+            round(row["_util_sum"] / row["_util_samples"], 2)
+            if row["_util_samples"] else 0.0)
+        row["vram_avg"] = (
+            round(row["vram_sum"] / row["vram_n"], 1) if row["vram_n"] else None)
+        row["util_gpu_hours"] = round(row["util_gpu_hours"], 2)
+        row["gpu_hours"] = round(row["gpu_hours"], 2)
+        row["top_users"] = [
+            {"user": m["user"], "util_gpu_hours": m["util_gpu_hours"]}
+            for m in sorted(row["members"],
+                            key=lambda m: (-m["util_gpu_hours"], m["user"]))[:5]
+        ]
+        out.append(row)
+    out.sort(key=lambda r: (-r["util_gpu_hours"],
+                            (r["group_name"] or "").lower(), r["group_id"]))
+    return out

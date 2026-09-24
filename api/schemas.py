@@ -170,6 +170,115 @@ class UsersResponse(BaseModel):
     users: List[UserRow]
 
 
+# ---- /api/groups, /api/groups/{group_id}/users -------------------------
+
+class School(BaseModel):
+    code: str = Field(description="OU=T<n> prefix the school's department "
+                      "codes start with (T1-T6).")
+    short: str = Field(description="Short name used as the school filter "
+                       "value and on rows (SCI, ELEC, ...; Other for "
+                       "legacy/university prefixes).")
+    full: Optional[str] = Field(
+        default=None,
+        description="Full school name from org_units.conf; null for the "
+        "synthetic Other a department code that matches no prefix gets.")
+
+
+class GroupTopUser(BaseModel):
+    user: str
+    util_gpu_hours: float
+
+
+class GroupCoverage(BaseModel):
+    users: int = Field(description="Distinct job owners the roll-up "
+                       "attempted to classify.")
+    affiliated: int = Field(description="Users with a unit or department.")
+    unaffiliated: int = Field(description="Known users with no "
+                              "laitos-*/osasto-*/tNNN-staff group; their "
+                              "row always renders.")
+    unresolved: int = Field(description="Users the directory does not "
+                            "know; their row always renders.")
+    failed: int = Field(description="Users whose NSS lookup errored "
+                        "(partial directory outage). Their activity is in "
+                        "no row — disclosed here, not folded into "
+                        "unaffiliated.")
+    unmapped_codes: List[str] = Field(description="Unit codes with no (or "
+                      "an empty) name in org_units.conf — rows show the "
+                      "raw code; add a name to the file to fix.")
+
+
+class GroupRow(BaseModel):
+    group_id: str = Field(description="Roll-up row identity: "
+          "unit:TNNNXX, dept:TNNN ('(no unit)' at unit level), or the "
+          "always-present unaffiliated / unresolved rows. Use it for the "
+          "drill-down path.")
+    group_name: str
+    dept_code: Optional[str] = None
+    dept_name: Optional[str] = None
+    school_code: Optional[str] = Field(
+        default=None,
+        description="School short name (SCI, ELEC, ...), Other when the "
+        "department code matches no school prefix, null for the "
+        "unaffiliated/unresolved rows.")
+    school_name: Optional[str] = None
+    users: int
+    jobs: int
+    running_jobs: int
+    mean_util: float = Field(
+        description="Sample-weighted mean utilization across ALL member "
+        "jobs' GPU series (sum of per-job sample sums / sum of sample "
+        "counts) — not the mean of per-user means.")
+    util_gpu_hours: float = Field(
+        description="Utilization-weighted GPU-hours, summed over members' "
+        "Users-tab GPU-hours; a group's figure equals the sum of its "
+        "members' values there.")
+    gpu_hours: float = Field(
+        description="Observed GPU-hours: the window GPU time the members' "
+        "GPU series covered (the denominator of the utilization "
+        "weighting) — the only allocation figure the Prometheus-only "
+        "pipeline has, since the Groups pipeline runs no sacct fetch.")
+    vram_avg: Optional[float] = None
+    low_eff_jobs: int = Field(
+        description="Member jobs whose mean utilization is under 30%.")
+    top_users: List[GroupTopUser]
+
+
+class GroupsResponse(BaseModel):
+    window: Window
+    level: str = Field(description="The roll-up level this response used "
+                       "(unit or department).")
+    schools: List[School]
+    coverage: GroupCoverage
+    count: int
+    groups: List[GroupRow]
+
+
+class GroupMember(BaseModel):
+    user: str
+    jobs: int
+    running_jobs: int
+    mean_util: float
+    util_gpu_hours: float
+    vram_avg: Optional[float] = None
+    gpu_types: List[str]
+    unit_code: Optional[str] = None
+    dept_code: Optional[str] = None
+    school_code: Optional[str] = None
+    extra_units: List[str] = Field(
+        description="The user's other unit groups when they hold several "
+        "(the roll-up uses the preferred one).")
+    status: str
+
+
+class GroupMembersResponse(BaseModel):
+    group_id: str
+    group_name: str
+    level: str
+    window: Window
+    count: int
+    users: List[GroupMember]
+
+
 # ---- /api/partitions, /api/partitions/vram -----------------------------
 class PartitionRow(BaseModel):
     name: str = Field(description="Canonical GPU type (short scontrol "

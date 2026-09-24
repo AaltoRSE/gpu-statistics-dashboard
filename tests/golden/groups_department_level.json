@@ -1,0 +1,155 @@
+{
+  "count": 5,
+  "coverage": {
+    "affiliated": 3,
+    "failed": 0,
+    "unaffiliated": 1,
+    "unmapped_codes": [],
+    "unresolved": 0,
+    "users": 4
+  },
+  "groups": [
+    {
+      "dept_code": "T313",
+      "dept_name": "Computer Science",
+      "gpu_hours": 0.07,
+      "group_id": "dept:T313",
+      "group_name": "Computer Science",
+      "jobs": 1,
+      "low_eff_jobs": 0,
+      "mean_util": 92.5,
+      "running_jobs": 0,
+      "school_code": "SCI",
+      "school_name": "School of Science",
+      "top_users": [
+        {
+          "user": "carol",
+          "util_gpu_hours": 0.06
+        }
+      ],
+      "users": 1,
+      "util_gpu_hours": 0.06,
+      "vram_avg": null
+    },
+    {
+      "dept_code": null,
+      "dept_name": null,
+      "gpu_hours": 0.07,
+      "group_id": "unaffiliated",
+      "group_name": "Unaffiliated",
+      "jobs": 1,
+      "low_eff_jobs": 0,
+      "mean_util": 85.0,
+      "running_jobs": 1,
+      "school_code": null,
+      "school_name": null,
+      "top_users": [
+        {
+          "user": "dave",
+          "util_gpu_hours": 0.06
+        }
+      ],
+      "users": 1,
+      "util_gpu_hours": 0.06,
+      "vram_avg": null
+    },
+    {
+      "dept_code": "T410",
+      "dept_name": "Electrical Engineering and Automation",
+      "gpu_hours": 0.07,
+      "group_id": "dept:T410",
+      "group_name": "Electrical Engineering and Automation",
+      "jobs": 1,
+      "low_eff_jobs": 0,
+      "mean_util": 50.0,
+      "running_jobs": 1,
+      "school_code": "ELEC",
+      "school_name": "School of Electrical Engineering",
+      "top_users": [
+        {
+          "user": "alice",
+          "util_gpu_hours": 0.03
+        }
+      ],
+      "users": 1,
+      "util_gpu_hours": 0.03,
+      "vram_avg": 11.0
+    },
+    {
+      "dept_code": "T300",
+      "dept_name": "School services, SCI",
+      "gpu_hours": 0.03,
+      "group_id": "dept:T300",
+      "group_name": "School services, SCI",
+      "jobs": 1,
+      "low_eff_jobs": 1,
+      "mean_util": 10.0,
+      "running_jobs": 1,
+      "school_code": "SCI",
+      "school_name": "School of Science",
+      "top_users": [
+        {
+          "user": "bob",
+          "util_gpu_hours": 0.0
+        }
+      ],
+      "users": 1,
+      "util_gpu_hours": 0.0,
+      "vram_avg": null
+    },
+    {
+      "dept_code": null,
+      "dept_name": null,
+      "gpu_hours": 0.0,
+      "group_id": "unresolved",
+      "group_name": "Unresolved",
+      "jobs": 0,
+      "low_eff_jobs": 0,
+      "mean_util": 0.0,
+      "running_jobs": 0,
+      "school_code": null,
+      "school_name": null,
+      "top_users": [],
+      "users": 0,
+      "util_gpu_hours": 0.0,
+      "vram_avg": null
+    }
+  ],
+  "level": "department",
+  "schools": [
+    {
+      "code": "T1",
+      "full": "School of Chemical Engineering",
+      "short": "CHEM"
+    },
+    {
+      "code": "T2",
+      "full": "School of Engineering",
+      "short": "ENG"
+    },
+    {
+      "code": "T3",
+      "full": "School of Science",
+      "short": "SCI"
+    },
+    {
+      "code": "T4",
+      "full": "School of Electrical Engineering",
+      "short": "ELEC"
+    },
+    {
+      "code": "T5",
+      "full": "Legacy / university units",
+      "short": "Other"
+    },
+    {
+      "code": "T6",
+      "full": "Legacy / university units",
+      "short": "Other"
+    }
+  ],
+  "window": {
+    "end": 1788100000,
+    "start": 1788013600
+  }
+}

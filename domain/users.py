@@ -63,6 +63,8 @@ def aggregate_users(jobs_view, live):
             # response schema strips them from /api/users.
             "_util_sum": a["util_sum"],
             "_util_samples": a["util_samples"],
+            "_vram_sum": a["vram_sum"],
+            "_vram_n": a["vram_n"],
         }
         for u, a in agg.items()
     ]

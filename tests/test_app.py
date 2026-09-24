@@ -114,6 +114,17 @@ NODES = [
 COMPLETED_HISTORY = [{**record, "state": "COMPLETED"}
                      for record in SACCT.values()]
 
+# The Groups tab's NSS directory (deps.user_groups): each canned user's
+# group list; users outside this map are unknown to the directory (the
+# Unresolved row). dave holds no laitos-*/osasto-* group at all — the
+# Unaffiliated row. /api/users never reads this; /api/groups does.
+USER_GROUPS = {
+    "alice": ["laitos-t40106", "osasto-t410"],
+    "bob": ["laitos-t30010", "osasto-t300"],
+    "carol": ["osasto-t313"],   # department only, no unit
+    "dave": ["triton-users"],   # no org groups at all: unaffiliated
+}
+
 
 class FakeProm:
     """Canned responses shaped like the real Prometheus API.
@@ -297,6 +308,10 @@ def fake_prom(monkeypatch):
             {j: SACCT[j] for j in ids if j in SACCT}, 0))
     # No active controller jobs by default; tests opt in to a snapshot.
     monkeypatch.setattr(deps, "show_jobs", lambda: {})
+    # The Groups tab's NSS boundary (deps.user_groups): the canned
+    # directory above; an unknown user reads as None (unresolved).
+    monkeypatch.setattr(deps, "user_groups",
+                        lambda username: USER_GROUPS.get(username))
     # Empty pending queue by default; tests opt in via deps.queue_pending.
     monkeypatch.setattr(deps, "queue_pending", lambda: [])
 
@@ -1909,6 +1924,8 @@ def test_step_for_range_long_windows():
     "/api/jobs",
     "/api/jobs/1",
     "/api/users",
+    "/api/groups",
+    "/api/groups/unit:T40106/users",
     "/api/partitions",
     "/api/partitions/queue",
     "/api/partitions/queue/progress",
@@ -1927,6 +1944,7 @@ def test_window_routes_accept_30_days_reject_beyond(client, route):
     "/api/jobs",
     "/api/jobs/1",
     "/api/users",
+    "/api/groups",
     "/api/partitions",
 ])
 def test_window_routes_span_720_hours_with_1800s_step(client, route):

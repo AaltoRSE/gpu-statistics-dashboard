@@ -1,0 +1,28 @@
+{
+  "count": 1,
+  "group_id": "unit:T40106",
+  "group_name": "Kyrki Ville group",
+  "level": "unit",
+  "users": [
+    {
+      "dept_code": "T410",
+      "extra_units": [],
+      "gpu_types": [
+        "NVIDIA H200"
+      ],
+      "jobs": 1,
+      "mean_util": 50.0,
+      "running_jobs": 1,
+      "school_code": "ELEC",
+      "status": "unit",
+      "unit_code": "T40106",
+      "user": "alice",
+      "util_gpu_hours": 0.03,
+      "vram_avg": 11.0
+    }
+  ],
+  "window": {
+    "end": 1788100000,
+    "start": 1788013600
+  }
+}
