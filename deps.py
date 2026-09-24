@@ -72,6 +72,27 @@ def user_groups(username):
     return sorted({grp.getgrgid(g).gr_name for g in gids})
 
 
+def group_members(group_name):
+    """The member usernames of one NSS group (``getent group <name>``),
+    or None for a group the directory does not know.
+
+    The Groups tab's membership index reads laitos-tNNNXX / tNNNXX-staff
+    / tNNNXX-everyone for each configured research-group unit; one
+    getgrnam per group, not one per user. Returns None for an unknown
+    group (an answer — not every unit carries all three spellings) and
+    raises DirectoryError when NSS raises OSError. No caching here —
+    callers cache per group, whose TTL is theirs to choose.
+    """
+    try:
+        gr = grp.getgrnam(group_name)
+    except KeyError:
+        return None
+    except OSError as exc:
+        raise DirectoryError(
+            "could not list members of %r: %s" % (group_name, exc)) from exc
+    return sorted(set(gr.gr_mem))
+
+
 def get_prom():
     global _prom
     if _prom is None:

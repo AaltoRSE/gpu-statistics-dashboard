@@ -84,6 +84,8 @@ def test_key_builders_are_stable_and_distinct():
     # are response-shape parameters that change no fetch).
     assert cache.vram_progress_key(24) == ("vram_progress", 24)
     assert cache.vram_progress_key(24) != cache.vram_progress_key(72)
+    assert cache.group_members_key("laitos-t40106") == (
+        "group_members", "laitos-t40106")
 
 
 def test_get_or_set_single_flights_concurrent_misses():

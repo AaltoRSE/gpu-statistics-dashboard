@@ -277,6 +277,15 @@ def snapshot_key():
     return ("snapshot",)
 
 
+def group_members_key(group_name):
+    """One NSS group's member list (deps.group_members), cached per
+    group because the same handful of unit groups is asked for by every
+    user classification within a TTL. The TTL lives with the value (24 h
+    for a group the directory knows, 1 h for one it does not), so
+    entries are stored via TtlCache.set, not get_or_set."""
+    return ("group_members", group_name)
+
+
 def user_org_key(username):
     """One user's org classification (domain.org.resolve_users), cached
     per user — not per request — because a username's org membership is

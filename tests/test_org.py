@@ -227,6 +227,41 @@ def test_user_org_key_is_username_scoped():
     assert cache.user_org_key("bob") != cache.user_org_key("alice")
 
 
+# ---- the NSS boundary (deps.group_members) ----------------------------
+
+def test_group_members_returns_sorted_unique_names(monkeypatch):
+    monkeypatch.setattr(
+        deps.grp, "getgrnam",
+        lambda name: type("G", (), {"gr_mem": ["zoe", "alice", "zoe"]})())
+    assert deps.group_members("laitos-t40106") == ["alice", "zoe"]
+
+
+def test_group_members_unknown_group_is_none_not_error(monkeypatch):
+    def missing(name):
+        raise KeyError("getgrnam(): name not found: %r" % name)
+
+    monkeypatch.setattr(deps.grp, "getgrnam", missing)
+    # An unknown group is an ANSWER (that unit has no laitos group), not
+    # a failure.
+    assert deps.group_members("laitos-t99999") is None
+
+
+def test_group_members_oserror_raises_directory_error(monkeypatch):
+    def boom(name):
+        raise OSError("NSS status 3, sssd down")
+
+    monkeypatch.setattr(deps.grp, "getgrnam", boom)
+    with pytest.raises(deps.DirectoryError, match="sssd down"):
+        deps.group_members("laitos-t40106")
+
+
+def test_group_members_key_is_group_scoped():
+    assert cache.group_members_key("laitos-t40106") == (
+        "group_members", "laitos-t40106")
+    assert (cache.group_members_key("laitos-t40106")
+            != cache.group_members_key("t40106-staff"))
+
+
 def test_ttl_cache_set_then_peek():
     c = cache.TtlCache()
     assert c.peek("k") == (False, None)
