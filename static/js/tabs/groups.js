@@ -25,6 +25,12 @@ import { loaded, setUrl, openUser } from "../core/router.js";
 import { createTable } from "../core/table.js";
 import { plotTheme, renderPlot } from "../core/plot.js";
 
+// The bucket every schoolless row reads as: the backend sends "Other"
+// for a department code that matches no school prefix and null for rows
+// with no department at all — normalizing both here keeps the filter,
+// table, legend and colors in agreement.
+const OTHER = "Other";
+
 let groupRows = [];        // the /api/groups rows for the current fetch
 let schools = [];          // [{code, short, full}] from the response
 let pendingSchool = null;  // deep-linked school before options exist
@@ -42,7 +48,8 @@ export async function loadGroups() {
     const data = await api("/api/groups?" + params);
     if (token !== groupsToken) return;
     panelOk("groupsResults");
-    groupRows = data.groups;
+    groupRows = data.groups.map((g) =>
+      ({ ...g, school_code: g.school_code || OTHER }));
     schools = data.schools;
     renderSchoolOptions();
     const w = data.window;
@@ -82,19 +89,24 @@ function syncUrl() {
   setUrl("/groups" + (q ? "?" + q : ""));
 }
 
-// One option per distinct short name (T5/T6 both map to Other), order
-// kept stable; a selection — including a just-deep-linked one, held in
-// pendingSchool until the options exist — survives the rebuild.
+// One option per distinct short name, plus an Other option at the end
+// when any row carries it — so a legend entry can also be filtered (and
+// deep-linked with ?school=Other). A selection — including a
+// just-deep-linked one, held in pendingSchool until the options exist —
+// survives the rebuild.
 function renderSchoolOptions() {
   const sel = $("gSchool");
   const shorts = [...new Set(schools.map((s) => s.short))];
+  const values = groupRows.some((g) => g.school_code === OTHER)
+    ? [...shorts, OTHER]
+    : shorts;
   sel.innerHTML = '<option value="">all schools</option>' +
-    shorts.map((s) =>
+    values.map((s) =>
       '<option value="' + escapeHtml(s) + '">' + escapeHtml(s) + "</option>"
     ).join("");
   const want = pendingSchool !== null ? pendingSchool : sel.value;
   pendingSchool = null;
-  if (shorts.includes(want)) sel.value = want;
+  if (values.includes(want)) sel.value = want;
 }
 
 function filteredGroups() {
@@ -122,7 +134,7 @@ function groupRowHtml(g) {
     <tr class="row" data-gid="${g.group_id}">
       <td><b>${g.group_name}</b></td>
       <td>${leaderCell(g)}</td>
-      <td>${g.school_code || "—"}</td>
+      <td>${g.school_code}</td>
       <td class="num">${fmtInt(g.users)}</td>
       <td class="num">${fmtInt(g.jobs)}</td>
       <td class="num">${fmtInt(g.running_jobs)}</td>
@@ -202,10 +214,11 @@ function renderCoverage(coverage) {
 
 // ---- mean-utilization bar chart, colored by school --------------------
 // Stable per-school colors (config order, one hue per distinct short
-// name); rows outside any school (unaffiliated) draw in the idle gray.
+// name); the schoolless Other bucket (unaffiliated / unmatched prefix)
+// draws in the idle gray.
 function schoolColorMap() {
   const th = plotTheme();
-  const map = { "": th.idle };
+  const map = { [OTHER]: th.idle };
   [...new Set(schools.map((s) => s.short))].forEach((short, i) => {
     map[short] = th.colors[i % th.colors.length];
   });
@@ -220,17 +233,21 @@ export function renderGroupsBar() {
   $("gChartNote").textContent = rows.length
     ? "top " + rows.length + " of " + groupRows.length + " by mean util %" : "";
   $("groupsBarEmpty").hidden = !!rows.length;
-  $("groupsSchoolLegend").innerHTML = [...new Set(rows.map((g) =>
-    g.school_code || ""))].map((s) =>
+  // Legend entries in config school order, Other last — only schools
+  // present in the current filtered rows.
+  const present = new Set(rows.map((g) => g.school_code));
+  const entries = schools.map((s) => s.short).filter((s) => present.has(s));
+  if (present.has(OTHER)) entries.push(OTHER);
+  $("groupsSchoolLegend").innerHTML = entries.map((s) =>
     '<span class="legend-key" style="background:' + colors[s] +
-    '"></span> ' + escapeHtml(s || "no school")
+    '"></span> ' + escapeHtml(s)
   ).join(" ");
   renderPlot("groupsBarPlot", [{
     type: "bar",
     orientation: "h",
     x: rows.map((g) => g.mean_util),
     y: rows.map((g) => g.group_name),
-    marker: { color: rows.map((g) => colors[g.school_code || ""]) },
+    marker: { color: rows.map((g) => colors[g.school_code]) },
     hovertemplate: rows.map((g) =>
       "<b>" + escapeHtml(g.group_name) + "</b><br>mean %{x:.1f}%<br>" +
       escapeHtml(g.users + " users · " + g.jobs + " jobs · " +

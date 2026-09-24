@@ -246,6 +246,33 @@ test("both special rows render when the server sends them", async (t) => {
     .textContent, /Unresolved/);
 });
 
+test("rows without a school read as Other — cell, filter, legend agree", async (t) => {
+  const ctx = await boot({}, 12);
+  t.after(() => ctx.dom.window.close());
+  const doc = ctx.dom.window.document;
+  await ctx.mod.loadGroups();
+  // BODY1's unaffiliated row carries school_code: null; its School cell
+  // must read "Other" like the unmatched-prefix rows do.
+  const tr = doc.querySelector("#groupTable tr.row[data-gid='unaffiliated']");
+  assert.equal(tr.querySelectorAll("td")[2].textContent, "Other");
+  // the legend labels the bucket Other — never "no school"
+  const legend = doc.getElementById("groupsSchoolLegend").textContent;
+  assert.doesNotMatch(legend, /no school/);
+  assert.match(legend, /Other/);
+  // the school filter gains an Other option after the configured schools
+  const values = [...doc.getElementById("gSchool").options]
+    .map((o) => o.value);
+  assert.deepEqual(values, ["", "SCI", "ELEC", "Other"]);
+  // filtering by Other keeps only the schoolless rows, client-side
+  const fetchesAfterLoad = ctx.urls.length;
+  doc.getElementById("gSchool").value = "Other";
+  doc.getElementById("gSchool").dispatchEvent(
+    new ctx.dom.window.Event("change"));
+  const shown = [...doc.querySelectorAll("#groupTable tbody tr")];
+  assert.deepEqual(shown.map((r) => r.dataset.gid), ["unaffiliated"]);
+  assert.equal(ctx.urls.length, fetchesAfterLoad, "no fetch on the filter");
+});
+
 test("clicking a group row fetches its members with kind and extra groups", async (t) => {
   const ctx = await boot({}, 5);
   t.after(() => ctx.dom.window.close());
