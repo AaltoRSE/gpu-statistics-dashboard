@@ -254,25 +254,39 @@ export function renderGroupsBar() {
     '<span class="legend-key" style="background:' + colors[s] +
     '"></span> ' + escapeHtml(s)
   ).join(" ");
+  // The chart grows with the row count — the .chart default's fixed
+  // 340px cannot hold 30 labeled bars (30 rows ≈ 790px). Set on both
+  // the element and the layout so the box and the render agree.
+  const h = Math.max(340, rows.length * 24 + 70);
   renderPlot("groupsBarPlot", [{
     type: "bar",
     orientation: "h",
     x: rows.map((g) => g.mean_util),
-    y: rows.map((g) => g.group_name),
+    // Categories are the group_id, not the name: two same-named rows
+    // would otherwise merge into one bar.
+    y: rows.map((g) => g.group_id),
     marker: { color: rows.map((g) => colors[g.school_code]) },
     hovertemplate: rows.map((g) =>
       "<b>" + escapeHtml(g.group_name) + "</b><br>mean %{x:.1f}%<br>" +
       escapeHtml(g.users + " users · " + g.jobs + " jobs · " +
         g.util_gpu_hours + " GPU-h<extra></extra>")),
   }], {
+    height: h,
     margin: { l: 10, r: 20, t: 10, b: 40 },
     paper_bgcolor: "rgba(0,0,0,0)", plot_bgcolor: "rgba(0,0,0,0)",
     font: th.font,
-    yaxis: { automargin: true, gridcolor: th.grid, fixedrange: true },
+    // tickmode array forces a label on EVERY bar — Plotly otherwise
+    // thins crowded category labels.
+    yaxis: {
+      tickmode: "array", tickvals: rows.map((g) => g.group_id),
+      ticktext: rows.map((g) => g.group_name), automargin: true,
+      gridcolor: th.grid, fixedrange: true,
+    },
     xaxis: { title: "mean utilization %", range: [0, 105],
              gridcolor: th.grid, fixedrange: true },
     dragmode: false,
   });
+  $("groupsBarPlot").style.height = h + "px";
 }
 
 // ---- the members drill-down ------------------------------------------
