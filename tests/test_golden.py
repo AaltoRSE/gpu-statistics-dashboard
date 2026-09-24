@@ -43,7 +43,7 @@ CASES = [
      {"since_hours": 24, "level": "department"}),
     ("groups_running_only", "/api/groups",
      {"since_hours": 24, "running_only": "true"}),
-    ("group_members", "/api/groups/unit:T40106/users", {"since_hours": 24}),
+    ("group_members", "/api/groups/kyrkiv1/users", {"since_hours": 24}),
     ("partitions", "/api/partitions", {"since_hours": 24}),
     ("partitions_queue", "/api/partitions/queue", {"since_hours": 24}),
     ("partitions_running_only", "/api/partitions",

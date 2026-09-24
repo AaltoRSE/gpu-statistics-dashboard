@@ -11,16 +11,18 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import pytest  # noqa: E402
-from test_app import USER_GROUPS  # noqa: E402
+from test_app import GROUP_MEMBERS, USER_GROUPS  # noqa: E402
 
 import deps  # noqa: E402
 
 
 @pytest.fixture()
 def nss(monkeypatch):
-    """A mutable in-memory directory over deps.user_groups."""
+    """Mutable in-memory directories over deps.user_groups and
+    deps.group_members."""
     accounts = {user: list(groups) for user, groups in USER_GROUPS.items()}
-    calls = []
+    members = {name: list(m) for name, m in GROUP_MEMBERS.items()}
+    calls, member_calls = [], []
 
     def user_groups(username):
         calls.append(username)
@@ -28,8 +30,16 @@ def nss(monkeypatch):
             return None
         return list(accounts[username])
 
+    def group_members(name):
+        member_calls.append(name)
+        if name not in members:
+            return None
+        return list(members[name])
+
     monkeypatch.setattr(deps, "user_groups", user_groups)
-    return {"accounts": accounts, "calls": calls}
+    monkeypatch.setattr(deps, "group_members", group_members)
+    return {"accounts": accounts, "members": members,
+            "calls": calls, "member_calls": member_calls}
 
 
 def by_id(data):
@@ -46,15 +56,19 @@ def test_groups_rollup_math(client, nss):
     r = client.get("/api/groups", params={"since_hours": 24})
     assert r.status_code == 200
     data = r.json()
-    assert data["level"] == "unit"
+    assert data["level"] == "group"
     rows = by_id(data)
     # The always-present rows exist even when empty.
-    assert {"unit:T40106", "unit:T30010", "dept:T313",
+    assert {"kyrkiv1", "dept:T300", "dept:T313",
             "unaffiliated", "unresolved"} <= set(rows)
-    kyrki = rows["unit:T40106"]
-    assert kyrki["group_name"] == "Kyrki Ville group"
+    kyrki = rows["kyrkiv1"]
+    assert kyrki["group_name"] == "Kyrki Ville"
+    assert kyrki["leader"] == "kyrkiv1"
+    assert kyrki["leader_name"] == "Kyrki Ville"
+    assert kyrki["unit_codes"] == ["T40106"]
     assert kyrki["dept_code"] == "T410"
-    assert kyrki["dept_name"] == "Electrical Engineering and Automation"
+    assert kyrki["dept_name"] \
+        == "Department of Electrical Engineering and Automation"
     assert kyrki["school_code"] == "ELEC"
     assert kyrki["school_name"] == "School of Electrical Engineering"
     assert kyrki["users"] == 1 and kyrki["jobs"] == 1
@@ -65,16 +79,21 @@ def test_groups_rollup_math(client, nss):
     assert kyrki["vram_avg"] == pytest.approx(11.0)
     assert kyrki["low_eff_jobs"] == 0
     assert kyrki["top_users"] == [{"user": "alice", "util_gpu_hours": 0.03}]
-    sci_it = rows["unit:T30010"]
-    assert sci_it["group_name"] == "Science IT Technical services"
-    assert sci_it["school_code"] == "SCI"
-    assert sci_it["mean_util"] == pytest.approx(10.0)
-    assert sci_it["low_eff_jobs"] == 1  # job 2's mean is 10 < 30
-    # carol has osasto-t313 only: a department row, marked "(no unit)"
+    # bob's laitos-t30010 belongs to no professor in the test conf: an
+    # honest department-only row, named after the department
+    t300 = rows["dept:T300"]
+    assert t300["group_name"] \
+        == "Department of Computer Science, no professor group"
+    assert t300["leader"] is None and t300["unit_codes"] == []
+    assert t300["school_code"] == "SCI"
+    assert t300["mean_util"] == pytest.approx(10.0)
+    assert t300["low_eff_jobs"] == 1  # job 2's mean is 10 < 30
+    # carol has osasto-t313 only: no configured department name, so the
+    # code itself names the row
     t313 = rows["dept:T313"]
-    assert t313["group_name"] == "Computer Science (no unit)"
+    assert t313["group_name"] == "T313, no professor group"
     assert t313["dept_code"] == "T313" and t313["school_code"] == "SCI"
-    # dave has no org groups: the unaffiliated row, never a fake unit
+    # dave has no relevant groups: the unaffiliated row, never a fake group
     unaff = rows["unaffiliated"]
     assert unaff["users"] == 1 and unaff["jobs"] == 1
     assert unaff["mean_util"] == pytest.approx(85.0)
@@ -85,13 +104,13 @@ def test_groups_rollup_math(client, nss):
     assert rows["unresolved"]["mean_util"] == 0.0
     assert rows["unresolved"]["vram_avg"] is None
     assert data["coverage"] == {
-        "users": 4, "affiliated": 3, "unaffiliated": 1, "unresolved": 0,
-        "failed": 0, "unmapped_codes": [],
+        "users": 4, "in_prof_group": 1, "dept_only": 2, "unaffiliated": 1,
+        "unresolved": 0, "failed": 0,
     }
-    # groups are ordered by util_gpu_hours desc (ties by name)
+    # rows are ordered by util_gpu_hours desc (ties by name)
     ids = [row["group_id"] for row in data["groups"]]
-    assert ids == ["dept:T313", "unaffiliated", "unit:T40106",
-                   "unit:T30010", "unresolved"]
+    assert ids == ["dept:T313", "unaffiliated", "kyrkiv1", "dept:T300",
+                   "unresolved"]
     # the school filter options ride along
     assert {s["code"] for s in data["schools"]} == {"T1", "T2", "T3",
                                                     "T4", "T5", "T6"}
@@ -120,23 +139,27 @@ def test_groups_mean_util_reweights_all_member_samples(client, nss,
     monkeypatch.setattr(sources, "gpu_util", with_extra)
     data = client.get("/api/groups", params={"since_hours": 24}).json()
     rows = by_id(data)
-    # both of bob's jobs land in his own group regardless of GPU type
-    sci_it = rows["unit:T30010"]
-    assert sci_it["users"] == 1 and sci_it["jobs"] == 2
-    assert sci_it["mean_util"] == pytest.approx(82.73, abs=0.01)
+    # both of bob's jobs land in his department-only row regardless of
+    # GPU type
+    t300 = rows["dept:T300"]
+    assert t300["users"] == 1 and t300["jobs"] == 2
+    assert t300["mean_util"] == pytest.approx(82.73, abs=0.01)
 
 
 def test_groups_department_level(client, nss):
     data = client.get("/api/groups",
                       params={"since_hours": 24, "level": "department"}).json()
     rows = by_id(data)
-    # unit users collapse into their department; no "(no unit)" suffix
-    assert "unit:T40106" not in rows
+    # group members collapse into the professor's department; no
+    # "no professor group" suffix
+    assert "kyrkiv1" not in rows
     t410 = rows["dept:T410"]
-    assert t410["group_name"] == "Electrical Engineering and Automation"
-    t313 = rows["dept:T313"]
-    assert t313["group_name"] == "Computer Science"
-    assert t313["users"] == 1  # carol's own osasto, no "(no unit)" needed
+    assert t410["group_name"] \
+        == "Department of Electrical Engineering and Automation"
+    assert t410["leader"] is None
+    t300 = rows["dept:T300"]
+    assert t300["group_name"] == "Department of Computer Science"
+    assert t300["users"] == 1  # bob's own osasto
     # the special rows survive the level change
     assert rows["unaffiliated"]["users"] == 1
     assert rows["unresolved"]["users"] == 0
@@ -186,8 +209,8 @@ def test_groups_partial_nss_failure_keeps_the_rest(client, nss, monkeypatch):
     assert data["coverage"]["failed"] == 1
     rows = by_id(data)
     # alice's activity is in NO row (disclosed as failed, never faked)
-    assert "unit:T40106" not in rows
-    assert rows["unit:T30010"]["users"] == 1  # bob still resolves
+    assert "kyrkiv1" not in rows
+    assert rows["dept:T300"]["users"] == 1  # bob still resolves
 
 
 def test_groups_total_nss_failure_is_502(client, nss, monkeypatch):
@@ -200,8 +223,8 @@ def test_groups_total_nss_failure_is_502(client, nss, monkeypatch):
     assert r.json()["error"] == "directory_unreachable"
 
 
-def test_groups_missing_org_file_is_502(client, nss, monkeypatch, tmp_path):
-    monkeypatch.setenv("ORG_UNITS_FILE",
+def test_groups_missing_conf_file_is_502(client, nss, monkeypatch, tmp_path):
+    monkeypatch.setenv("PROF_GROUPS_FILE",
                        str(tmp_path / "does-not-exist.conf"))
     r = client.get("/api/groups", params={"since_hours": 24})
     assert r.status_code == 502
@@ -209,13 +232,16 @@ def test_groups_missing_org_file_is_502(client, nss, monkeypatch, tmp_path):
     assert "does-not-exist.conf" in r.json()["detail"]
 
 
-def test_groups_repeat_request_makes_zero_nss_calls(client, nss):
+def test_groups_repeat_request_makes_zero_directory_calls(client, nss):
     client.get("/api/groups", params={"since_hours": 24})
     assert len(nss["calls"]) == 4
+    assert len(nss["member_calls"]) == 6   # 2 configured groups x 3 lists
     client.get("/api/groups", params={"since_hours": 24})
     client.get("/api/groups", params={"since_hours": 24, "level": "department"})
-    # per-user classification cache: same users, same directory answers
+    # per-user group lists and per-group member lists are both cached:
+    # same users, same groups, same directory answers
     assert len(nss["calls"]) == 4
+    assert len(nss["member_calls"]) == 6
 
 
 def test_groups_running_only_filters_in_process(client, nss, fake_prom):
@@ -230,42 +256,59 @@ def test_groups_running_only_filters_in_process(client, nss, fake_prom):
 
 
 def test_groups_drilldown_members(client, nss):
-    r = client.get("/api/groups/unit:T40106/users",
+    r = client.get("/api/groups/kyrkiv1/users",
                    params={"since_hours": 24})
     assert r.status_code == 200
     data = r.json()
-    assert data["group_id"] == "unit:T40106"
-    assert data["group_name"] == "Kyrki Ville group"
+    assert data["group_id"] == "kyrkiv1"
+    assert data["group_name"] == "Kyrki Ville"
     assert data["count"] == 1
     member = data["users"][0]
     assert member["user"] == "alice"
-    assert member["unit_code"] == "T40106"
+    assert member["group"] == "kyrkiv1"
+    assert member["membership"] == "paid"
     assert member["dept_code"] == "T410"
-    assert member["extra_units"] == []
-    assert member["status"] == "unit"
-    # a unit-less user's drill-down carries no unit code
-    r = client.get("/api/groups/dept:T313/users", params={"since_hours": 24})
+    assert member["own_dept"] == "T410"
+    assert member["extra_groups"] == []
+    assert member["status"] == "group"
+    # a department-only user's drill-down carries no group
+    r = client.get("/api/groups/dept:T300/users", params={"since_hours": 24})
     assert r.status_code == 200
     member = r.json()["users"][0]
-    assert member["user"] == "carol"
-    assert member["unit_code"] is None and member["dept_code"] == "T313"
+    assert member["user"] == "bob"
+    assert member["group"] is None and member["dept_code"] == "T300"
     # unknown group: 404, never an empty member list
-    r = client.get("/api/groups/unit:T00000/users",
+    r = client.get("/api/groups/nobody/users",
                    params={"since_hours": 24})
     assert r.status_code == 404
 
 
-def test_groups_drilldown_shows_extra_units(client, nss):
-    # hannuse2-style multi-unit membership: the preferred unit owns the
-    # row, the other rides along as extra_units in the drill-down.
-    nss["accounts"]["carol"] = ["laitos-t40106", "laitos-t40714",
-                                "osasto-t412"]
-    data = client.get("/api/groups/unit:T40714/users",
+def test_groups_drilldown_shows_extra_groups(client, nss):
+    # a user claimed by two configured groups: the strongest (here tied
+    # -> lowest leader name) owns the row, the other rides along as an
+    # extra group in the drill-down.
+    nss["members"]["laitos-t40106"] = ["alice", "kyrkiv1", "bob"]
+    nss["members"]["laitos-t40571"] = ["linc15", "bob"]
+    data = client.get("/api/groups/backstt1/users",
                       params={"since_hours": 24}).json()
     member = data["users"][0]
-    assert member["user"] == "carol"
-    assert member["unit_code"] == "T40714"  # osasto-t412 prefers T40714
-    assert member["extra_units"] == ["T40106"]
+    assert member["user"] == "bob"
+    assert member["group"] == "backstt1"
+    assert member["extra_groups"] == ["kyrkiv1"]
+
+
+def test_groups_member_kind_reflects_the_membership_list(client, nss):
+    # the same user lands with a different membership kind depending on
+    # which of the unit's lists they are in
+    nss["members"]["t40106-everyone"] = ["hannuse2", "carol"]
+    data = client.get("/api/groups/kyrkiv1/users",
+                      params={"since_hours": 24}).json()
+    members = {m["user"]: m for m in data["users"]}
+    assert members["alice"]["membership"] == "paid"
+    assert members["carol"]["membership"] == "everyone"
+    # carol's row department is the professor's, her own osasto rides along
+    assert members["carol"]["dept_code"] == "T410"
+    assert members["carol"]["own_dept"] == "T313"
 
 
 def test_users_then_groups_add_no_prometheus_query(client, nss, fake_prom):

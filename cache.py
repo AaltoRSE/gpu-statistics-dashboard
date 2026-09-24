@@ -286,14 +286,17 @@ def group_members_key(group_name):
     return ("group_members", group_name)
 
 
-def user_org_key(username):
-    """One user's org classification (domain.org.resolve_users), cached
-    per user — not per request — because a username's org membership is
-    the same fact for every window and every route that asks. The TTL
-    lives with the value (24 h for a classified user, 1 h for one the
-    directory does not know), so entries are stored via TtlCache.set,
-    not get_or_set."""
-    return ("user_org", username)
+def user_groups_key(username):
+    """One user's raw NSS group list (deps.user_groups), cached per user
+    — not per request — because a username's groups are the same fact
+    for every window and every route that asks. The RAW list is cached,
+    not a classification built from it: the classification also depends
+    on prof_groups.conf and the membership index, and a conf edit must
+    show on the next request, not wait out a per-user TTL. The TTL lives
+    with the value (24 h for a known user, 1 h for one the directory
+    does not know), so entries are stored via TtlCache.set, not
+    get_or_set."""
+    return ("user_groups", username)
 
 
 def partition_views_key(start, end, step, fingerprint):

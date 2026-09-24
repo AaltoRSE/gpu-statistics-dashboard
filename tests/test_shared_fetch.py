@@ -33,7 +33,7 @@ WINDOW_HITS = [
     ("/api/users", {"since_hours": 24}),
     ("/api/jobs", {"since_hours": 24, "user": "alice"}),
     ("/api/groups", {"since_hours": 24}),
-    ("/api/groups/unit:T40106/users", {"since_hours": 24}),
+    ("/api/groups/kyrkiv1/users", {"since_hours": 24}),
     ("/api/partitions", {"since_hours": 24}),
     ("/api/partitions/queue", {"since_hours": 24}),
     ("/api/partitions/vram", {"since_hours": 24}),

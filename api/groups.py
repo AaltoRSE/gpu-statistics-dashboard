@@ -1,11 +1,12 @@
 """Routes: GET /api/groups and GET /api/groups/{group_id}/users.
 
-The Groups tab's endpoints: per-research-group / department / school
+The Groups tab's endpoints: per-professor-group / department / school
 GPU efficiency over the window, classified from each job owner's NSS
-groups (``groups <user>`` on this host) and org_units.conf names. The
+groups (``groups <user>`` on this host) and prof_groups.conf names. The
 pipeline shares every window source with the other tabs (plan §1/§2) —
-the only new external read is per-user NSS, cached per user for 24 h
-(1 h for a user the directory does not know), so a repeat request makes
+the only new external reads are per-user NSS (cached per user for 24 h,
+1 h for a user the directory does not know) and the configured groups'
+member lists (cached per group for 24 h), so a repeat request makes
 zero extra directory calls and /api/users + /api/groups in one window
 still add no Prometheus query.
 """
@@ -20,7 +21,7 @@ import gpu_groups
 import sources
 from api.schemas import GroupMembersResponse, GroupsResponse
 from domain.common import window
-from domain.org import load_org_map, resolve_users, rollup_groups
+from domain.org import load_prof_groups, resolve_users, rollup_groups
 from domain.users import aggregate_users
 from domain.views import job_views
 
@@ -31,9 +32,9 @@ def _grouped(since_hours, running_only, level):
     """The shared pipeline both group routes run (plan commit 6).
 
     a. pinned window, b. the shared window sources in parallel, c. the
-    memoized job view, d. the per-user aggregation, e. org resolution,
-    f. the roll-up. Returns ``(pinned, org_map, rows, mapping,
-    coverage)`` — rows ordered, both special rows always present.
+    memoized job view, d. the per-user aggregation, e. classification,
+    f. the roll-up. Returns ``(pinned, conf, rows, mapping, coverage)``
+    — rows ordered, both special rows always present.
     """
     pinned = sources.pinned_window(since_hours)
     util, vram, live_snap, nodes = sources.gather(
@@ -51,17 +52,17 @@ def _grouped(since_hours, running_only, level):
         # fetch — the same substitution every running-only view makes.
         jobs_view = [j for j in jobs_view if j["jobid"] in live]
     user_rows = aggregate_users(jobs_view, live)
-    org_map = load_org_map()
-    mapping, coverage = resolve_users((r["user"] for r in user_rows), org_map)
+    conf = load_prof_groups()
+    mapping, coverage = resolve_users((r["user"] for r in user_rows), conf)
     rows = rollup_groups(user_rows, mapping, jobs_view, pinned[2],
-                         level=level, org_map=org_map)
-    return pinned, org_map, rows, mapping, coverage
+                         level=level, conf=conf)
+    return pinned, conf, rows, mapping, coverage
 
 
-def _schools(org_map):
+def _schools(conf):
     return [
         {"code": code, "short": s["short"], "full": s["full"]}
-        for code, s in sorted(org_map["schools"].items())
+        for code, s in sorted(conf["schools"].items())
     ]
 
 
@@ -69,22 +70,22 @@ def _schools(org_map):
 def api_groups(
     since_hours: float = Query(24, gt=0, le=720),
     running_only: bool = Query(False),
-    level: Literal["unit", "department"] = Query("unit"),
+    level: Literal["group", "department"] = Query("group"),
 ):
-    """GPU efficiency per organisational group over the window.
+    """GPU efficiency per professor research group over the window.
 
-    Roll-up of the Users tab's per-user aggregates by org unit (level=
-    unit, the research group a laitos-tNNNXX group names) or department
-    (level=department). No new upstream fetch: the window sources, job
-    view and per-user rows are the shared ones; only the per-user NSS
-    classification is added, cached per user.
+    Roll-up of the Users tab's per-user aggregates by professor group
+    (level=group, the AD unit a prof_groups.conf row names) or
+    department (level=department). No new upstream fetch: the window
+    sources, job view and per-user rows are the shared ones; only the
+    per-user NSS classification is added, cached per user.
     """
-    pinned, org_map, rows, _, coverage = _grouped(
+    pinned, conf, rows, _, coverage = _grouped(
         since_hours, running_only, level)
     return {
         "window": window(pinned[0], pinned[1]),
         "level": level,
-        "schools": _schools(org_map),
+        "schools": _schools(conf),
         "coverage": coverage,
         "count": len(rows),
         "groups": rows,
@@ -96,11 +97,11 @@ def api_group_users(
     group_id: str,
     since_hours: float = Query(24, gt=0, le=720),
     running_only: bool = Query(False),
-    level: Literal["unit", "department"] = Query("unit"),
+    level: Literal["group", "department"] = Query("group"),
 ):
     """The drill-down: every member of one roll-up row, with their own
-    classification (unit, department, extra units). Unknown group ids
-    are a 404, not an empty member list."""
+    classification (group, membership kind, department, extra groups).
+    Unknown group ids are a 404, not an empty member list."""
     pinned, _, rows, _, _ = _grouped(since_hours, running_only, level)
     for row in rows:
         if row["group_id"] == group_id:

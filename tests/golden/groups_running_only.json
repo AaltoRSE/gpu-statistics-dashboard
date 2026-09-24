@@ -1,10 +1,10 @@
 {
   "count": 4,
   "coverage": {
-    "affiliated": 2,
+    "dept_only": 1,
     "failed": 0,
+    "in_prof_group": 1,
     "unaffiliated": 1,
-    "unmapped_codes": [],
     "unresolved": 0,
     "users": 3
   },
@@ -16,6 +16,8 @@
       "group_id": "unaffiliated",
       "group_name": "Unaffiliated",
       "jobs": 1,
+      "leader": null,
+      "leader_name": null,
       "low_eff_jobs": 0,
       "mean_util": 85.0,
       "running_jobs": 1,
@@ -27,17 +29,20 @@
           "util_gpu_hours": 0.06
         }
       ],
+      "unit_codes": [],
       "users": 1,
       "util_gpu_hours": 0.06,
       "vram_avg": null
     },
     {
       "dept_code": "T410",
-      "dept_name": "Electrical Engineering and Automation",
+      "dept_name": "Department of Electrical Engineering and Automation",
       "gpu_hours": 0.07,
-      "group_id": "unit:T40106",
-      "group_name": "Kyrki Ville group",
+      "group_id": "kyrkiv1",
+      "group_name": "Kyrki Ville",
       "jobs": 1,
+      "leader": "kyrkiv1",
+      "leader_name": "Kyrki Ville",
       "low_eff_jobs": 0,
       "mean_util": 50.0,
       "running_jobs": 1,
@@ -49,17 +54,22 @@
           "util_gpu_hours": 0.03
         }
       ],
+      "unit_codes": [
+        "T40106"
+      ],
       "users": 1,
       "util_gpu_hours": 0.03,
       "vram_avg": 11.0
     },
     {
       "dept_code": "T300",
-      "dept_name": "School services, SCI",
+      "dept_name": "Department of Computer Science",
       "gpu_hours": 0.03,
-      "group_id": "unit:T30010",
-      "group_name": "Science IT Technical services",
+      "group_id": "dept:T300",
+      "group_name": "Department of Computer Science, no professor group",
       "jobs": 1,
+      "leader": null,
+      "leader_name": null,
       "low_eff_jobs": 1,
       "mean_util": 10.0,
       "running_jobs": 1,
@@ -71,6 +81,7 @@
           "util_gpu_hours": 0.0
         }
       ],
+      "unit_codes": [],
       "users": 1,
       "util_gpu_hours": 0.0,
       "vram_avg": null
@@ -82,18 +93,21 @@
       "group_id": "unresolved",
       "group_name": "Unresolved",
       "jobs": 0,
+      "leader": null,
+      "leader_name": null,
       "low_eff_jobs": 0,
       "mean_util": 0.0,
       "running_jobs": 0,
       "school_code": null,
       "school_name": null,
       "top_users": [],
+      "unit_codes": [],
       "users": 0,
       "util_gpu_hours": 0.0,
       "vram_avg": null
     }
   ],
-  "level": "unit",
+  "level": "group",
   "schools": [
     {
       "code": "T1",

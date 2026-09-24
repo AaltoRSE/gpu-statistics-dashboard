@@ -173,14 +173,14 @@ class UsersResponse(BaseModel):
 # ---- /api/groups, /api/groups/{group_id}/users -------------------------
 
 class School(BaseModel):
-    code: str = Field(description="OU=T<n> prefix the school's department "
-                      "codes start with (T1-T6).")
+    code: str = Field(description="Department-code prefix the school's "
+                      "departments start with (T1-T6, A8, E7, ...).")
     short: str = Field(description="Short name used as the school filter "
                        "value and on rows (SCI, ELEC, ...; Other for "
                        "legacy/university prefixes).")
     full: Optional[str] = Field(
         default=None,
-        description="Full school name from org_units.conf; null for the "
+        description="Full school name from prof_groups.conf; null for the "
         "synthetic Other a department code that matches no prefix gets.")
 
 
@@ -192,27 +192,40 @@ class GroupTopUser(BaseModel):
 class GroupCoverage(BaseModel):
     users: int = Field(description="Distinct job owners the roll-up "
                        "attempted to classify.")
-    affiliated: int = Field(description="Users with a unit or department.")
+    in_prof_group: int = Field(description="Users classified into a "
+                               "professor research group.")
+    dept_only: int = Field(description="Users with an osasto department "
+                           "but no professor group; their row always "
+                           "renders.")
     unaffiliated: int = Field(description="Known users with no "
-                              "laitos-*/osasto-*/tNNN-staff group; their "
-                              "row always renders.")
+                              "professor group and no osasto-t* group; "
+                              "their row always renders.")
     unresolved: int = Field(description="Users the directory does not "
                             "know; their row always renders.")
     failed: int = Field(description="Users whose NSS lookup errored "
                         "(partial directory outage). Their activity is in "
                         "no row — disclosed here, not folded into "
                         "unaffiliated.")
-    unmapped_codes: List[str] = Field(description="Unit codes with no (or "
-                      "an empty) name in org_units.conf — rows show the "
-                      "raw code; add a name to the file to fix.")
 
 
 class GroupRow(BaseModel):
-    group_id: str = Field(description="Roll-up row identity: "
-          "unit:TNNNXX, dept:TNNN ('(no unit)' at unit level), or the "
-          "always-present unaffiliated / unresolved rows. Use it for the "
-          "drill-down path.")
+    group_id: str = Field(description="Roll-up row identity: the group "
+          "leader's username, dept:TNNN ('<Department>, no professor "
+          "group' at group level), or the always-present unaffiliated / "
+          "unresolved rows. Use it for the drill-down path.")
     group_name: str
+    leader: Optional[str] = Field(
+        default=None,
+        description="The professor group's leader username; null for "
+        "department and special rows.")
+    leader_name: Optional[str] = Field(
+        default=None,
+        description="The leader's display name from prof_groups.conf.")
+    unit_codes: List[str] = Field(
+        default_factory=list,
+        description="The AD unit codes the group reads its NSS member "
+        "groups from (T40106, ...); empty for department and special "
+        "rows.")
     dept_code: Optional[str] = None
     dept_name: Optional[str] = None
     school_code: Optional[str] = Field(
@@ -246,7 +259,7 @@ class GroupRow(BaseModel):
 class GroupsResponse(BaseModel):
     window: Window
     level: str = Field(description="The roll-up level this response used "
-                       "(unit or department).")
+                       "(group or department).")
     schools: List[School]
     coverage: GroupCoverage
     count: int
@@ -261,12 +274,25 @@ class GroupMember(BaseModel):
     util_gpu_hours: float
     vram_avg: Optional[float] = None
     gpu_types: List[str]
-    unit_code: Optional[str] = None
+    group: Optional[str] = Field(
+        default=None,
+        description="The user's primary professor group (the leader's "
+        "username); null for department-only, unaffiliated and "
+        "unresolved users.")
+    membership: Optional[str] = Field(
+        default=None,
+        description="How the user belongs to their primary group: leader, "
+        "paid (the unit's laitos group), staff or everyone.")
     dept_code: Optional[str] = None
     school_code: Optional[str] = None
-    extra_units: List[str] = Field(
-        description="The user's other unit groups when they hold several "
-        "(the roll-up uses the preferred one).")
+    own_dept: Optional[str] = Field(
+        default=None,
+        description="The user's own osasto department — for a group "
+        "member this can differ from the row's department, which is the "
+        "professor's.")
+    extra_groups: List[str] = Field(
+        description="The user's other professor groups when several "
+        "claim them (the roll-up uses the strongest membership).")
     status: str
 
 

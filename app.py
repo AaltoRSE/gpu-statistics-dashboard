@@ -39,7 +39,7 @@ def slurm_error_handler(request, exc):
 
 @app.exception_handler(DirectoryError)
 def directory_error_handler(request, exc):
-    # NSS down (no user resolvable) or org_units.conf unreadable: the
+    # NSS down (no user resolvable) or prof_groups.conf unreadable: the
     # Groups tab's directory data is unavailable — 502, never a silent
     # all-unaffiliated table.
     return JSONResponse(content={"error": "directory_unreachable",

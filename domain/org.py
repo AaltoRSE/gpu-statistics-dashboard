@@ -1,19 +1,27 @@
-"""Organisational classification: NSS groups -> group / department / school.
+"""Organisational classification: NSS groups -> professor group /
+department / school.
 
-The Groups tab rolls per-user GPU activity up to the organisational unit
-(laitos-tNNNXX, e.g. a research group) a user belongs to, its department
-(osasto-tNNN) and school (OU=T<n>). Membership comes from the NSS groups
-the dashboard host already resolves (``groups <user>`` — no AD call at
-runtime); names come from ``org_units.conf``, a hand-editable file at the
-repo root (``ORG_UNITS_FILE`` overrides the location), reloaded whenever
-its mtime changes so a name fix never needs a restart.
+The Groups tab's groups are professor research groups: each row is one
+professor's group, defined by the AD unit their ``prof_groups.conf`` row
+names. Membership is read from the NSS groups this host already resolves
+(``groups <user>`` — no AD call at runtime): a unit's ``laitos-tNNNXX``
+group holds the people paid there, ``tNNNXX-staff`` its staff and
+``tNNNXX-everyone`` its affiliates; the professor leads the group. Names
+come from ``prof_groups.conf`` — generated from AD dumps by
+tools/build_prof_groups.py, hand-editable at the repo root
+(``PROF_GROUPS_FILE`` overrides the location), reloaded whenever its
+mtime changes so a fix never needs a restart.
 
-A user's own ``osasto-t*`` group always wins over the file: after reorgs
-a unit sits under several Staff parents, and the file's DEPT is only the
-best static guess. Users the directory does not know land in the
-Unresolved row; users with no laitos-*/osasto-*/tNNN-staff group land in
-the Unaffiliated row — both rows are always shown and never merged into
-another row (the same spirit as never rendering an unmeasured job 0%).
+Strengths order a user's memberships: leader (4) beats paid (3) beats
+staff (2) beats everyone (1). The primary group is the strongest
+membership (ties: the group whose department matches the user's own
+osasto, then the lowest leader name); the rest ride along as
+``extra_groups``. A user in no configured group but with an
+``osasto-t*`` group is department-only ("<Department>, no professor
+group"). Users the directory does not know land in the Unresolved row;
+known users with neither land in Unaffiliated — both rows are always
+shown and never merged into another row (the same spirit as never
+rendering an unmeasured job 0%).
 """
 
 import configparser
@@ -24,26 +32,32 @@ import threading
 import cache
 import deps
 
-# NSS group spellings (case-insensitive; codes are upper-cased on parse).
-# laitos-tNNNN legacy groups (4 digits) never match the unit regex.
-UNIT_GROUP_RE = re.compile(r"^laitos-t(\d{3}[0-9a-z]{2})$", re.IGNORECASE)
-DEPT_GROUP_RE = re.compile(r"^osasto-t(\d{3})$", re.IGNORECASE)
-# A user with no laitos-t* unit can still carry a department staff-role
-# group (tNNN-staff); it resolves to the department, never to a unit.
-STAFF_GROUP_RE = re.compile(r"^t(\d{3})-staff$", re.IGNORECASE)
+# The user's own department: osasto-tNNN, else a legacy tNNN-staff role
+# group (four characters — a unit's tNNNXX-staff is six and never
+# matches). Unit groups (laitos-tNNNXX / tNNNXX-staff / tNNNXX-everyone)
+# are NOT parsed from the user's own group list at all: membership comes
+# from the membership index, which reads those groups' member lists once
+# a day (plan §3) — a user's own laitos-tNNNXX group is merely how they
+# got into the index.
+DEPT_GROUP_RE = re.compile(r"^osasto-([a-z]\d{3})$", re.IGNORECASE)
+STAFF_GROUP_RE = re.compile(r"^([a-z]\d{3})-staff$", re.IGNORECASE)
 
 DEFAULT_FILE = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-    "org_units.conf")
+    "prof_groups.conf")
 
 # Statuses of one user's classification (see classify()).
-STATUS_UNIT = "unit"                # has a laitos-t* unit group
-STATUS_DEPT = "dept"                # department only (osasto / tNNN-staff)
-STATUS_UNAFFILIATED = "unaffiliated"  # known user, no org groups
+STATUS_GROUP = "group"              # member (or leader) of a prof group
+STATUS_DEPT = "dept"                # department only, no prof group
+STATUS_UNAFFILIATED = "unaffiliated"  # known user, no relevant groups
 STATUS_UNRESOLVED = "unresolved"    # the directory does not know the user
 
+# How strongly a user belongs to a group (see membership_index()).
+STRENGTH = {"leader": 4, "paid": 3, "staff": 2, "everyone": 1}
+STRENGTH_LABEL = {v: k for k, v in STRENGTH.items()}
+
 _LOCK = threading.Lock()
-_cache = None  # ((path, mtime), parsed map) or None
+_cache = None  # ((path, mtime), parsed conf) or None
 
 
 def _split_pipes(value, parts):
@@ -53,44 +67,54 @@ def _split_pipes(value, parts):
     return pieces + [""] * (parts - len(pieces))
 
 
-def _parse_org_file(path):
+def _parse_prof_file(path):
     cp = configparser.RawConfigParser(delimiters=("=",))
-    cp.optionxform = str  # keys are codes; keep their case before upper()
+    cp.optionxform = str  # [groups] keys are usernames; keep their case
     cp.read(path, encoding="utf-8")
 
     def section(name):
         if not cp.has_section(name):
             return {}
-        return {k.strip().upper(): v for k, v in cp.items(name)}
+        return {k.strip(): v for k, v in cp.items(name)}
 
     schools = {}
     for code, value in section("schools").items():
         short, full = _split_pipes(value, 2)
-        schools[code] = {"short": short, "full": full}
+        schools[code.upper()] = {"short": short, "full": full}
     departments = {}
     for code, value in section("departments").items():
-        departments[code] = value.strip()
-    units = {}
-    for code, value in section("units").items():
-        name, dept = _split_pipes(value, 2)
-        units[code] = {"name": name, "dept": dept.strip().upper()}
-    return {"schools": schools, "departments": departments, "units": units}
+        name, school = _split_pipes(value, 2)
+        departments[code.upper()] = {
+            "name": name, "school": school.strip().upper() or None}
+    groups = {}
+    for user, value in section("groups").items():
+        name, dept, codes = _split_pipes(value, 3)
+        groups[user] = {
+            "name": name,
+            "dept": dept.strip().upper() or None,
+            "unit_codes": [c.upper() for c in codes.split()],
+        }
+    return {"schools": schools, "departments": departments,
+            "groups": groups}
 
 
-def org_units_path():
-    """The org_units.conf location: ``ORG_UNITS_FILE`` or the repo root."""
-    return os.environ.get("ORG_UNITS_FILE") or DEFAULT_FILE
+def prof_groups_path():
+    """The prof_groups.conf location: ``PROF_GROUPS_FILE`` or the repo
+    root."""
+    return os.environ.get("PROF_GROUPS_FILE") or DEFAULT_FILE
 
 
-def load_org_map(path=None):
-    """The parsed org map, cached until the file's mtime changes.
+def load_prof_groups(path=None):
+    """The parsed prof_groups.conf, cached until the file's mtime
+    changes.
 
     Returns ``{"schools": {PREFIX: {"short", "full"}},
-    "departments": {CODE: name}, "units": {CODE: {"name", "dept"}}}``
-    with every key upper-cased (a hand-edited lower-case code still
-    resolves). The cache key includes the path, so flipping
-    ``ORG_UNITS_FILE`` between calls re-reads instead of reusing the
-    previous file's parse.
+    "departments": {CODE: {"name", "school"}},
+    "groups": {LEADER: {"name", "dept", "unit_codes"}},
+    "_source": (path, mtime)}`` with every key upper-cased (a
+    hand-edited lower-case code still resolves). The cache key includes
+    the path, so flipping ``PROF_GROUPS_FILE`` between calls re-reads
+    instead of reusing the previous file's parse.
 
     Raises DirectoryError when the file is unreadable or unparseable:
     the Groups tab's whole classification depends on it, so a missing
@@ -98,220 +122,297 @@ def load_org_map(path=None):
     everyone as unaffiliated.
     """
     global _cache
-    path = path or org_units_path()
+    path = path or prof_groups_path()
     try:
         mtime = os.stat(path).st_mtime
         parsed = None
         with _LOCK:
             if _cache is not None and _cache[0] == (path, mtime):
                 return _cache[1]
-        parsed = _parse_org_file(path)
+        parsed = _parse_prof_file(path)
     except (OSError, configparser.Error) as exc:
         raise deps.DirectoryError(
-            "org file %r unavailable: %s" % (path, exc)) from exc
+            "prof_groups file %r unavailable: %s" % (path, exc)) from exc
+    parsed["_source"] = (path, mtime)
     with _LOCK:
         _cache = ((path, mtime), parsed)
     return parsed
 
 
-def reset_org_cache():
+def reset_prof_cache():
     """Drop the module-level parsed-file cache (test isolation)."""
     global _cache
     with _LOCK:
         _cache = None
 
 
-def unit_dept(unit_code, org_map):
-    """A unit's department: its configured DEPT, else its own TNNN prefix."""
-    unit = org_map["units"].get(unit_code)
-    if unit and unit["dept"]:
-        return unit["dept"]
-    return unit_code[:4]
+# ---- conf lookups -------------------------------------------------------
+
+def group_dept(leader, conf):
+    """A group's configured department code (its professor's), or None."""
+    group = conf["groups"].get(leader)
+    return group and group["dept"]
 
 
-def dept_name(dept_code, org_map):
+def leader_name(leader, conf):
+    """A group's display name: the configured leader name, else the
+    username (a hand-added row may carry no name yet)."""
+    group = conf["groups"].get(leader)
+    return (group and group["name"]) or leader
+
+
+def dept_name(dept_code, conf):
     """A department's display name: the configured one, else the code."""
-    return org_map["departments"].get(dept_code) or dept_code
+    dept = conf["departments"].get(dept_code)
+    return (dept and dept["name"]) or dept_code
 
 
-def unit_name(unit_code, org_map):
-    """A unit's display name: the configured one, else the raw code (a
-    unit with no name anywhere in AD is shown by its code)."""
-    unit = org_map["units"].get(unit_code)
-    return (unit and unit["name"]) or unit_code
-
-
-def school_pair(dept_code, org_map):
+def school_pair(dept_code, conf):
     """``(short, full)`` for a department code: ``(None, None)`` without
-    a department, ``("Other", None)`` when no configured prefix matches
-    (legacy T5/T6 prefixes carry their own Other full name)."""
+    a department, the department's configured school key when it
+    resolves, else the longest school prefix the code starts with,
+    ``("Other", None)`` when nothing matches."""
     if not dept_code:
         return None, None
+    dept = conf["departments"].get(dept_code)
+    if dept and dept["school"] and dept["school"] in conf["schools"]:
+        school = conf["schools"][dept["school"]]
+        return school["short"], school["full"]
     best = None
-    for prefix in org_map["schools"]:
+    for prefix in conf["schools"]:
         if dept_code.startswith(prefix) and (
                 best is None or len(prefix) > len(best)):
             best = prefix
     if best is None:
         return "Other", None
-    school = org_map["schools"][best]
+    school = conf["schools"][best]
     return school["short"], school["full"]
 
 
-def school_for_dept(dept_code, org_map):
-    """Longest-prefix match of the department code against [schools];
-    ``None`` when there is no department, ``"Other"`` when nothing
-    matches (T5/T6 legacy prefixes are themselves named Other)."""
-    return school_pair(dept_code, org_map)[0]
+def school_for_dept(dept_code, conf):
+    """The school short name for a department code (see school_pair)."""
+    return school_pair(dept_code, conf)[0]
 
 
-# ---- classification ----------------------------------------------------
-# How long one user's classification is trusted: org membership moves at
-# reorg speed (months), but a user the directory does not know may simply
-# not exist YET — a job's owner can appear in NSS between two runs — so
-# the unresolved answer is re-asked hourly, the classified one daily.
+# ---- the membership index ----------------------------------------------
+# How long one directory answer is trusted: membership moves at reorg
+# speed (months), but a user the directory does not know may simply not
+# exist YET — a job's owner can appear in NSS between two runs — so the
+# unknown answer is re-asked hourly, the known one daily.
 CLASSIFIED_TTL = 24 * 3600
 UNKNOWN_TTL = 3600
 
 _UNRESOLVED = {
-    "unit_code": None, "dept_code": None, "school_code": None,
-    "extra_units": [], "status": STATUS_UNRESOLVED,
+    "group": None, "membership": None, "dept_code": None,
+    "school_code": None, "own_dept": None, "extra_groups": [],
+    "status": STATUS_UNRESOLVED,
 }
 _UNAFFILIATED = {
-    "unit_code": None, "dept_code": None, "school_code": None,
-    "extra_units": [], "status": STATUS_UNAFFILIATED,
+    "group": None, "membership": None, "dept_code": None,
+    "school_code": None, "own_dept": None, "extra_groups": [],
+    "status": STATUS_UNAFFILIATED,
 }
 
 
-def classify(groups, org_map=None):
-    """One user's org classification from their group names (§2 rules).
+def _group_members_cached(group_name):
+    """deps.group_members, cached per group: a configured group set is a
+    few dozen NSS reads, shared by every user classification within a
+    TTL instead of repeated per user. The TTL lives with the value (24 h
+    for a group the directory knows, 1 h for one it does not — a group
+    may be created after the conf names it), so entries are stored via
+    TtlCache.set, not get_or_set."""
+    key = cache.group_members_key(group_name)
+    hit, members = deps.route_cache.peek(key)
+    if hit:
+        return members
+    members = deps.group_members(group_name)
+    deps.route_cache.set(
+        key, CLASSIFIED_TTL if members is not None else UNKNOWN_TTL, members)
+    return members
 
-    Returns ``{"unit_code", "dept_code", "school_code", "extra_units",
-    "status"}``. Unit codes are upper-cased ``T`` + the laitos-tNNNXX
-    digits (``T313AA``); 4-digit legacy laitos-tNNNN groups never match.
-    The department is the user's own osasto group when they have one
-    (lowest code wins, for determinism), else the unit's configured
-    DEPT, else the unit's own prefix. With several units, the one whose
-    configured department is in the user's osasto set is preferred, ties
-    broken by the lowest code; the rest are ``extra_units``.
+
+def membership_index(conf):
+    """``{username: {leader: best strength}}`` — who belongs to which
+    configured group, and how strongly.
+
+    For every configured group's unit code the three NSS member groups
+    are read: ``laitos-<code>`` (paid there, strength 3), ``<code>-staff``
+    (2) and ``<code>-everyone`` (1); the leader is seeded into their own
+    group at strength 4 unconditionally — a leader who sits in nobody's
+    member list (Bäckström is in Alku's tNNNXX-staff, not their own
+    unit's) still leads. A user in several lists of one group keeps only
+    that group's strongest strength.
     """
-    if org_map is None:
-        org_map = load_org_map()
-    unit_codes, dept_codes = set(), set()
+    index = {}
+
+    def add(user, leader, strength):
+        known = index.setdefault(user, {})
+        if strength > known.get(leader, 0):
+            known[leader] = strength
+
+    for leader, spec in conf["groups"].items():
+        add(leader, leader, STRENGTH["leader"])
+        for code in spec["unit_codes"]:
+            code = code.lower()
+            for name, kind in (("laitos-" + code, "paid"),
+                               (code + "-staff", "staff"),
+                               (code + "-everyone", "everyone")):
+                members = _group_members_cached(name)
+                if members:
+                    for user in members:
+                        add(user, leader, STRENGTH[kind])
+    return index
+
+
+def _index_cached(conf):
+    """The membership index, cached per conf file version: one build is
+    one NSS read per (group x member list), so a day's worth of
+    classifications shares it, and a conf edit (new mtime) addresses a
+    different key — a hand-fix shows on the next request. A conf without
+    a ``_source`` (hand-built in tests) is built uncached."""
+    source = conf.get("_source")
+    if source is None:
+        return membership_index(conf)
+    path, mtime = source
+    return deps.route_cache.get_or_set(
+        ("prof_groups_index", path, mtime), CLASSIFIED_TTL,
+        lambda: membership_index(conf))
+
+
+# ---- classification ----------------------------------------------------
+
+def own_dept_of(groups):
+    """The user's own department: their osasto-tNNN group, else a
+    tNNN-staff role group; lowest code wins, None with neither."""
+    codes = set()
     for group in groups or ():
-        m = UNIT_GROUP_RE.match(group)
-        if m:
-            unit_codes.add("T" + m.group(1).upper())
-            continue
         m = DEPT_GROUP_RE.match(group) or STAFF_GROUP_RE.match(group)
         if m:
-            dept_codes.add("T" + m.group(1))
-    if unit_codes:
-        ordered = sorted(unit_codes)
-        if dept_codes:
-            # Prefer the unit whose configured department is one of the
-            # user's own osasto groups; ties (and no-match) by lowest code.
-            preferred = [u for u in ordered
-                         if unit_dept(u, org_map) in dept_codes]
-            chosen = preferred[0] if preferred else ordered[0]
-        else:
-            chosen = ordered[0]
-        dept = sorted(dept_codes)[0] if dept_codes \
-            else unit_dept(chosen, org_map)
+            codes.add(m.group(1).upper())
+    return sorted(codes)[0] if codes else None
+
+
+def classify(username, groups, index, conf):
+    """One user's classification from their group names and the
+    membership index (plan §3).
+
+    Returns ``{"group", "membership", "dept_code", "school_code",
+    "own_dept", "extra_groups", "status"}``. The primary group is the
+    strongest membership, ties preferring the group whose configured
+    department is the user's own osasto, then the lowest leader name; a
+    group member's department is the GROUP's department (the
+    professor's) — the research group is the organizational home the
+    row reports, not the member's own cost-centre osasto, which rides
+    along as ``own_dept`` for the drill-down. ``membership`` names the
+    strength of the primary membership (leader/paid/staff/everyone).
+    """
+    if groups is None:
+        return dict(_UNRESOLVED)
+    own_dept = own_dept_of(groups)
+    memberships = index.get(username) or {}
+    if memberships:
+        leaders = sorted(
+            memberships,
+            key=lambda leader: (
+                -memberships[leader],
+                0 if (own_dept and group_dept(leader, conf) == own_dept)
+                else 1,
+                leader))
+        primary = leaders[0]
+        dept = group_dept(primary, conf) or own_dept
         return {
-            "unit_code": chosen,
+            "group": primary,
+            "membership": STRENGTH_LABEL[memberships[primary]],
             "dept_code": dept,
-            "school_code": school_for_dept(dept, org_map),
-            "extra_units": [u for u in ordered if u != chosen],
-            "status": STATUS_UNIT,
+            "school_code": school_for_dept(dept, conf),
+            "own_dept": own_dept,
+            "extra_groups": leaders[1:],
+            "status": STATUS_GROUP,
         }
-    if dept_codes:
-        dept = sorted(dept_codes)[0]
+    if own_dept:
         return {
-            "unit_code": None, "dept_code": dept,
-            "school_code": school_for_dept(dept, org_map),
-            "extra_units": [], "status": STATUS_DEPT,
+            "group": None, "membership": None, "dept_code": own_dept,
+            "school_code": school_for_dept(own_dept, conf),
+            "own_dept": own_dept, "extra_groups": [],
+            "status": STATUS_DEPT,
         }
     return dict(_UNAFFILIATED)
 
 
-def _resolve_one(username, org_map):
-    """One user's classification, cached per user (24 h / 1 h).
+def _groups_cached(username):
+    """One user's RAW NSS group list, cached per user (24 h / 1 h for a
+    user the directory does not know).
 
-    Errors are never cached: a DirectoryError propagates and the next
-    caller retries, while an unknown user IS cached (briefly) so one
-    typo'd username in a window cannot re-hit NSS every request.
+    The raw groups are cached, not the classification built from them:
+    the classification also depends on prof_groups.conf and the
+    membership index, and a conf edit must show on the next request
+    rather than waiting out a per-user TTL. Errors are never cached: a
+    DirectoryError propagates and the next caller retries, while an
+    unknown user IS cached (briefly) so one typo'd username in a window
+    cannot re-hit NSS every request.
     """
-    key = cache.user_org_key(username)
-    hit, cached = deps.route_cache.peek(key)
+    key = cache.user_groups_key(username)
+    hit, groups = deps.route_cache.peek(key)
     if hit:
-        return cached
+        return groups
     groups = deps.user_groups(username)
-    if groups is None:
-        result = dict(_UNRESOLVED)
-        ttl = UNKNOWN_TTL
-    else:
-        result = classify(groups, org_map)
-        ttl = CLASSIFIED_TTL
-    deps.route_cache.set(key, ttl, result)
-    return result
+    deps.route_cache.set(
+        key, CLASSIFIED_TTL if groups is not None else UNKNOWN_TTL, groups)
+    return groups
 
 
-def resolve_users(usernames, org_map=None):
-    """Classify many users, with per-user coverage (§ commit 4).
+def resolve_users(usernames, conf=None, index=None):
+    """Classify many users, with per-user coverage.
 
     Returns ``(mapping, coverage)``: mapping is ``{user: classify()}``
     for every user whose lookup succeeded; coverage is
-    ``{users, affiliated, unaffiliated, unresolved, failed,
-    unmapped_codes}`` — failed being the users whose NSS lookup raised
-    (their activity is disclosed as unclassified, never folded into
-    Unaffiliated), unmapped_codes the unit codes the config has no (or
-    an empty) name for. Raises DirectoryError only when EVERY lookup
-    failed — a total directory outage is a 502, a partial one a served
-    response with a coverage banner.
+    ``{users, in_prof_group, dept_only, unaffiliated, unresolved,
+    failed}`` — failed being the users whose NSS lookup raised (their
+    activity is disclosed as unclassified, never folded into
+    Unaffiliated). Raises DirectoryError only when EVERY lookup failed —
+    a total directory outage is a 502, a partial one a served response
+    with a coverage banner.
     """
-    if org_map is None:
-        org_map = load_org_map()
+    if conf is None:
+        conf = load_prof_groups()
+    if index is None:
+        index = _index_cached(conf)
     mapping, failed = {}, 0
-    users = affili = unaffili = unresolv = 0
-    unmapped = set()
+    users = ingroup = deptonly = unaffili = unresolv = 0
     for username in sorted(usernames):
         users += 1
         try:
-            result = _resolve_one(username, org_map)
+            groups = _groups_cached(username)
         except deps.DirectoryError:
             failed += 1
             continue
+        result = classify(username, groups, index, conf)
         mapping[username] = result
         status = result["status"]
-        if status in (STATUS_UNIT, STATUS_DEPT):
-            affili += 1
+        if status == STATUS_GROUP:
+            ingroup += 1
+        elif status == STATUS_DEPT:
+            deptonly += 1
         elif status == STATUS_UNAFFILIATED:
             unaffili += 1
         else:
             unresolv += 1
-        code = result["unit_code"]
-        if code is not None:
-            unit = org_map["units"].get(code)
-            if not unit or not unit["name"]:
-                unmapped.add(code)
     if users and failed == users:
         raise deps.DirectoryError(
             "every user lookup failed (%d of %d)" % (failed, users))
     coverage = {
         "users": users,
-        "affiliated": affili,
+        "in_prof_group": ingroup,
+        "dept_only": deptonly,
         "unaffiliated": unaffili,
         "unresolved": unresolv,
         "failed": failed,
-        "unmapped_codes": sorted(unmapped),
     }
     return mapping, coverage
 
 
-# ---- the Groups roll-up (plan commit 6 f) ------------------------------
+# ---- the Groups roll-up -------------------------------------------------
 
-GROUP_UNIT_PREFIX = "unit:"
 GROUP_DEPT_PREFIX = "dept:"
 GROUP_UNAFFILIATED = "unaffiliated"
 GROUP_UNRESOLVED = "unresolved"
@@ -322,22 +423,27 @@ LOW_UTIL_THRESHOLD = 30.0
 def group_id_for(result, level):
     """A classification's roll-up row identity at the given level.
 
-    At unit level a unit user's own group and a unit-less user a
-    department row (``dept:T410``); at department level both statuses
-    collapse into the user's department (their own osasto wins over the
-    unit's configured DEPT). The two special rows are their own ids.
+    At group level a group member's row is their leader's username; at
+    department level every classified user collapses into their
+    department row (``dept:TNNN``) — a group member their group's
+    department, a department-only user their own osasto. A group member
+    with no department anywhere keeps the group row at both levels (a
+    department row needs a department). The two special rows are their
+    own ids.
     """
     status = result["status"]
-    if status == STATUS_UNIT and level != "department":
-        return GROUP_UNIT_PREFIX + result["unit_code"]
     if result["dept_code"]:
-        return GROUP_DEPT_PREFIX + result["dept_code"]
+        if status != STATUS_GROUP or level == "department":
+            return GROUP_DEPT_PREFIX + result["dept_code"]
+        return result["group"]
+    if status == STATUS_GROUP:
+        return result["group"]
     return status
 
 
-def rollup_groups(user_rows, mapping, jobs_view, step, level="unit",
-                  org_map=None):
-    """Roll per-user aggregates up to Groups-tab rows (commit 6 f).
+def rollup_groups(user_rows, mapping, jobs_view, step, level="group",
+                  conf=None):
+    """Roll per-user aggregates up to Groups-tab rows.
 
     ``user_rows`` is aggregate_users()' output; ``mapping`` the
     classification map from resolve_users (users whose lookup failed are
@@ -345,26 +451,35 @@ def rollup_groups(user_rows, mapping, jobs_view, step, level="unit",
     through coverage.failed, never folded into Unaffiliated);
     ``jobs_view`` the window's job view for the per-job low-utilization
     count; ``step`` the window's query step, from which a member's
-    observed GPU-hours derive (samples x step). ``level`` is "unit" or
-    "department".
+    observed GPU-hours derive (samples x step). ``level`` is "group"
+    (default) or "department".
 
-    Rows are ordered by util_gpu_hours descending (ties by name), with
-    the Unaffiliated and Unresolved rows ALWAYS present — even empty —
-    so "no such users" can never be read as "everyone is classified"
-    (the same spirit as the no-data gh200 row). Members ride along under
-    ``members`` for the drill-down; the response schema keeps only
-    ``top_users``.
+    At group level a group member's row is named after their professor;
+    a department-only user lands in "<Department>, no professor group".
+    At department level both collapse into one department row (a group
+    member under their professor's department, everyone else under
+    their own osasto) named after the department alone. Rows are ordered
+    by util_gpu_hours descending (ties by name), with the Unaffiliated
+    and Unresolved rows ALWAYS present — even empty — so "no such users"
+    can never be read as "everyone is classified" (the same spirit as
+    the no-data gh200 row). Members ride along under ``members`` for the
+    drill-down; the response schema keeps only ``top_users``.
     """
-    if org_map is None:
-        org_map = load_org_map()
+    if conf is None:
+        conf = load_prof_groups()
     rows = {}
 
-    def row_for(gid, name, dept_code):
+    def row_for(gid, name, dept_code, leader=None):
         return rows.setdefault(gid, {
             "group_id": gid,
             "group_name": name,
+            "leader": leader,
+            "leader_name": leader_name(leader, conf) if leader else None,
+            "unit_codes": list(
+                conf["groups"].get(leader, {}).get("unit_codes", []))
+            if leader else [],
             "dept_code": dept_code,
-            "dept_name": dept_name(dept_code, org_map) if dept_code else None,
+            "dept_name": dept_name(dept_code, conf) if dept_code else None,
             "school_code": None, "school_name": None,
             "users": 0, "jobs": 0, "running_jobs": 0,
             "_util_sum": 0.0, "_util_samples": 0,
@@ -384,25 +499,24 @@ def rollup_groups(user_rows, mapping, jobs_view, step, level="unit",
         if result is None:
             continue  # failed lookup: coverage.failed, not a fake row
         status = result["status"]
-        if status == STATUS_UNIT and level != "department":
-            gid = GROUP_UNIT_PREFIX + result["unit_code"]
-            code = result["unit_code"]
-            name = unit_name(code, org_map)
-            dept = unit_dept(code, org_map)
+        if status == STATUS_GROUP and level != "department":
+            gid = result["group"]
+            name = leader_name(gid, conf)
+            dept = result["dept_code"]
+            row = row_for(gid, name, dept, leader=gid)
         else:
             dept = result["dept_code"]
             if not dept:
                 gid = status  # unaffiliated / unresolved
                 name = "Unaffiliated" if status == STATUS_UNAFFILIATED \
                     else "Unresolved"
-                code = None
             else:
                 gid = GROUP_DEPT_PREFIX + dept
-                code = None
-                name = dept_name(dept, org_map) + (
-                    "" if level == "department" else " (no unit)")
-        row = row_for(gid, name, dept)
-        short, full = school_pair(dept, org_map)
+                name = dept_name(dept, conf) + (
+                    "" if level == "department"
+                    else ", no professor group")
+            row = row_for(gid, name, dept)
+        short, full = school_pair(dept, conf)
         row["school_code"] = short
         row["school_name"] = full
         row["users"] += 1
@@ -425,22 +539,17 @@ def rollup_groups(user_rows, mapping, jobs_view, step, level="unit",
             "util_gpu_hours": m["util_gpu_hours"],
             "vram_avg": m["vram_avg"],
             "gpu_types": m["gpu_types"],
-            "unit_code": result["unit_code"],
+            "group": result["group"],
+            "membership": result["membership"],
             "dept_code": result["dept_code"],
             "school_code": result["school_code"],
-            "extra_units": result["extra_units"],
+            "own_dept": result["own_dept"],
+            "extra_groups": result["extra_groups"],
             "status": status,
         })
 
-    gids_of = {}
-    for user, result in mapping.items():
-        status = result["status"]
-        if status == STATUS_UNIT and level != "department":
-            gids_of[user] = GROUP_UNIT_PREFIX + result["unit_code"]
-        elif result["dept_code"]:
-            gids_of[user] = GROUP_DEPT_PREFIX + result["dept_code"]
-        else:
-            gids_of[user] = status
+    gids_of = {user: group_id_for(result, level)
+               for user, result in mapping.items()}
     for j in jobs_view:
         gid = gids_of.get(j["user"])
         row = rows.get(gid)

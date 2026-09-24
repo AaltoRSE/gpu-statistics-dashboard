@@ -116,13 +116,31 @@ COMPLETED_HISTORY = [{**record, "state": "COMPLETED"}
 
 # The Groups tab's NSS directory (deps.user_groups): each canned user's
 # group list; users outside this map are unknown to the directory (the
-# Unresolved row). dave holds no laitos-*/osasto-* group at all — the
+# Unresolved row). Membership in a professor group does NOT come from
+# these lists — it comes from the member lists of the configured units'
+# NSS groups (GROUP_MEMBERS below); a user's own groups only ever name
+# their osasto department. dave holds no osasto group at all — the
 # Unaffiliated row. /api/users never reads this; /api/groups does.
 USER_GROUPS = {
     "alice": ["laitos-t40106", "osasto-t410"],
     "bob": ["laitos-t30010", "osasto-t300"],
-    "carol": ["osasto-t313"],   # department only, no unit
-    "dave": ["triton-users"],   # no org groups at all: unaffiliated
+    "carol": ["osasto-t313"],   # own department only, no prof group
+    "dave": ["triton-users"],   # no relevant groups at all: unaffiliated
+}
+
+# The configured units' NSS member lists (deps.group_members): what the
+# membership index reads, once per group per TTL. bob's laitos-t30010 is
+# deliberately NOT a configured group's unit — T30010 belongs to no
+# professor in the test conf, so bob is honestly department-only.
+GROUP_MEMBERS = {
+    # kyrkiv1's unit T40106 (the leader is seeded by the index itself)
+    "laitos-t40106": ["alice", "kyrkiv1"],
+    "t40106-staff": ["kyrkiv1"],
+    "t40106-everyone": ["hannuse2"],
+    # backstt1's unit T40571
+    "laitos-t40571": ["linc15"],
+    "t40571-staff": ["backstt1"],
+    "t40571-everyone": ["linc15"],
 }
 
 
@@ -312,6 +330,12 @@ def fake_prom(monkeypatch):
     # directory above; an unknown user reads as None (unresolved).
     monkeypatch.setattr(deps, "user_groups",
                         lambda username: USER_GROUPS.get(username))
+    # The member lists of the configured units' NSS groups (the
+    # membership index's reads); an unknown group reads as None.
+    monkeypatch.setattr(
+        deps, "group_members",
+        lambda name: list(GROUP_MEMBERS[name]) if name in GROUP_MEMBERS
+        else None)
     # Empty pending queue by default; tests opt in via deps.queue_pending.
     monkeypatch.setattr(deps, "queue_pending", lambda: [])
 
@@ -1925,7 +1949,7 @@ def test_step_for_range_long_windows():
     "/api/jobs/1",
     "/api/users",
     "/api/groups",
-    "/api/groups/unit:T40106/users",
+    "/api/groups/kyrkiv1/users",
     "/api/partitions",
     "/api/partitions/queue",
     "/api/partitions/queue/progress",
