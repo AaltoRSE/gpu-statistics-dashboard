@@ -279,6 +279,23 @@ def test_word_boundary_surnames_do_not_substring_match():
     assert matched == ["T31301"] and how == "description"
 
 
+def test_hyphenated_compound_is_one_surname():
+    # 'Laurila' must not claim 'Ala-Laurila Petri group' — in the real
+    # AD data the hyphen is a word boundary to every regex but one name
+    # to the org chart, so the compound's owner and the tail-surname
+    # professor both claimed T31425 until '-' joined the boundary class.
+    units = bpg.load_units(bpg.parse_dump("\n\n".join([
+        unit("laitos-t31425", description="Ala-Laurila Petri group")])))
+    compound = {"sn": "Ala-Laurila", "given": "Petri", "dn": "",
+                "name": "Ala-Laurila Petri"}
+    tail = {"sn": "Laurila", "given": "Timo", "dn": "",
+            "name": "Laurila Timo"}
+    matched, how = bpg.own_units(compound, units, [], {"ala-laurila": 1})
+    assert matched == ["T31425"] and how == "description"
+    matched, how = bpg.own_units(tail, units, [], {"laurila": 1})
+    assert matched == [] and how == "none"
+
+
 def test_department_falls_back_to_the_dn_ou(monkeypatch):
     # A professor without a Triton account (not in this host's NSS)
     # still carries their department in their DN: OU=<unit>,OU=<dept>.

@@ -178,10 +178,13 @@ def _norm(text):
 
 def _name_in_text(name, text):
     """Whole-word containment, on _norm()-ed strings: 'Li' must match
-    'Li Wei group' but never 'Lindqvist Johan group' or 'Salmelin'."""
+    'Li Wei group' but never 'Lindqvist Johan group' or 'Salmelin'. A
+    hyphen is NOT a boundary — a compound surname is one name, so
+    'Laurila' must not match inside 'Ala-Laurila Petri group' (a
+    different professor's unit)."""
     if not name:
         return False
-    return re.search(r"(?<![0-9a-z])%s(?![0-9a-z])" % re.escape(name),
+    return re.search(r"(?<![0-9a-z-])%s(?![0-9a-z-])" % re.escape(name),
                      text) is not None
 
 
