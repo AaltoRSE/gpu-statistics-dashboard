@@ -15,6 +15,9 @@ present or future — only when call sites do ``import deps`` and then
 ``deps.sacct_jobs(...)``.
 """
 
+import grp
+import os
+import pwd
 import time as _time
 
 from fastapi import HTTPException
@@ -34,6 +37,39 @@ from slurm import (  # noqa: F401 (re-exported)
 route_cache = TtlCache()
 
 _prom = None
+
+
+class DirectoryError(Exception):
+    """The NSS user directory failed (not merely an unknown user).
+
+    ``user_groups`` returns None for a user the directory does not know
+    — that is an answer. This is raised when the directory itself is
+    unreachable (the underlying call raised OSError); the API maps it to
+    a 502 so an org outage never reads as "everyone unaffiliated".
+    """
+
+
+def user_groups(username):
+    """``groups <user>``: the user's NSS group names, or None for a user
+    the directory does not know.
+
+    Reads the same NSS/sssd sources the ``groups`` command does:
+    ``pwd.getpwnam`` for the account and primary gid, ``os.getgrouplist``
+    for every supplementary gid, and ``grp.getgrgid(g).gr_name`` for the
+    group names. Returns None for an unknown user (distinct from a
+    directory failure) and raises DirectoryError when NSS raises
+    OSError. No caching here — callers cache the derived classification,
+    whose TTL is theirs to choose.
+    """
+    try:
+        pw = pwd.getpwnam(username)
+        gids = os.getgrouplist(username, pw.pw_gid)
+    except KeyError:
+        return None
+    except OSError as exc:
+        raise DirectoryError(
+            "could not list groups for %r: %s" % (username, exc)) from exc
+    return sorted({grp.getgrgid(g).gr_name for g in gids})
 
 
 def get_prom():

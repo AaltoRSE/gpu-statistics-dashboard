@@ -2,6 +2,8 @@
 
 The real org_units.conf is committed, so the loader's checks against it
 run as unit tests; synthetic files in tmp_path cover the format corners.
+The NSS boundary (deps.user_groups) is exercised with patched pwd/os —
+never against the real directory.
 """
 
 import os
@@ -9,8 +11,12 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+import pwd  # noqa: E402
+
 import pytest  # noqa: E402
 
+import cache  # noqa: E402
+import deps  # noqa: E402
 import domain.org as org  # noqa: E402
 
 REAL_FILE = org.DEFAULT_FILE
@@ -158,3 +164,79 @@ def test_real_file_departments_and_schools():
     schools = m["schools"]
     assert schools["T3"]["short"] == "SCI"
     assert schools["T5"]["short"] == "Other"
+
+
+# ---- the NSS boundary (deps.user_groups) ------------------------------
+
+class _FakePwd:
+    """A pwd entry: getpwnam returns it, getgrouplist maps to gids."""
+
+    def __init__(self, gids):
+        self.pw_gid = gids[0]
+
+
+def _patch_nss(monkeypatch, accounts):
+    """accounts: {name: [gid, ...]}; getpwnam raises KeyError for names
+    outside the map. Returns the recorded getpwnam names."""
+    looked_up = []
+
+    def getpwnam(username):
+        looked_up.append(username)
+        if username not in accounts:
+            raise KeyError("getpwnam(): name not found: %r" % username)
+        return _FakePwd(accounts[username])
+
+    def getgrouplist(username, gid):
+        return accounts[username]
+
+    monkeypatch.setattr(pwd, "getpwnam", getpwnam)
+    monkeypatch.setattr(os, "getgrouplist", getgrouplist)
+    return looked_up
+
+
+def test_user_groups_returns_sorted_unique_names(monkeypatch):
+    monkeypatch.setattr(
+        deps.grp, "getgrgid",
+        lambda g: type("G", (), {"gr_name": {10: "osasto-t410",
+                                             11: "laitos-t40106",
+                                             12: "osasto-t410"}[g]})())
+    _patch_nss(monkeypatch, {"hannuse2": [10, 11, 10, 12]})
+    assert deps.user_groups("hannuse2") == ["laitos-t40106", "osasto-t410"]
+
+
+def test_user_groups_unknown_user_is_none_not_error(monkeypatch):
+    looked_up = _patch_nss(monkeypatch, {"alice": [10]})
+    # An unknown user is an ANSWER (the Unresolved row), not a failure.
+    assert deps.user_groups("ghost") is None
+    assert looked_up == ["ghost"]
+
+
+def test_user_groups_oserror_raises_directory_error(monkeypatch):
+    _patch_nss(monkeypatch, {"alice": [10]})
+
+    def boom(username, gid):
+        raise OSError("NSS status 3, sssd down")
+
+    monkeypatch.setattr(os, "getgrouplist", boom)
+    with pytest.raises(deps.DirectoryError, match="sssd down"):
+        deps.user_groups("alice")
+
+
+def test_user_org_key_is_username_scoped():
+    assert cache.user_org_key("alice") == ("user_org", "alice")
+    assert cache.user_org_key("bob") != cache.user_org_key("alice")
+
+
+def test_ttl_cache_set_then_peek():
+    c = cache.TtlCache()
+    assert c.peek("k") == (False, None)
+    c.set("k", 60, {"v": 1})
+    hit, value = c.peek("k")
+    assert hit and value == {"v": 1}
+    # a fresh peek after the TTL passes misses (monotonic, not wall clock)
+    real = cache.time.monotonic
+    cache.time.monotonic = lambda: real() + 120
+    try:
+        assert c.peek("k") == (False, None)
+    finally:
+        cache.time.monotonic = real

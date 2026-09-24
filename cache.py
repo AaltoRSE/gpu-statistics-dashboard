@@ -74,6 +74,18 @@ class TtlCache:
         future.set_result(value)
         return value
 
+    def set(self, key, ttl, value):
+        """Store a value whose TTL depends on the value itself — the case
+        ``get_or_set`` cannot serve, since its TTL is fixed before ``fn``
+        runs (an unknown-user classification caches for 1 h, a resolved
+        one for 24 h). Never single-flights: two concurrent first
+        callers may both fetch, which is harmless for idempotent reads.
+        """
+        with self._lock:
+            if len(self._store) > self._max_size:
+                self._store.clear()
+            self._store[key] = (time.monotonic() + ttl, value)
+
     def peek(self, key):
         """``(True, value)`` when an unexpired entry exists, else
         ``(False, None)``. Non-blocking: it never joins an in-flight
@@ -263,6 +275,16 @@ def snapshot_key():
     instant queries, so running-only views and the Nodes view read the
     same instant (plan §1)."""
     return ("snapshot",)
+
+
+def user_org_key(username):
+    """One user's org classification (domain.org.resolve_users), cached
+    per user — not per request — because a username's org membership is
+    the same fact for every window and every route that asks. The TTL
+    lives with the value (24 h for a classified user, 1 h for one the
+    directory does not know), so entries are stored via TtlCache.set,
+    not get_or_set."""
+    return ("user_org", username)
 
 
 def partition_views_key(start, end, step, fingerprint):
