@@ -315,6 +315,31 @@ test("the group table carries one glossary trigger — by the table title", asyn
   assert.equal(btns[0].closest("h2").textContent.includes("Group table"), true);
 });
 
+test("a conf that itself maps prefixes to Other keeps one Other everywhere", async (t) => {
+  // The builder's SCHOOL_BY_PREFIX maps T5/T6/U9 to Other, so a
+  // regenerated conf can carry Other among the schools — the client must
+  // still render exactly one Other option and one Other legend entry.
+  const body = {
+    ...BODY1,
+    schools: [
+      { code: "T3", short: "SCI", full: "School of Science" },
+      { code: "T5", short: "Other", full: "Legacy / university units" },
+      { code: "T6", short: "Other", full: "Legacy / university units" },
+    ],
+  };
+  const ctx = await boot({ bodies: [body] }, 16);
+  t.after(() => ctx.dom.window.close());
+  const doc = ctx.dom.window.document;
+  await ctx.mod.loadGroups();
+  const otherOptions = [...doc.getElementById("gSchool").options]
+    .filter((o) => o.value === "Other");
+  assert.equal(otherOptions.length, 1, "one Other option in the filter");
+  const legend = doc.getElementById("groupsSchoolLegend");
+  assert.equal(
+    (legend.textContent.match(/Other/g) || []).length, 1,
+    "one Other entry in the legend");
+});
+
 test("clicking a group row fetches its members with kind and extra groups", async (t) => {
   const ctx = await boot({}, 5);
   t.after(() => ctx.dom.window.close());

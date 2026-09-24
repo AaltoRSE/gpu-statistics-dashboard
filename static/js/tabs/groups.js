@@ -108,9 +108,13 @@ function syncUrl() {
 function renderSchoolOptions() {
   const sel = $("gSchool");
   const shorts = [...new Set(schools.map((s) => s.short))];
-  const values = groupRows.some((g) => g.school_code === OTHER)
-    ? [...shorts, OTHER]
-    : shorts;
+  // A conf may itself map a prefix to Other (the builder's T5/T6/U9 do);
+  // the row-bucket option is then already among the shorts — add one
+  // only when it is not.
+  const values =
+    groupRows.some((g) => g.school_code === OTHER) && !shorts.includes(OTHER)
+      ? [...shorts, OTHER]
+      : shorts;
   sel.innerHTML = '<option value="">all schools</option>' +
     values.map((s) =>
       '<option value="' + escapeHtml(s) + '">' + escapeHtml(s) + "</option>"
@@ -236,6 +240,8 @@ function schoolColorMap() {
   const map = { [OTHER]: th.other };
   let i = 0;
   [...new Set(schools.map((s) => s.short))].forEach((short) => {
+    if (short in map) return;  // Other keeps its gray even when a conf
+                               // prefix maps to it
     map[short] = SCHOOL_COLORS[short] || th.colors[i++ % th.colors.length];
   });
   return map;
@@ -250,10 +256,12 @@ export function renderGroupsBar() {
     ? "top " + rows.length + " of " + groupRows.length + " by mean util %" : "";
   $("groupsBarEmpty").hidden = !!rows.length;
   // Legend entries in config school order, Other last — only schools
-  // present in the current filtered rows.
+  // present in the current filtered rows, deduped (a conf may map
+  // several prefixes to Other).
   const present = new Set(rows.map((g) => g.school_code));
-  const entries = schools.map((s) => s.short).filter((s) => present.has(s));
-  if (present.has(OTHER)) entries.push(OTHER);
+  const entries = [...new Set(schools.map((s) => s.short))]
+    .filter((s) => present.has(s));
+  if (present.has(OTHER) && !entries.includes(OTHER)) entries.push(OTHER);
   $("groupsSchoolLegend").innerHTML = entries.map((s) =>
     '<span class="legend-key" style="background:' + colors[s] +
     '"></span> ' + escapeHtml(s)
