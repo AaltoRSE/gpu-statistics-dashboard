@@ -16,7 +16,7 @@ const EXPECTED = {
   jobDetailResults: "Loading job detail history…",
   jobEfficiencyResults: "Loading job history…",
   jobsResults: "Loading job history…",
-  partitionsResults: "Loading GPU utilization history…",
+  partitionsResults: "Loading GPU type summary…",
   queueResults: "Loading current queue and wait history…",
   vramResults: "Loading VRAM history…",
   usersResults: "Loading user history…",
@@ -104,14 +104,14 @@ test("a loading panel shows a chip in every card, batch text reaches all of them
   try {
     const panel = await import("../static/js/core/panel.js");
     panel.setResultsLoading("partitionsResults", true,
-      "Loading GPU utilization history…");
+      "Loading GPU type summary…");
     const el = global.document.getElementById("partitionsResults");
     const cards = el.querySelectorAll(".card");
     assert.ok(cards.length > 1, "the partitions panel has several cards");
     const chips = el.querySelectorAll(".card .results-loading");
     assert.equal(chips.length, cards.length, "one chip per card");
     for (const chip of chips) {
-      assert.equal(chip.textContent, "Loading GPU utilization history…");
+      assert.equal(chip.textContent, "Loading GPU type summary…");
     }
     // Batch progress (setResultsLoadingMessage) rewrites every chip, so no
     // card keeps an earlier label while its siblings report batch state.
@@ -125,7 +125,7 @@ test("a loading panel shows a chip in every card, batch text reaches all of them
     assert.ok(el.classList.contains("has-card-chips"));
     // ...a second loading state reuses them instead of cloning anew...
     panel.setResultsLoading("partitionsResults", true,
-      "Loading GPU utilization history…");
+      "Loading GPU type summary…");
     assert.equal(el.querySelectorAll(".card .results-loading").length, cards.length);
     // ...and clearing the state drops the loading class (CSS hides the chips).
     panel.setResultsLoading("partitionsResults", false);

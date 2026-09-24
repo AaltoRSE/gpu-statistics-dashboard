@@ -55,21 +55,63 @@ function addCardChips(panel) {
   if (cloned) panel.classList.add("has-card-chips");
 }
 
-export function setResultsLoadingMessage(resultsId, message) {
+// Per-panel loading-chip state: the panel's base message, when this loading
+// spell began, and whether a batch-progress text currently owns the chip.
+// Drives the elapsed-seconds suffix below: once a load runs past a few
+// seconds with no batch progress to show — the Prometheus phase after the
+// shared sacct dump has finished, or a fully cached dump — the chip ticks
+// instead of sitting on a frozen sentence that reads as "stuck".
+const loadingState = {}; // resultsId -> { base, at, batch }
+
+function writeChips(resultsId, text) {
   const el = $(resultsId);
-  // Plain text only: assembling "&hellip;" at runtime would render the
-  // literal word "hellip" once escaped; a real "…" needs no entity.
-  if (el) allChips(el).forEach((chip) => { chip.textContent = message; });
+  if (el) allChips(el).forEach((chip) => { chip.textContent = text; });
+}
+
+export function setResultsLoadingMessage(resultsId, message) {
+  // Batch progress owns the chip while it runs; the elapsed suffix stands
+  // down until the batch phase ends (resetResultsLoadingMessage). The flag
+  // only sticks when the panel has loading state — tests drive this
+  // function standalone against the static HTML.
+  const st = loadingState[resultsId];
+  if (st) st.batch = true;
+  writeChips(resultsId, message);
+}
+
+// Hand the chip back to the panel's base message after a batch phase. A
+// batched fetch publishes progress only while it runs (the shared dump's
+// key is popped on completion), so the polls then answer null — without
+// this reset the last "batch X of Y" would sit frozen on the chip for the
+// rest of the, usually slower, request.
+export function resetResultsLoadingMessage(resultsId) {
+  const st = loadingState[resultsId];
+  if (!st || !st.base) return;
+  st.batch = false;
+  writeChips(resultsId, loadingChipText(st));
+}
+
+function loadingChipText(st) {
+  const s = Math.floor((Date.now() - st.at) / 1000);
+  // Plain message for the first seconds; past that, the elapsed time — the
+  // one honest signal that a long load is still moving.
+  return s > 4 ? st.base + " (" + s + " s)" : st.base;
 }
 
 export function setResultsLoading(resultsId, loading, message = null) {
   const el = $(resultsId);
-  // Each refresh must restate its panel's own label: a prior load's
-  // batch-progress text would otherwise survive as the next load's
-  // first message. (New card chips are cloned after the restatement, so
-  // they come up carrying the fresh label, not stale batch text.)
-  if (loading && message !== null) setResultsLoadingMessage(resultsId, message);
-  if (loading) addCardChips(el);
+  if (loading) {
+    if (message !== null) {
+      loadingState[resultsId] = { base: message, at: Date.now(), batch: false };
+      writeChips(resultsId, message);
+    } else if (!loadingState[resultsId]) {
+      // A loader with no label of its own (the live Nodes list): the static
+      // chip text stays, and there is nothing to suffix elapsed time onto.
+      loadingState[resultsId] = { base: null, at: Date.now(), batch: false };
+    }
+    addCardChips(el);
+  } else {
+    delete loadingState[resultsId];
+  }
   el.classList.toggle("loading", loading);
   el.setAttribute("aria-busy", loading ? "true" : "false");
 }
@@ -140,6 +182,23 @@ export function tickFreshness() {
 }
 
 setInterval(tickFreshness, 60000);
+
+// Once a second, re-state every loading panel's base chip text with the
+// elapsed seconds appended, so a long fetch with no batch progress still
+// shows a moving indicator. Batch text suppresses it (a live "batch X of Y"
+// needs no suffix) until resetResultsLoadingMessage hands the chip back.
+setInterval(() => {
+  const now = Date.now();
+  for (const [id, st] of Object.entries(loadingState)) {
+    if (!st.base || st.batch) continue;
+    const el = $(id);
+    if (!el || !el.classList.contains("loading")) {
+      delete loadingState[id];
+      continue;
+    }
+    writeChips(id, loadingChipText(st));
+  }
+}, 1000);
 
 // ---- opt-in auto-refresh --------------------------------------------
 // Off by default (see the ticket's own watch-out: a wall-display tab left
