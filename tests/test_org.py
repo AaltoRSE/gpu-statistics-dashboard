@@ -240,3 +240,178 @@ def test_ttl_cache_set_then_peek():
         assert c.peek("k") == (False, None)
     finally:
         cache.time.monotonic = real
+
+
+# ---- classification (classify, resolve_users) -------------------------
+
+HANNUSE2 = ["laitos-t40106", "osasto-t410"]
+FIROOZH1 = ["laitos-t30010", "osasto-t300"]
+
+
+def test_classify_unit_with_own_osasto():
+    c = org.classify(HANNUSE2)
+    assert c["status"] == "unit"
+    assert c["unit_code"] == "T40106"
+    assert c["dept_code"] == "T410"
+    assert c["school_code"] == "ELEC"
+    assert c["extra_units"] == []
+    # osasto wins over the unit's configured DEPT: a member of T40106
+    # whose own osasto says T412 is counted under T412, not T410.
+    c = org.classify(["laitos-t40106", "osasto-t412"])
+    assert c["unit_code"] == "T40106" and c["dept_code"] == "T412"
+    assert c["school_code"] == "ELEC"
+
+
+def test_classify_unit_without_osasto_uses_config_dept():
+    # firoozh1's own osasto (t300) agrees with T30010's DEPT
+    assert org.classify(FIROOZH1)["dept_code"] == "T300"
+    assert org.classify(FIROOZH1)["school_code"] == "SCI"
+    # no osasto at all: the unit's configured DEPT
+    c = org.classify(["laitos-t30198"])
+    assert c["unit_code"] == "T30198" and c["dept_code"] == "T301"
+    # ...and a unit with no configured DEPT falls back to its prefix
+    assert org.classify(["laitos-t40299"])["dept_code"] == "T402"
+
+
+def test_classify_several_units_prefer_osasto_match_lowest_tie():
+    # both units' config depts (T410, T412) are in the osasto set? no —
+    # only T40714's is; the other is kept as extra_units.
+    c = org.classify(["laitos-t40106", "laitos-t40714", "osasto-t412"])
+    assert c["unit_code"] == "T40714"
+    assert c["dept_code"] == "T412"
+    assert c["extra_units"] == ["T40106"]
+    # two units with no osasto at all: lowest code wins
+    c = org.classify(["laitos-t313AB", "laitos-t313AA"])
+    assert c["unit_code"] == "T313AA" and c["extra_units"] == ["T313AB"]
+    # several units, all matching the osasto: lowest code wins
+    c = org.classify(["laitos-t40106", "laitos-t40107", "osasto-t410"])
+    assert c["unit_code"] == "T40106" and c["extra_units"] == ["T40107"]
+
+
+def test_classify_department_without_unit():
+    c = org.classify(["osasto-t313"])
+    assert c["status"] == "dept" and c["unit_code"] is None
+    assert c["dept_code"] == "T313" and c["school_code"] == "SCI"
+
+
+def test_classify_staff_role_group_falls_back_to_department():
+    # a user with no laitos-t* unit group can still carry tNNN-staff
+    c = org.classify(["t313-staff"])
+    assert c["status"] == "dept" and c["dept_code"] == "T313"
+    assert c["school_code"] == "SCI"
+
+
+def test_classify_ignores_legacy_four_digit_units():
+    # laitos-tNNNN (4 digits) is a legacy spelling and must never
+    # classify as a unit; the user's osasto still resolves.
+    c = org.classify(["laitos-t4010", "osasto-t410"])
+    assert c["unit_code"] is None and c["dept_code"] == "T410"
+
+
+def test_classify_unaffiliated():
+    c = org.classify(["docker", "wheel"])
+    assert c["status"] == "unaffiliated"
+    assert c["unit_code"] is None and c["school_code"] is None
+
+
+def test_classify_unmapped_dept_school_is_other():
+    c = org.classify(["osasto-t900"])
+    assert c["status"] == "dept" and c["school_code"] == "Other"
+
+
+@pytest.fixture()
+def nss(monkeypatch):
+    """Patch deps.user_groups with an in-memory directory; returns the
+    mutable accounts dict so tests can control who is unknown."""
+    accounts = {
+        "hannuse2": HANNUSE2,
+        "firoozh1": FIROOZH1,
+        "carol": ["osasto-t313"],            # department only
+        "dave": ["docker", "wheel"],         # unaffiliated
+        "eve": ["laitos-t99999"],            # unit missing from the config
+        "frank": ["laitos-t31398"],          # unit with an empty name
+    }
+    calls = []
+
+    def user_groups(username):
+        calls.append(username)
+        if username not in accounts:
+            return None
+        return list(accounts[username])
+
+    monkeypatch.setattr(deps, "user_groups", user_groups)
+    return {"accounts": accounts, "calls": calls}
+
+
+@pytest.fixture()
+def fake_route_cache(monkeypatch):
+    import deps as deps_mod
+    monkeypatch.setattr(deps_mod, "route_cache", cache.TtlCache())
+    return deps_mod.route_cache
+
+
+def test_resolve_users_mapping_and_coverage(nss, fake_route_cache):
+    mapping, coverage = org.resolve_users(
+        ["hannuse2", "firoozh1", "carol", "dave", "ghost"])
+    assert mapping["hannuse2"]["unit_code"] == "T40106"
+    assert mapping["hannuse2"]["dept_code"] == "T410"
+    assert mapping["hannuse2"]["school_code"] == "ELEC"
+    assert mapping["firoozh1"]["unit_code"] == "T30010"
+    assert mapping["carol"]["status"] == "dept"
+    assert mapping["dave"]["status"] == "unaffiliated"
+    assert mapping["ghost"]["status"] == "unresolved"
+    assert coverage["users"] == 5
+    assert coverage["affiliated"] == 3
+    assert coverage["unaffiliated"] == 1
+    assert coverage["unresolved"] == 1
+    assert coverage["failed"] == 0
+
+
+def test_resolve_users_unmapped_codes(nss, fake_route_cache):
+    _, coverage = org.resolve_users(["eve", "frank"])
+    # T99999 is not in the config; T31398 has no name anywhere in AD.
+    assert coverage["unmapped_codes"] == ["T31398", "T99999"]
+
+
+def test_resolve_users_repeats_make_zero_extra_nss_calls(nss, fake_route_cache):
+    org.resolve_users(["hannuse2", "firoozh1"])
+    first = len(nss["calls"])
+    assert first == 2
+    org.resolve_users(["hannuse2", "firoozh1", "firoozh1"])
+    assert len(nss["calls"]) == first  # served entirely from the cache
+
+
+def test_resolve_users_partial_failure_keeps_the_rest(nss, fake_route_cache,
+                                                      monkeypatch):
+    real = deps.user_groups
+
+    def flaky(username):
+        if username == "hannuse2":
+            raise deps.DirectoryError("sssd down")
+        return real(username)
+
+    monkeypatch.setattr(deps, "user_groups", flaky)
+    mapping, coverage = org.resolve_users(["hannuse2", "firoozh1"])
+    assert "hannuse2" not in mapping   # disclosed as failed, never faked
+    assert mapping["firoozh1"]["unit_code"] == "T30010"
+    assert coverage["failed"] == 1
+    assert coverage["users"] == 2
+
+
+def test_resolve_users_raises_only_when_every_lookup_fails(nss,
+                                                           fake_route_cache,
+                                                           monkeypatch):
+    def boom(username):
+        raise deps.DirectoryError("sssd down")
+
+    monkeypatch.setattr(deps, "user_groups", boom)
+    with pytest.raises(deps.DirectoryError):
+        org.resolve_users(["hannuse2", "firoozh1"])
+
+
+def test_resolve_users_empty_window_never_raises(nss, fake_route_cache):
+    # no users -> nothing to look up, and "every lookup failed" cannot
+    # fire on an empty set
+    mapping, coverage = org.resolve_users([])
+    assert mapping == {}
+    assert coverage["users"] == 0 and coverage["failed"] == 0

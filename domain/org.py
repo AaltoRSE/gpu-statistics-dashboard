@@ -21,6 +21,9 @@ import os
 import re
 import threading
 
+import cache
+import deps
+
 # NSS group spellings (case-insensitive; codes are upper-cased on parse).
 # laitos-tNNNN legacy groups (4 digits) never match the unit regex.
 UNIT_GROUP_RE = re.compile(r"^laitos-t(\d{3}[0-9a-z]{2})$", re.IGNORECASE)
@@ -140,3 +143,147 @@ def school_for_dept(dept_code, org_map):
                 best is None or len(prefix) > len(best)):
             best = prefix
     return org_map["schools"][best]["short"] if best else "Other"
+
+
+# ---- classification ----------------------------------------------------
+# How long one user's classification is trusted: org membership moves at
+# reorg speed (months), but a user the directory does not know may simply
+# not exist YET — a job's owner can appear in NSS between two runs — so
+# the unresolved answer is re-asked hourly, the classified one daily.
+CLASSIFIED_TTL = 24 * 3600
+UNKNOWN_TTL = 3600
+
+_UNRESOLVED = {
+    "unit_code": None, "dept_code": None, "school_code": None,
+    "extra_units": [], "status": STATUS_UNRESOLVED,
+}
+_UNAFFILIATED = {
+    "unit_code": None, "dept_code": None, "school_code": None,
+    "extra_units": [], "status": STATUS_UNAFFILIATED,
+}
+
+
+def classify(groups, org_map=None):
+    """One user's org classification from their group names (§2 rules).
+
+    Returns ``{"unit_code", "dept_code", "school_code", "extra_units",
+    "status"}``. Unit codes are upper-cased ``T`` + the laitos-tNNNXX
+    digits (``T313AA``); 4-digit legacy laitos-tNNNN groups never match.
+    The department is the user's own osasto group when they have one
+    (lowest code wins, for determinism), else the unit's configured
+    DEPT, else the unit's own prefix. With several units, the one whose
+    configured department is in the user's osasto set is preferred, ties
+    broken by the lowest code; the rest are ``extra_units``.
+    """
+    if org_map is None:
+        org_map = load_org_map()
+    unit_codes, dept_codes = set(), set()
+    for group in groups or ():
+        m = UNIT_GROUP_RE.match(group)
+        if m:
+            unit_codes.add("T" + m.group(1).upper())
+            continue
+        m = DEPT_GROUP_RE.match(group) or STAFF_GROUP_RE.match(group)
+        if m:
+            dept_codes.add("T" + m.group(1))
+    if unit_codes:
+        ordered = sorted(unit_codes)
+        if dept_codes:
+            # Prefer the unit whose configured department is one of the
+            # user's own osasto groups; ties (and no-match) by lowest code.
+            preferred = [u for u in ordered
+                         if unit_dept(u, org_map) in dept_codes]
+            chosen = preferred[0] if preferred else ordered[0]
+        else:
+            chosen = ordered[0]
+        dept = sorted(dept_codes)[0] if dept_codes \
+            else unit_dept(chosen, org_map)
+        return {
+            "unit_code": chosen,
+            "dept_code": dept,
+            "school_code": school_for_dept(dept, org_map),
+            "extra_units": [u for u in ordered if u != chosen],
+            "status": STATUS_UNIT,
+        }
+    if dept_codes:
+        dept = sorted(dept_codes)[0]
+        return {
+            "unit_code": None, "dept_code": dept,
+            "school_code": school_for_dept(dept, org_map),
+            "extra_units": [], "status": STATUS_DEPT,
+        }
+    return dict(_UNAFFILIATED)
+
+
+def _resolve_one(username, org_map):
+    """One user's classification, cached per user (24 h / 1 h).
+
+    Errors are never cached: a DirectoryError propagates and the next
+    caller retries, while an unknown user IS cached (briefly) so one
+    typo'd username in a window cannot re-hit NSS every request.
+    """
+    key = cache.user_org_key(username)
+    hit, cached = deps.route_cache.peek(key)
+    if hit:
+        return cached
+    groups = deps.user_groups(username)
+    if groups is None:
+        result = dict(_UNRESOLVED)
+        ttl = UNKNOWN_TTL
+    else:
+        result = classify(groups, org_map)
+        ttl = CLASSIFIED_TTL
+    deps.route_cache.set(key, ttl, result)
+    return result
+
+
+def resolve_users(usernames, org_map=None):
+    """Classify many users, with per-user coverage (§ commit 4).
+
+    Returns ``(mapping, coverage)``: mapping is ``{user: classify()}``
+    for every user whose lookup succeeded; coverage is
+    ``{users, affiliated, unaffiliated, unresolved, failed,
+    unmapped_codes}`` — failed being the users whose NSS lookup raised
+    (their activity is disclosed as unclassified, never folded into
+    Unaffiliated), unmapped_codes the unit codes the config has no (or
+    an empty) name for. Raises DirectoryError only when EVERY lookup
+    failed — a total directory outage is a 502, a partial one a served
+    response with a coverage banner.
+    """
+    if org_map is None:
+        org_map = load_org_map()
+    mapping, failed = {}, 0
+    users = affili = unaffili = unresolv = 0
+    unmapped = set()
+    for username in sorted(usernames):
+        users += 1
+        try:
+            result = _resolve_one(username, org_map)
+        except deps.DirectoryError:
+            failed += 1
+            continue
+        mapping[username] = result
+        status = result["status"]
+        if status in (STATUS_UNIT, STATUS_DEPT):
+            affili += 1
+        elif status == STATUS_UNAFFILIATED:
+            unaffili += 1
+        else:
+            unresolv += 1
+        code = result["unit_code"]
+        if code is not None:
+            unit = org_map["units"].get(code)
+            if not unit or not unit["name"]:
+                unmapped.add(code)
+    if users and failed == users:
+        raise deps.DirectoryError(
+            "every user lookup failed (%d of %d)" % (failed, users))
+    coverage = {
+        "users": users,
+        "affiliated": affili,
+        "unaffiliated": unaffili,
+        "unresolved": unresolv,
+        "failed": failed,
+        "unmapped_codes": sorted(unmapped),
+    }
+    return mapping, coverage
