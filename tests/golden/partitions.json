@@ -1,7 +1,7 @@
 {
   "partitions": [
     {
-      "gpus_alloc": 3,
+      "gpus_alloc": 0,
       "gpus_total": 8,
       "job_count": 1,
       "max_util": 95.0,
@@ -19,7 +19,7 @@
       "name": "h200_3g.71gb"
     },
     {
-      "gpus_alloc": 2,
+      "gpus_alloc": 3,
       "gpus_total": 20,
       "job_count": 2,
       "max_util": 60.0,

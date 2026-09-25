@@ -10,7 +10,17 @@ logic either way.
 
 import cache
 import deps
+import sources
 from slurm import SlurmError, expand_node_list
+
+
+def active_jobs():
+    """The 30 s-cached scontrol snapshot, or {} when scontrol is down."""
+    try:
+        return deps.route_cache.get_or_set(
+            cache.scontrol_jobs_key(), 30, deps.show_jobs)
+    except SlurmError:
+        return {}
 
 
 def _jobid_sort_key(jobid):
@@ -74,26 +84,29 @@ def resolve_scontrol_metadata(jobid, observed_nodes, metadata):
     return merge_job_rows(matches) if matches else None
 
 
-def resolve_sacct_metadata(jobid, observed_nodes, metadata):
+def resolve_sacct_metadata(jobid, observed_nodes, rows):
     """Resolve the sacct rows for a Prometheus job ID.
 
-    Exact IDs match directly. A bare Slurm array parent (e.g. ``19975109``)
-    has no exact row: ``sacct -j`` returns only its task rows
-    (``19975109_0`` …), so every task whose node list intersects the
-    observed instances is merged into one row with the same aggregation
-    as the active scontrol path — including historical arrays whose
-    multiple matching tasks no longer exist in the controller.
+    ``rows`` is the ID's enriched sacct rows (from the shared dump index
+    or the per-ID row cache): exact IDs — by either the ``jobid`` or the
+    raw ``jobid_raw`` spelling — match directly, without a node check.
+    A bare Slurm array parent (e.g. ``19975109``) has no exact row: the
+    dump holds only its task rows (``19975109_0`` …), so every task whose
+    node list intersects the observed instances is merged into one row
+    with the same aggregation as the active scontrol path — including
+    historical arrays whose multiple matching tasks no longer exist in
+    the controller.
     """
-    metadata = metadata or {}
-    row = metadata.get(jobid)
-    if row:
-        return row
+    rows = rows or []
+    for row in rows:
+        if row.get("jobid") == jobid or row.get("jobid_raw") == jobid:
+            return row
     observed = {n for n in observed_nodes if n}
     if not observed:
         return None
     prefix = jobid + "_"
-    matches = [task for key, task in metadata.items()
-               if key.startswith(prefix)
+    matches = [task for task in rows
+               if task.get("jobid", "").startswith(prefix)
                and observed & expand_node_list(task.get("node_list"))]
     return merge_job_rows(matches) if matches else None
 
@@ -121,25 +134,25 @@ def apply_metadata(job, row):
 
 
 def enrich(jobs):
+    """Resolve metadata for a job list from one parallel source gather.
+
+    Both reads go through sources (plan §1): the jobs' per-ID sacct rows
+    (the row cache batches every ID into one fetch) and the active-job
+    scontrol snapshot run concurrently, and the snapshot failing must not
+    take the listing down — an active-job miss (or a failed call) falls
+    back to the sacct rows.
+    """
     ids = [j["jobid"] for j in jobs]
     if not ids:
         return
-    # Explicit job IDs bound the sacct request, so no visible-window -S
-    # date is passed: jobs that started before the chart window still get
-    # their name, state, start, and GPU allocation.
-    meta = deps.route_cache.get_or_set(
-        cache.sacct_key(ids), 300, lambda: deps.sacct_jobs(ids))
-    # Active-job snapshot for array parents: scontrol only knows jobs the
-    # controller still holds, so a miss (or a failed call) falls back to
-    # the sacct rows above.
-    try:
-        active = deps.route_cache.get_or_set(
-            cache.scontrol_jobs_key(), 30, deps.show_jobs)
-    except SlurmError:
-        active = {}
+    rows_by_id, active = sources.gather(
+        lambda: sources.sacct_rows(ids),
+        active_jobs,
+    )
     for job in jobs:
         row = (resolve_scontrol_metadata(job["jobid"], job["nodes"], active)
-               or resolve_sacct_metadata(job["jobid"], job["nodes"], meta))
+               or resolve_sacct_metadata(job["jobid"], job["nodes"],
+                                         rows_by_id.get(job["jobid"])))
         if not row:
             continue
         apply_metadata(job, row)

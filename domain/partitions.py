@@ -1,5 +1,5 @@
 """Partition/node-capacity domain logic: occupancy, capacity joins,
-current node state, and a node's live-job-start window.
+the per-GPU window's partition view, and a node's live-job-start window.
 """
 
 from collections import defaultdict
@@ -7,12 +7,11 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 
 import cache
-import deps
 import gpu_groups
-from domain.common import job_window, running_gpu_job_ids, series_values, step_for_range
+import sources
+from domain.common import aggregate_by, series_values
 from prom import PrometheusError
-from promql import label_eq, label_in, selector
-from slurm import SlurmError, expand_node_list
+from slurm import expand_node_list
 
 CLUSTER_TZ = ZoneInfo("Europe/Helsinki")
 """sacct prints naive cluster-local (Europe/Helsinki) strings; interpret
@@ -41,61 +40,39 @@ never a GPU type and must never leak into the public ``queue`` map.
 """
 
 
-def partition_window(since_hours, running_only=False, now=None,
-                     node_gpu_types=None):
-    """GPU-type utilization window.
+def partition_view(raw, node_gpu_types, include_configured=True):
+    """GPU-type utilization view of one window's per-GPU raw series.
 
     Groups are keyed by the canonical GPU type (gpu_groups.canonical_gpu_type):
-    the short scontrol GRES type, MIG profiles split out from their node's
+    the short scontrol GRES type, MIG GRES profiles split out from their node's
     whole-GPU pool), not by Slurm partition — priority-only partitions over
     the same hardware share one group. Summary data keeps the
     ``slurmjobid`` label (per-job/per-node max, so the job identity
-    survives for running-only matching); the trend/occupancy queries are
-    ``sum``/``count`` ``by (instance, gpu_type)`` so each raw exporter
+    survives for running-only matching); the trend/occupancy derivations
+    are ``sum``/``count`` ``by (instance, gpu_type)`` so each raw exporter
     label resolves against its own scontrol node before canonical types
-    merge. Per-timestamp sum / count gives the utilization trend, the
-    count itself is the occupancy series, and the matcher must be injected
-    into the metric selector before aggregation.
+    merge. The three derived series come from the per-GPU raw window
+    fetch (plan §2) instead of three separate PromQL aggregations.
 
     Also returns ``job_groups`` — the canonical group(s) each observed job
     belongs to — for the historical wait join in ``started_wait_summary``.
+
+    ``include_configured`` adds configured-but-unmeasured scontrol GPU
+    types as explicit no-data rows; a running-only view omits them (a
+    live-subset view must not claim capacity the filtered window never
+    observed), so callers pass False there.
     """
-    start, now = job_window(since_hours, now)
-    step = step_for_range(now - start)
-    sel = ""
-    if running_only:
-        live = running_gpu_job_ids()
-        if not live:
-            return [], {}, {}, {}, {}, start, now, step
-        sel = selector(label_in("slurmjobid", live))
-
-    def fetch():
-        stats = deps.get_prom().query_range(
-            "max by (slurmjobid, instance, gpu_type) "
-            "(slurm_job_utilization_gpu%s)" % sel,
-            start, now, step,
-        )
-        # Preserve the source instance through aggregation: a raw label
-        # resolves against that node's scontrol GRES list before aliases
-        # merge into canonical GPU types. Per-timestamp sum/count is the
-        # utilization trend; the count series is occupancy.
-        util_sums = deps.get_prom().query_range(
-            "sum by (instance, gpu_type) (slurm_job_utilization_gpu%s)" % sel,
-            start, now, step,
-        )
-        gpu_counts = deps.get_prom().query_range(
-            "count by (instance, gpu_type) (slurm_job_utilization_gpu%s)" % sel,
-            start, now, step,
-        )
-        return stats, util_sums, gpu_counts, start, now, step
-
-    key = cache.partition_window_key(since_hours, running_only)
-    stats, util_sums, gpu_counts, start, now, step = \
-        deps.route_cache.get_or_set(key, 60, fetch)
+    # Preserve the source instance through aggregation: a raw label
+    # resolves against that node's scontrol GRES list before aliases
+    # merge into canonical GPU types. Per-timestamp sum/count is the
+    # utilization trend; the count series is occupancy.
+    stats = aggregate_by(raw, ["slurmjobid", "instance", "gpu_type"], "max")
+    util_sums = aggregate_by(raw, ["instance", "gpu_type"], "sum")
+    gpu_counts = aggregate_by(raw, ["instance", "gpu_type"], "count")
     out = aggregate_partition_stats(stats, node_gpu_types)
     trend_out, occupancy = aggregate_gpu_type_series(
         util_sums, gpu_counts, node_gpu_types)
-    if not running_only:
+    if include_configured:
         out, trend_out, occupancy = _include_configured_gpu_types(
             out, trend_out, occupancy, node_gpu_types)
     # Observed instances per group, for the capacity join in api_partitions.
@@ -118,7 +95,7 @@ def partition_window(since_hours, running_only=False, now=None,
         if jobid:
             name = gpu_groups.gpu_group_name(m, node_gpu_types)
             job_groups.setdefault(jobid, set()).add(name)
-    return out, trend_out, instances, occupancy, job_groups, start, now, step
+    return out, trend_out, instances, occupancy, job_groups
 
 
 def aggregate_gpu_type_series(util_sums, gpu_counts, node_gpu_types=None):
@@ -229,7 +206,7 @@ def gpu_capacity(groups, instances, nodes, allocs):
     """Join GPU-type groups to scontrol GPU capacity.
 
     ``instances`` maps group -> observed instance names (built in
-    ``partition_window``). Capacity is summed over **all** scontrol nodes
+    ``partition_view``). Capacity is summed over **all** scontrol nodes
     carrying a GRES entry whose type exactly equals the group name —
     whole GPUs and MIG profiles alike, idle capacity included,
     independent of partition membership (several priority partitions
@@ -257,86 +234,33 @@ def gpu_capacity(groups, instances, nodes, allocs):
     return groups
 
 
-def node_current(node_gpu_types=None):
-    node_gpu_types = node_gpu_types or {}
-    prom = deps.get_prom()
-
-    def fetch():
-        inst_util = prom.query_instant("max by (instance) (slurm_job_utilization_gpu)")
-        inst_vram = prom.query_instant(
-            "avg by (instance) (slurm_job_memory_usage_gpu / "
-            "slurm_job_memory_total_gpu * 100)"
-        )
-        active = prom.query_instant(
-            "max by (instance, slurmjobid, job, user) (slurm_job_utilization_gpu)"
-        )
-        # The exporter publishes one utilization series per allocated GPU, so
-        # the series count per node equals the allocated GPU count. The ``gpu``
-        # label is job-local (every 1-GPU job says gpu="0"), so it must not be
-        # used for allocation accounting.
-        alloc = prom.query_instant(
-            "count by (instance, job, gpu_type) (slurm_job_utilization_gpu)")
-        return inst_util, inst_vram, active, alloc
-
-    inst_util, inst_vram, active, alloc = deps.route_cache.get_or_set(
-        cache.node_current_key(), 30, fetch)
-    cur = {}
-    for s in inst_util:
-        cur[s["metric"]["instance"]] = {"util": float(s["value"][1])}
-    for s in inst_vram:
-        cur.setdefault(s["metric"]["instance"], {})["vram"] = float(s["value"][1])
-    jobs_by_node = defaultdict(list)
-    for s in active:
-        m = s["metric"]
-        jobs_by_node[m["instance"]].append(
-            {
-                "jobid": m.get("slurmjobid", ""),
-                "job": m.get("job", ""),
-                "user": m.get("user", ""),
-                "util": float(s["value"][1]),
-            }
-        )
-    allocs_by_node = {}
-    allocs_by_group = {}
-    for s in alloc:
-        m = s["metric"]
-        inst = m.get("instance", "")
-        if not inst:
-            continue
-        count = int(float(s["value"][1]))
-        allocs_by_node[inst] = allocs_by_node.get(inst, 0) + count
-        group = gpu_groups.gpu_group_name(m, node_gpu_types)
-        allocs_by_group[group] = allocs_by_group.get(group, 0) + count
-    return cur, jobs_by_node, allocs_by_node, allocs_by_group
-
-
 def node_job_start(name, now):
     """Earliest sacct start of jobs actively reporting on a node.
 
-    Falls back to a six-hour window when the node has no live GPU jobs,
-    sacct is unavailable, or no start value parses. Starts older than seven
+    Live job IDs come from the shared live snapshot (plan §1) instead of a
+    fifth instant query, and their sacct rows from the per-ID row cache
+    (plan §1) — the exact or JobIDRaw row carries the start. Falls back to
+    a six-hour window when the node has no live GPU jobs, sacct rows
+    cannot be fetched, or no start value parses. Starts older than seven
     days are clamped to bound the window (and the payload).
     """
     fallback_start = now - 6 * 3600
-    sel = selector(label_eq("instance", name))
     try:
-        live = {
-            s["metric"]["slurmjobid"]
-            for s in deps.get_prom().query_instant(
-                "count by (slurmjobid) (slurm_job_utilization_gpu%s)" % sel
-            )
-            if s["metric"].get("slurmjobid")
-        }
+        jobs = sources.live_snapshot()["jobs_by_node"].get(name, [])
     except PrometheusError:
         return fallback_start
+    live = sorted({j["jobid"] for j in jobs if j.get("jobid")})
     if not live:
         return fallback_start
-    try:
-        meta = deps.sacct_jobs(sorted(live))
-    except SlurmError:
-        return fallback_start
-    starts = [e for e in (_sacct_epoch((meta.get(j) or {}).get("start"))
-                          for j in live) if e]
+    rows_by_id = sources.sacct_rows(live)
+    starts = []
+    for id in live:
+        for row in rows_by_id.get(id) or []:
+            if row.get("jobid") == id or row.get("jobid_raw") == id:
+                epoch = _sacct_epoch(row.get("start"))
+                if epoch:
+                    starts.append(epoch)
+                break
     if not starts:
         return fallback_start
     return max(min(starts), now - 7 * 86400)
@@ -526,16 +450,8 @@ def wait_empty():
     return _wait_statistics([])
 
 
-progress_store = {}
-"""Latest batched accounting progress, keyed per fetch scope.
-
-Two consumers publish here and their poll routes read it: the queue's
-long-window wait-history fetch (key from
-``cache.completed_progress_key``) and the VRAM distribution's sacct
-enrichment (key from ``cache.vram_progress_key``). Each fetch updates,
-then clears, its own entry, so a poll never observes a finished or
-failed fetch's stale state.
-"""
+progress_store = cache.progress_store
+"""Backward-compat alias of ``cache.progress_store`` (the same dict)."""
 
 
 def completed_wait_summary(records, node_gpu_types, window_start, window_end,

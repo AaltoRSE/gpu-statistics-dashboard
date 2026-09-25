@@ -177,13 +177,25 @@ td.chip-cell { white-space:normal; }
 .queue-unique .small { font-weight:400; }
 
 /* Panel-local loading: a small status chip plus a light dim — content stays
-   readable (no blur) so a refresh never implies the shown data is gone. */
+   readable (no blur) so a refresh never implies the shown data is gone.
+   panel.js clones a chip into every .card on first loading, so the dim
+   sits on each card's own children rather than on the whole content: the
+   chips stay readable while the card's charts/tables behind them dim. */
 .results-panel { position:relative; }
-.results-panel.loading > .results-content { opacity:.55; pointer-events:none; }
+/* Positioning context for the card's chip. .card itself is styled in
+   layout.css; the context is declared here beside the chip rules that
+   need it. position:relative alone creates no stacking context, so the
+   sticky first table column inside the card keeps its own z-index game. */
+.results-panel .card { position:relative; }
+.results-panel.loading .card > :not(.results-loading) { opacity:.55; pointer-events:none; }
 .results-loading { position:absolute; left:50%; top:38%; transform:translate(-50%,-50%);
   font-size:13px; color:var(--text); background:var(--panel2); border:1px solid var(--line);
   border-radius:8px; padding:8px 16px; z-index:3; display:none; }
 .results-panel.loading .results-loading { display:block; }
+/* Once the label chip has been cloned into the cards, the panel-level
+   original would duplicate the first card's chip at top:38% of the whole
+   panel — it steps aside (panel.js sets the class when it clones). */
+.results-panel.has-card-chips > .results-loading { display:none; }
 /* A failed refresh keeps the last data visible but flags it as stale rather
    than current; the panel-error box below offers the retry. */
 .stale-note { display:none; margin-top:8px; font-size:12px; color:var(--warn); }

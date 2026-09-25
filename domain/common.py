@@ -1,9 +1,9 @@
 """Low-level helpers shared across every domain and route module.
 
 Prometheus response shaping (series/window envelopes), the query-step
-heuristic, and the "which jobs are live right now" check are used by
-jobs, partitions, vram, and every route's response body alike, so they
-have no single domain owner — they live here instead.
+heuristic, and the batch-computed ``max/sum/count by`` aggregation are
+used by jobs, partitions, vram, and every route's response body alike,
+so they have no single domain owner — they live here instead.
 """
 
 import deps
@@ -49,13 +49,53 @@ def window(start, now):
     return {"start": start, "end": now}
 
 
-def running_gpu_job_ids():
-    """Job IDs with a live Prometheus GPU-utilization series.
+def aggregate_by(series, labels, op, live=None):
+    """Batch-computed stand-in for a PromQL ``max/sum/count by (labels)``
+    aggregation over a range result (plan §2).
 
-    A live series is the shared definition of "running" for both the Jobs
-    and Partitions running-only controls; it avoids an unbounded sacct scan.
+    The per-GPU raw window series feeds four PromQL aggregations today
+    (Q1/Q3/Q4/Q5 — per-job max, partition summary, per-type sums and
+    counts, each with a running-only matcher variant). Fetching the raw
+    series ONCE per pinned window and computing these aggregations in
+    process turns four upstream queries into one; this function produces
+    Prometheus-shaped output the existing consumers run on unchanged.
+
+    ``series`` items are parsed or raw prom range results (``values``
+    entries may be ``["ts", "v"]`` pairs or already-parsed ``(ts, v)``
+    tuples — both go through ``float()``). ``labels`` names the group-by
+    labels; ``op`` is ``"max"``, ``"sum"`` or ``"count"`` (``count``
+    counts the members holding a value at each timestamp). ``live``, when
+    given, is the set of ``slurmjobid`` values to keep — the in-process
+    replacement for the ``{slurmjobid=~…}`` matcher the running-only
+    queries used. Output: one series per group (metric dict holding ONLY
+    the group labels, values sorted by ts), groups with no values dropped.
     """
-    series = deps.get_prom().query_instant(
-        "count by (slurmjobid) (slurm_job_utilization_gpu)")
-    return {s["metric"]["slurmjobid"] for s in series
-            if s["metric"].get("slurmjobid")}
+    members = {}  # group key -> {ts: [values]}
+    for s in series:
+        m = s.get("metric") or {}
+        if live is not None and m.get("slurmjobid", "") not in live:
+            continue
+        key = tuple(m.get(label, "") for label in labels)
+        for entry in s.get("values") or []:
+            try:
+                ts, v = float(entry[0]), float(entry[1])
+            except (TypeError, ValueError):
+                continue
+            members.setdefault(key, {}).setdefault(ts, []).append(v)
+    out = []
+    for key, by_ts in members.items():
+        values = []
+        for ts in sorted(by_ts):
+            vs = by_ts[ts]
+            if op == "max":
+                values.append((ts, max(vs)))
+            elif op == "sum":
+                values.append((ts, sum(vs)))
+            else:  # count
+                values.append((ts, float(len(vs))))
+        if values:
+            out.append({
+                "metric": dict(zip(labels, key)),
+                "values": values,
+            })
+    return out

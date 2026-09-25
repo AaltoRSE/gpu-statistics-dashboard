@@ -4,15 +4,21 @@
     {
       "active_jobs": [
         {
-          "job": "gpu-h100",
+          "job": "gpu-h200",
           "jobid": "1",
           "user": "alice",
           "util": 77.0
+        },
+        {
+          "job": "gpu-h200",
+          "jobid": "2",
+          "user": "bob",
+          "util": 10.0
         }
       ],
       "cpus": 64,
       "cpus_alloc": 16,
-      "current_util": 55.5,
+      "current_util": 77.0,
       "current_vram": 41.2,
       "free_mem": 1000,
       "gpu_group": "h200",
@@ -45,17 +51,10 @@
       "state_full": "IDLE"
     },
     {
-      "active_jobs": [
-        {
-          "job": "gpu-h200",
-          "jobid": "3",
-          "user": "carol",
-          "util": 90.0
-        }
-      ],
+      "active_jobs": [],
       "cpus": 64,
       "cpus_alloc": 32,
-      "current_util": 10.0,
+      "current_util": null,
       "current_vram": 8.0,
       "free_mem": 900,
       "gpu_group": "h100",
@@ -72,10 +71,10 @@
     {
       "active_jobs": [
         {
-          "job": "gpu-h200",
+          "job": "gpu-h200-mig",
           "jobid": "4",
           "user": "dave",
-          "util": 85.0
+          "util": 60.0
         }
       ],
       "cpus": 128,

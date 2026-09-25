@@ -2,9 +2,13 @@
 
 from fastapi import APIRouter, Query
 
+import cache
+import deps
+import gpu_groups
+import sources
 from api.schemas import UsersResponse
-from domain.common import running_gpu_job_ids, window
-from domain.jobs import fetch_job_window
+from domain.common import window
+from domain.views import job_views
 
 router = APIRouter()
 
@@ -13,18 +17,30 @@ router = APIRouter()
 def api_users(since_hours: float = Query(24, gt=0, le=720)):
     """Per-user GPU-activity aggregation over the window.
 
-    Built from the same job window the Jobs tab uses (utilization and VRAM
-    range queries, user label preserved, TTL-cached with that tab) plus the
-    running-only instant liveness check — no sacct, so the list stays cheap.
+    Built from the same shared window sources the Jobs tab uses (plan
+    §1/§2): the per-GPU utilization and VRAM % range queries, the
+    scontrol node snapshot, and the running-only live snapshot all gather
+    in parallel, then the memoized window view supplies the job rows —
+    no sacct, so the list stays cheap.
     ``util_gpu_hours`` is the utilization-weighted GPU-hours
     (mean util x series hours), i.e. the same definition the Jobs tab's
     effective GPU-hours use before the allocation factor. Users are
     ordered by it (descending), ties broken by name.
     """
-    jobs, start, now, _ = fetch_job_window(since_hours)
-    live = running_gpu_job_ids()
+    pinned = sources.pinned_window(since_hours)
+    util, vram, live_snap, nodes = sources.gather(
+        lambda: sources.gpu_util(pinned),
+        lambda: sources.vram_pct(pinned),
+        lambda: sources.live_snapshot(),
+        lambda: deps.route_cache.get_or_set(
+            cache.scontrol_nodes_key(), 30, deps.show_nodes),
+    )
+    node_types = gpu_groups.build_node_index(nodes)
+    jobs_view = job_views(pinned, util, node_types, vram)
+    live = live_snap["live_ids"]
+
     agg = {}
-    for j in jobs:
+    for j in jobs_view:
         u = j["user"]
         if not u:
             continue
@@ -64,7 +80,7 @@ def api_users(since_hours: float = Query(24, gt=0, le=720)):
     ]
     users.sort(key=lambda r: (-r["util_gpu_hours"], r["user"]))
     return {
-        "window": window(start, now),
+        "window": window(pinned[0], pinned[1]),
         "count": len(users),
         "users": users,
     }
