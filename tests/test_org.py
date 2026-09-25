@@ -252,8 +252,10 @@ USER_GROUPS_WORLD = {
 @pytest.fixture()
 def nss(monkeypatch):
     """The synthetic world's directory + member lists, with the route
-    cache fresh so group-membership caching is observable per test."""
+    and directory caches fresh so group-membership caching is observable
+    per test."""
     monkeypatch.setattr(deps, "route_cache", cache.TtlCache())
+    monkeypatch.setattr(deps, "directory_cache", cache.TtlCache(max_size=32768))
     monkeypatch.setattr(
         deps, "user_groups",
         lambda user: list(USER_GROUPS_WORLD[user])
@@ -526,6 +528,132 @@ def test_groups_cache_stores_the_raw_list(nss):
     assert calls == ["alice"]
 
 
+# ---- the batched directory phase ----------------------------------------
+
+def test_membership_index_reports_batches_and_cached_build_reports_none(nss):
+    c = conf()
+    reports = []
+    index = org.membership_index(c, progress=reports.append)
+    # the synthetic world's 24 member lists fit one batch: seeded at 0,
+    # reported at 1
+    assert [r["done"] for r in reports] == [0, 1]
+    assert all(r["phase"] == "index" and r["total"] == 1
+               and r["failed_batches"] == 0 for r in reports)
+    # a fully cached build makes the same index and reports nothing
+    again = []
+    assert org.membership_index(c, progress=again.append) == index
+    assert again == []
+
+
+def test_membership_index_batches_25_reads(nss):
+    # 4 member lists per unit code: 34 codes x 4 = 140 reads -> 6
+    # batches, seeded at 0 then reported after each finished batch
+    c = conf()
+    c["groups"]["kyrkiv1"]["unit_codes"] = ["T40106"] + [
+        "T4%03d" % i for i in range(30)]
+    reports = []
+    org.membership_index(c, progress=reports.append)
+    assert [r["done"] for r in reports] == list(range(7))
+    assert all(r["total"] == 6 and r["failed_batches"] == 0
+               for r in reports)
+
+
+def test_resolve_users_reports_batches_and_cached_rerun_reports_none(
+        nss, monkeypatch):
+    calls = []
+
+    def counting(user):
+        calls.append(user)
+        return ["osasto-t410"]
+
+    monkeypatch.setattr(deps, "user_groups", counting)
+    owners = ["u%03d" % i for i in range(60)]  # 60 misses -> 3 batches
+    reports = []
+    mapping, coverage = org.resolve_users(
+        owners, conf(), index={}, progress=reports.append)
+    assert [r["done"] for r in reports] == [0, 1, 2, 3]
+    assert all(r["phase"] == "users" and r["total"] == 3
+               and r["failed_batches"] == 0 for r in reports)
+    assert coverage == {"users": 60, "in_prof_group": 0, "dept_only": 60,
+                        "unaffiliated": 0, "unresolved": 0, "failed": 0}
+    assert sorted(calls) == owners
+    # a fully cached re-run: zero lookups, zero reports, same output
+    reports2 = []
+    mapping2, coverage2 = org.resolve_users(
+        owners, conf(), index={}, progress=reports2.append)
+    assert reports2 == []
+    assert calls == owners  # each owner was read exactly once, ever
+    assert mapping2 == mapping and coverage2 == coverage
+
+
+def test_resolve_users_failed_batches_counted_and_not_memoized(
+        nss, monkeypatch):
+    # the first batch's 25 users all fail: failed_batches counts the
+    # batch once, coverage.failed stays the per-user truth, the failed
+    # users land in no row — and the partial failure is never memoized:
+    # the re-run re-asks exactly those users
+    failing = {"u%03d" % i for i in range(25)}
+
+    def flaky(user):
+        if user in failing:
+            raise deps.DirectoryError("sssd worker timeout")
+        return ["osasto-t410"]
+
+    monkeypatch.setattr(deps, "user_groups", flaky)
+    owners = ["u%03d" % i for i in range(60)]
+    reports = []
+    mapping, coverage = org.resolve_users(
+        owners, conf(), index={}, progress=reports.append)
+    assert reports[-1] == {"phase": "users", "done": 3, "total": 3,
+                           "failed_batches": 1}
+    assert coverage["failed"] == 25
+    assert set(mapping) == set(owners[25:])
+    failing.clear()
+    reports2 = []
+    mapping2, coverage2 = org.resolve_users(
+        owners, conf(), index={}, progress=reports2.append)
+    assert reports2 == [
+        {"phase": "users", "done": 0, "total": 1, "failed_batches": 0},
+        {"phase": "users", "done": 1, "total": 1, "failed_batches": 0}]
+    assert coverage2["failed"] == 0
+    assert set(mapping2) == set(owners)
+
+
+def test_resolve_users_batches_run_in_parallel(nss, monkeypatch):
+    # A gated fake NSS proves more than one batch is in flight at once:
+    # a sequential run would time the phase-mate out and record the miss
+    # (the OverlapGate pattern from test_shared_fetch).
+    from test_shared_fetch import OverlapGate
+    gate = OverlapGate(("batch0", "batch1"))
+
+    def gated(user):
+        gate.enter("batch%d" % (int(user[1:]) // 25))
+        return ["osasto-t410"]
+
+    monkeypatch.setattr(deps, "user_groups", gated)
+    _, coverage = org.resolve_users(
+        ["u%03d" % i for i in range(50)], conf(), index={})
+    assert coverage["users"] == 50
+    assert gate.timeouts == [], \
+        "both batches must be in flight at once, not run sequentially"
+
+
+def test_resolve_users_matches_the_per_user_reference(nss):
+    # The batched classification equals classifying every user directly
+    # from the raw directory answers — max-strength merging is
+    # order-independent and classification runs in sorted order, so the
+    # output is identical to a sequential build.
+    index = org.membership_index(conf())
+    c = conf()
+    users = sorted(USER_GROUPS_WORLD)
+    mapping, coverage = org.resolve_users(users, c, index=index)
+    assert mapping == {
+        user: org.classify(user, USER_GROUPS_WORLD[user], index, c)
+        for user in users}
+    assert coverage["users"] == len(users)
+    assert coverage["failed"] == 0
+
+
 # ---- the NSS boundaries (deps.user_groups / deps.group_members) --------
 
 class _FakePwd:
@@ -585,6 +713,46 @@ def test_user_groups_oserror_raises_directory_error(monkeypatch):
 def test_user_groups_key_is_username_scoped():
     assert cache.user_groups_key("alice") == ("user_groups", "alice")
     assert cache.user_groups_key("bob") != cache.user_groups_key("alice")
+
+
+def test_group_name_is_memoized_per_gid(monkeypatch):
+    # A gid's name is directory-wide, not per user: bob's gids must be
+    # served by the memo alice's reads filled (one getgrgid per DISTINCT
+    # gid, not per user-gid pair).
+    calls = []
+    names = {10: "osasto-t410", 11: "laitos-t40106"}
+
+    def getgrgid(g):
+        calls.append(g)
+        return type("G", (), {"gr_name": names[g]})()
+
+    monkeypatch.setattr(deps.grp, "getgrgid", getgrgid)
+    _patch_nss(monkeypatch, {"alice": [10, 11], "bob": [11, 10]})
+    assert deps.user_groups("alice") == ["laitos-t40106", "osasto-t410"]
+    assert deps.user_groups("bob") == ["laitos-t40106", "osasto-t410"]
+    assert sorted(calls) == [10, 11]
+
+
+def test_group_name_nameless_gid_reads_as_the_number(monkeypatch):
+    # a gid the directory does not name reads as str(gid) — what the
+    # groups command prints — instead of the KeyError-as-500 this used
+    # to be when the getgrgid sat outside user_groups' try
+    def missing(g):
+        raise KeyError("getgrgid(): name not found: %r" % g)
+
+    monkeypatch.setattr(deps.grp, "getgrgid", missing)
+    _patch_nss(monkeypatch, {"alice": [10]})
+    assert deps.user_groups("alice") == ["10"]
+
+
+def test_group_name_oserror_raises_directory_error(monkeypatch):
+    def boom(g):
+        raise OSError("NSS status 3, sssd down")
+
+    monkeypatch.setattr(deps.grp, "getgrgid", boom)
+    _patch_nss(monkeypatch, {"alice": [10]})
+    with pytest.raises(deps.DirectoryError, match="sssd down"):
+        deps.user_groups("alice")
 
 
 def test_group_members_returns_sorted_unique_names(monkeypatch):

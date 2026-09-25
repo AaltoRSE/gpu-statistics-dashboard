@@ -21,20 +21,73 @@ import gpu_groups
 import sources
 from api.schemas import GroupMembersResponse, GroupsResponse
 from domain.common import window
-from domain.org import load_prof_groups, resolve_users, rollup_groups
+from domain.org import (
+    _index_cached,
+    load_prof_groups,
+    resolve_users,
+    rollup_groups,
+)
 from domain.users import aggregate_users
 from domain.views import job_views
 
 router = APIRouter()
 
 
+def _classified(since_hours, running_only, usernames, conf):
+    """The classification half of the pipeline, single-flighted and
+    published (plan §directory).
+
+    A window, level or running change fires /api/groups and the open
+    drill-down /api/groups/{id}/users together, and both run
+    resolve_users. Without single-flight, two publishers would write the
+    same progress key and the first to finish would pop it while the
+    other is still running — doubling the NSS work. So the whole
+    classification (index build + per-user lookups) runs once under one
+    directory-cache key, and only the get_or_set leader publishes
+    progress: a follower that joins the Future never touches the key.
+    The result is memoized 60 s, so a level change within the TTL is an
+    instant hit (level is response-shape only). A partial failure (any
+    coverage.failed) is never memoized — the next request retries it —
+    while a total outage raises DirectoryError out of get_or_set, which
+    caches nothing.
+    """
+    pkey = cache.groups_progress_key(since_hours, running_only)
+
+    def run():
+        last = {}
+
+        def publish(state):
+            last["state"] = state
+            cache.progress_store[pkey] = state
+
+        try:
+            index = _index_cached(conf, progress=publish)
+            return resolve_users(usernames, conf, index=index,
+                                 progress=publish)
+        finally:
+            # Pop only our own entry — never a concurrent leader's: the
+            # identity check keeps a follower's finally (or a late
+            # publish) from erasing another run's live state.
+            if cache.progress_store.get(pkey) is last.get("state"):
+                cache.progress_store.pop(pkey, None)
+
+    if conf.get("_source") is None:  # hand-built confs (tests): uncached
+        return run()
+    key = cache.groups_classification_key(*conf["_source"], usernames)
+    mapping, coverage = deps.directory_cache.get_or_set(key, 60, run)
+    if coverage["failed"]:
+        deps.directory_cache.invalidate(key)  # errors are never cached
+    return mapping, coverage
+
+
 def _grouped(since_hours, running_only, level):
     """The shared pipeline both group routes run (plan commit 6).
 
     a. pinned window, b. the shared window sources in parallel, c. the
-    memoized job view, d. the per-user aggregation, e. classification,
-    f. the roll-up. Returns ``(pinned, conf, rows, mapping, coverage)``
-    — rows ordered, the Unaffiliated row always present.
+    memoized job view, d. the per-user aggregation, e. the single-
+    flighted classification, f. the roll-up. Returns ``(pinned, conf,
+    rows, mapping, coverage)`` — rows ordered, the Unaffiliated row
+    always present.
     """
     pinned = sources.pinned_window(since_hours)
     util, vram, live_snap, nodes = sources.gather(
@@ -53,7 +106,8 @@ def _grouped(since_hours, running_only, level):
         jobs_view = [j for j in jobs_view if j["jobid"] in live]
     user_rows = aggregate_users(jobs_view, live)
     conf = load_prof_groups()
-    mapping, coverage = resolve_users((r["user"] for r in user_rows), conf)
+    mapping, coverage = _classified(
+        since_hours, running_only, [r["user"] for r in user_rows], conf)
     rows = rollup_groups(user_rows, mapping, jobs_view, pinned[2],
                          level=level, conf=conf)
     return pinned, conf, rows, mapping, coverage
@@ -90,6 +144,28 @@ def api_groups(
         "count": len(rows),
         "groups": rows,
     }
+
+
+@router.get("/api/groups/progress")
+def api_groups_progress(
+    since_hours: float = Query(24, gt=0, le=720),
+    running_only: bool = Query(False),
+    level: str = "group",  # accepted, ignored: the poll reuses the data
+                           # request's query string
+):
+    """Batched directory progress for the Groups classification (the
+    same poll shape the Partitions tabs use).
+
+    While a classification's directory phase runs, its leader publishes
+    ``{"phase": "index" | "users", "done", "total", "failed_batches"}``
+    under the (since_hours, running_only) key and this route returns the
+    latest state; between phases and after the phase finishes the key is
+    popped and this returns JSON null, which hands the chip back to its
+    base label. Declared before the ``{group_id}`` route so "progress"
+    is never read as a group id.
+    """
+    return cache.progress_store.get(
+        cache.groups_progress_key(since_hours, running_only))
 
 
 @router.get("/api/groups/{group_id}/users", response_model=GroupMembersResponse)

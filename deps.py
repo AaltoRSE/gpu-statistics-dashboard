@@ -22,6 +22,7 @@ import time as _time
 
 from fastapi import HTTPException
 
+import cache
 from cache import TtlCache
 from config import ConfigError, load_config
 from prom import PromClient
@@ -36,6 +37,21 @@ from slurm import (  # noqa: F401 (re-exported)
 
 route_cache = TtlCache()
 
+# The directory (NSS) caches' home, apart from route_cache: one
+# classification pass holds thousands of entries (about 1k users, 956
+# configured member lists and about 1.6k distinct gids measured over 350
+# owners), and route_cache evicts by clearing its WHOLE store once it
+# passes max_size — a Groups load used to wipe it three times over,
+# taking every other tab's pinned windows, window series and sacct dump
+# with it. Directory entries get their own, far larger cache so they can
+# never trigger that clear-all.
+directory_cache = TtlCache(max_size=32768)
+
+# How long one gid->name answer is trusted. The same "membership moves
+# at reorg speed" policy the directory caches in domain/org.py apply
+# (24 h); stated here because deps cannot import org (org imports deps).
+GID_NAME_TTL = 24 * 3600
+
 _prom = None
 
 
@@ -49,17 +65,43 @@ class DirectoryError(Exception):
     """
 
 
+def group_name(gid):
+    """The NSS group name for one gid, or ``str(gid)`` for a gid the
+    directory does not name (what ``groups`` prints for it).
+
+    Memoized in deps.directory_cache (24 h) because a gid's name is
+    directory-wide, not per user: one getgrgid read serves every user
+    who carries the gid, and a classification pass meets each shared
+    gid (the primary gid, most of all) once per user otherwise.
+    Raises DirectoryError when NSS raises OSError.
+    """
+    key = cache.gid_name_key(gid)
+    hit, name = directory_cache.peek(key)
+    if hit:
+        return name
+    try:
+        name = grp.getgrgid(gid).gr_name
+    except KeyError:
+        name = str(gid)
+    except OSError as exc:
+        raise DirectoryError(
+            "could not resolve gid %r: %s" % (gid, exc)) from exc
+    directory_cache.set(key, GID_NAME_TTL, name)
+    return name
+
+
 def user_groups(username):
     """``groups <user>``: the user's NSS group names, or None for a user
     the directory does not know.
 
     Reads the same NSS/sssd sources the ``groups`` command does:
     ``pwd.getpwnam`` for the account and primary gid, ``os.getgrouplist``
-    for every supplementary gid, and ``grp.getgrgid(g).gr_name`` for the
-    group names. Returns None for an unknown user (distinct from a
+    for every supplementary gid, and ``group_name`` (memoized per gid)
+    for the names. Returns None for an unknown user (distinct from a
     directory failure) and raises DirectoryError when NSS raises
-    OSError. No caching here — callers cache the derived classification,
-    whose TTL is theirs to choose.
+    OSError. The gid->name map is the only thing cached here; the raw
+    per-user list is still uncached — callers cache the derived
+    classification, whose TTL is theirs to choose.
     """
     try:
         pw = pwd.getpwnam(username)
@@ -69,7 +111,7 @@ def user_groups(username):
     except OSError as exc:
         raise DirectoryError(
             "could not list groups for %r: %s" % (username, exc)) from exc
-    return sorted({grp.getgrgid(g).gr_name for g in gids})
+    return sorted({group_name(g) for g in gids})
 
 
 def group_members(group_name):

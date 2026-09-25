@@ -309,6 +309,10 @@ def fake_prom(monkeypatch):
     fake = FakeProm()
     monkeypatch.setattr(deps, "get_prom", lambda: fake)
     monkeypatch.setattr(deps, "route_cache", cache.TtlCache())
+    # The directory (NSS) caches get their own fresh store, the same way:
+    # a test must not inherit another test's member lists, gid->name
+    # memo, index or classification.
+    monkeypatch.setattr(deps, "directory_cache", cache.TtlCache(max_size=32768))
     # The shared window-wide sacct dump (plan §3): every chunk of the
     # window returns the completed history; the row dicts carry the raw
     # ID spelling the dump's index keys on. Each chunk is dated inside
@@ -1950,6 +1954,7 @@ def test_step_for_range_long_windows():
     "/api/jobs/1",
     "/api/users",
     "/api/groups",
+    "/api/groups/progress",
     "/api/groups/kyrkiv1/users",
     "/api/partitions",
     "/api/partitions/queue",

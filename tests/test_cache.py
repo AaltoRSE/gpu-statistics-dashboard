@@ -311,6 +311,27 @@ def test_new_key_builders_and_progress_store():
     assert cache.sacct_window_key(24) == ("sacct_window", 24)
     assert cache.day_chunk_key("2026-09-23T00:00:00") == \
         ("sacct_day_chunk", "2026-09-23T00:00:00")
+    # The Groups classification's progress key keeps the fetch-affecting
+    # parameters (window + running_only, which selects the owners) and
+    # drops level (an in-process roll-up, the same collapse as
+    # vram_progress_key's partition/running_only).
+    assert cache.groups_progress_key(24, False) == \
+        ("groups_progress", 24, False)
+    assert cache.groups_progress_key(24, False) != \
+        cache.groups_progress_key(72, False)
+    assert cache.groups_progress_key(24, False) != \
+        cache.groups_progress_key(24, True)
+    # The directory-phase identities: stable, and distinct per input.
+    assert cache.gid_name_key(1010) == ("gid_name", 1010)
+    assert cache.gid_name_key(1010) != cache.gid_name_key(1011)
+    assert cache.prof_groups_index_key("/p/c.conf", 7.0) == \
+        ("prof_groups_index", "/p/c.conf", 7.0)
+    assert cache.prof_groups_index_key("/p/c.conf", 7.0) != \
+        cache.prof_groups_index_key("/p/c.conf", 8.0)
+    assert cache.groups_classification_key("/p/c.conf", 7.0, ["b", "a"]) == \
+        ("groups_classified", "/p/c.conf", 7.0, ("a", "b"))
+    assert cache.groups_classification_key("/p/c.conf", 7.0, ["a"]) != \
+        cache.groups_classification_key("/p/c.conf", 7.0, ["a", "b"])
     # The one store: domain.partitions's alias is the same dict object.
     import domain.partitions
     assert domain.partitions.progress_store is cache.progress_store

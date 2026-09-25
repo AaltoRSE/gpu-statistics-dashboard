@@ -7,19 +7,23 @@ Run: .venv/bin/python -m pytest tests/test_groups.py -q
 
 import os
 import sys
+import threading
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import pytest  # noqa: E402
 from test_app import GROUP_MEMBERS, USER_GROUPS  # noqa: E402
 
+import cache  # noqa: E402
 import deps  # noqa: E402
 
 
 @pytest.fixture()
 def nss(monkeypatch):
     """Mutable in-memory directories over deps.user_groups and
-    deps.group_members."""
+    deps.group_members, with the directory caches fresh so per-test
+    call counts are observable."""
+    monkeypatch.setattr(deps, "directory_cache", cache.TtlCache(max_size=32768))
     accounts = {user: list(groups) for user, groups in USER_GROUPS.items()}
     members = {name: list(m) for name, m in GROUP_MEMBERS.items()}
     calls, member_calls = [], []
@@ -352,3 +356,192 @@ def test_users_then_groups_add_no_prometheus_query(client, nss, fake_prom):
     # the groups pipeline reads the same shared window sources: no new
     # range or instant query, only per-user NSS classification
     assert fake_prom.calls == before
+
+
+# ---- the directory caches and the progress poll -------------------------
+
+def _unit_job(i):
+    """One synthetic window series for owner u%04d (the shape fake_prom's
+    extra_jobs carry)."""
+    return {"metric": {"slurmjobid": str(100 + i), "instance": "gpu1",
+                       "job": "gpu-h100", "user": "u%04d" % i,
+                       "gpu_type": "h100"},
+            "values": [[1000, "50"]]}
+
+
+def test_groups_above_route_cache_size_stay_warm_and_keep_other_tabs(
+        client, nss, fake_prom, tmp_path):
+    # A real Groups load holds THOUSANDS of directory entries (956
+    # configured member lists, ~1k owners): held in the route cache,
+    # every write past 256 cleared the WHOLE store — wiping the
+    # just-built index and every other tab's pinned windows, window
+    # series and sacct dump with it. In the dedicated directory cache:
+    # a second load makes zero NSS calls, and a planted route-cache
+    # entry (another tab's shared sacct dump) survives the whole load.
+    conf = tmp_path / "prof_groups.conf"
+    conf.write_text(
+        "[units]\n" + "\n".join(
+            "T4%04d = Unit %d | T400" % (i, i) for i in range(300)) + "\n",
+        encoding="utf-8")
+    for i in range(300):
+        nss["members"]["laitos-t4%04d" % i] = ["u%04d" % i]
+        nss["accounts"]["u%04d" % i] = ["laitos-t4%04d" % i]
+    fake_prom.extra_jobs = [_unit_job(i) for i in range(300)]
+    deps.route_cache.set(cache.sacct_window_key(24), 300, "keep")
+
+    r1 = client.get("/api/groups", params={"since_hours": 24})
+    assert r1.status_code == 200
+    assert r1.json()["count"] >= 300
+    nss_calls = len(nss["calls"]) + len(nss["member_calls"])
+    # every owner (300 synthetic + the 4 canned ones) + every member list
+    assert nss_calls == (300 + 4) + 300 * 4
+
+    r2 = client.get("/api/groups", params={"since_hours": 24})
+    assert r2.status_code == 200
+    assert len(nss["calls"]) + len(nss["member_calls"]) == nss_calls, \
+        "a second load must make zero NSS calls"
+    # the planted entry survived: no clear-all eviction ever fired
+    assert deps.route_cache.peek(cache.sacct_window_key(24)) == \
+        (True, "keep")
+
+
+def test_groups_progress_route_resolves_the_groups_key(client, nss):
+    # Declared before the {group_id} route, so "progress" polls the
+    # progress store instead of reading as a group id (which would 404).
+    pkey = cache.groups_progress_key(24, False)
+    assert client.get("/api/groups/progress",
+                      params={"since_hours": 24}).json() is None
+    cache.progress_store[pkey] = {
+        "phase": "users", "done": 2, "total": 5, "failed_batches": 1}
+    try:
+        assert client.get("/api/groups/progress",
+                          params={"since_hours": 24}).json() == {
+            "phase": "users", "done": 2, "total": 5, "failed_batches": 1}
+        # keyed per (window, running_only): other scopes read null
+        assert client.get("/api/groups/progress",
+                          params={"since_hours": 72}).json() is None
+        assert client.get("/api/groups/progress", params={
+            "since_hours": 24, "running_only": "true"}).json() is None
+        # level rides along in the reused query string and is ignored
+        assert client.get("/api/groups/progress", params={
+            "since_hours": 24, "level": "department"}).json() == {
+            "phase": "users", "done": 2, "total": 5, "failed_batches": 1}
+    finally:
+        cache.progress_store.clear()
+
+
+def test_groups_progress_published_during_load_and_cleared_after(
+        client, nss, monkeypatch):
+    # A cold load publishes the directory phases' batch states under the
+    # (window, running_only) key while it runs, and the key is popped
+    # when the request finishes — a poll after completion reads null.
+    started = threading.Event()
+    release = threading.Event()
+
+    def slow_user_groups(username):
+        started.set()
+        release.wait(timeout=10)
+        return USER_GROUPS.get(username)
+
+    monkeypatch.setattr(deps, "user_groups", slow_user_groups)
+    result = {}
+
+    def load():
+        result["r"] = client.get("/api/groups", params={"since_hours": 24})
+
+    loader = threading.Thread(target=load)
+    loader.start()
+    try:
+        assert started.wait(timeout=10)
+        # the user phase is in flight: the index's 12 member lists went
+        # first, then the owners' one batch, seeded at done=0
+        state = cache.progress_store[cache.groups_progress_key(24, False)]
+        assert state == {"phase": "users", "done": 0, "total": 1,
+                         "failed_batches": 0}
+    finally:
+        release.set()
+        loader.join(timeout=10)
+    assert result["r"].status_code == 200
+    assert cache.progress_store == {}
+
+
+def test_groups_and_drilldown_run_one_classification(
+        client, nss, monkeypatch):
+    # A window/level change fires /api/groups and the open drill-down
+    # together; both classify the same owners under the same key, so the
+    # second must join the first's Future — one look-up per owner, one
+    # publisher — never doubling the NSS work or racing the progress key.
+    started = threading.Event()
+    release = threading.Event()
+    calls = []
+    call_lock = threading.Lock()
+
+    def slow_user_groups(username):
+        with call_lock:
+            calls.append(username)
+        started.set()
+        release.wait(timeout=10)
+        return USER_GROUPS.get(username)
+
+    monkeypatch.setattr(deps, "user_groups", slow_user_groups)
+    results = {}
+
+    def run(name, path):
+        results[name] = client.get(path, params={"since_hours": 24})
+
+    leader = threading.Thread(target=run, args=("leader", "/api/groups"))
+    follower = threading.Thread(
+        target=run, args=("follower", "/api/groups/kyrkiv1/users"))
+    leader.start()
+    try:
+        assert started.wait(timeout=10)
+        follower.start()
+        follower.join(timeout=2)
+        assert follower.is_alive(), \
+            "the drill-down must join the list's in-flight classification"
+        # the leader's live state was neither rewound nor erased by the
+        # follower's arrival
+        state = cache.progress_store[cache.groups_progress_key(24, False)]
+        assert state["phase"] == "users" and state["done"] == 0
+    finally:
+        release.set()
+        leader.join(timeout=10)
+    follower.join(timeout=10)
+    assert results["leader"].status_code == 200
+    assert results["follower"].status_code == 200
+    # one look-up per owner — the follower ran none of its own
+    assert sorted(calls) == sorted(set(calls))
+    assert cache.progress_store == {}
+
+
+def test_groups_progress_cleared_after_a_total_outage(client, nss,
+                                                      monkeypatch):
+    def boom(username):
+        raise deps.DirectoryError("sssd down")
+
+    monkeypatch.setattr(deps, "user_groups", boom)
+    r = client.get("/api/groups", params={"since_hours": 24})
+    assert r.status_code == 502
+    # the finally popped the key: no in-flight-looking state survives a
+    # failed fetch
+    assert cache.progress_store == {}
+
+
+def test_groups_partial_failure_is_not_memoized(client, nss, monkeypatch):
+    flaky_users = {"alice"}
+
+    def flaky(username):
+        if username in flaky_users:
+            raise deps.DirectoryError("sssd worker timeout")
+        return USER_GROUPS.get(username)
+
+    monkeypatch.setattr(deps, "user_groups", flaky)
+    r = client.get("/api/groups", params={"since_hours": 24})
+    assert r.status_code == 200
+    assert r.json()["coverage"]["failed"] == 1
+    # the directory heals: the next request must re-ask, not read the
+    # 60 s classification memo
+    flaky_users.clear()
+    r = client.get("/api/groups", params={"since_hours": 24})
+    assert r.status_code == 200
+    assert r.json()["coverage"]["failed"] == 0

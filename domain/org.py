@@ -35,6 +35,7 @@ import configparser
 import os
 import re
 import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import cache
 import deps
@@ -240,6 +241,14 @@ def school_for_dept(dept_code, conf):
 CLASSIFIED_TTL = 24 * 3600
 UNKNOWN_TTL = 3600
 
+# The directory phase's batch shape (the same pattern sources.sacct_window
+# uses for its day chunks): each batch is one pool task, reported the
+# moment it finishes. 25 reads per batch on 4 workers — measured on 130
+# real owners: sequential 3.0 s, 4 threads 1.6 s, 8 threads 1.8 s, so
+# there is no gain past 4.
+DIRECTORY_BATCH = 25
+DIRECTORY_WORKERS = 4
+
 _UNRESOLVED = {
     "group": None, "membership": None, "dept_code": None,
     "school_code": None, "own_dept": None, "extra_groups": [],
@@ -258,18 +267,28 @@ def _group_members_cached(group_name):
     TTL instead of repeated per user. The TTL lives with the value (24 h
     for a group the directory knows, 1 h for one it does not — a group
     may be created after the conf names it), so entries are stored via
-    TtlCache.set, not get_or_set."""
+    TtlCache.set, not get_or_set. Lives in deps.directory_cache: the
+    entries number in the thousands and must never trigger the route
+    cache's clear-all eviction."""
     key = cache.group_members_key(group_name)
-    hit, members = deps.route_cache.peek(key)
+    hit, members = deps.directory_cache.peek(key)
     if hit:
         return members
     members = deps.group_members(group_name)
-    deps.route_cache.set(
+    deps.directory_cache.set(
         key, CLASSIFIED_TTL if members is not None else UNKNOWN_TTL, members)
     return members
 
 
-def membership_index(conf):
+def _read_members(names):
+    """One directory batch: the member lists for ``names`` (each fetch
+    stored in deps.directory_cache by _group_members_cached). Returns
+    ``{nss name: members-or-None}`` — an unknown group is an answer
+    (None), never a failure."""
+    return {name: _group_members_cached(name) for name in names}
+
+
+def membership_index(conf, progress=None):
     """``{username: {group key: best strength}}`` — who belongs to which
     configured group, and how strongly. The key is a professor group's
     leader username, or ``unit:<CODE>`` for a shared unit.
@@ -283,6 +302,19 @@ def membership_index(conf):
     list (Bäckström is in Alku's tNNNXX-staff, not their own unit's)
     still leads; shared units have no leader to seed. A user in several
     lists of one group keeps only that group's strongest strength.
+
+    The reads are the Groups tab's countable, batchable work (plan §3):
+    already-cached lists are peeked out of deps.directory_cache and the
+    misses run as DIRECTORY_BATCH-sized batches on DIRECTORY_WORKERS
+    threads, reporting ``{"phase": "index", "done", "total",
+    "failed_batches"}`` through ``progress`` (a slurm.sacct_jobs_resilient-
+    style callback — the domain layer never touches progress_store) at 0
+    and after each finished batch. Nothing to fetch means nothing is
+    reported. Merging happens on the calling thread and max-strength
+    merging is order-independent, so the index is identical to a
+    sequential build. A DirectoryError propagates after the pool shuts
+    down, the same as a sequential read's: a total index failure is a
+    502.
     """
     index = {}
 
@@ -291,39 +323,87 @@ def membership_index(conf):
         if strength > known.get(key, 0):
             known[key] = strength
 
-    def read_unit(code, key):
+    # Flatten the reads: every (unit code x member-list kind) the conf
+    # asks for, deduped by NSS name (two professors may share a unit),
+    # each name carrying every (group key, strength) its members merge
+    # into.
+    reads = {}  # nss name -> [(group key, strength), ...]
+
+    def want(code, key):
         code = code.lower()
         for name, kind in (("laitos-" + code, "paid"),
                            (code + "-staff", "staff"),
                            (code + "-everyone", "everyone"),
                            ("auto-ext-" + code, "external")):
-            members = _group_members_cached(name)
-            if members:
-                for user in members:
-                    add(user, key, STRENGTH[kind])
+            reads.setdefault(name, []).append((key, STRENGTH[kind]))
 
     for leader, spec in conf["groups"].items():
         add(leader, leader, STRENGTH["leader"])
         for code in spec["unit_codes"]:
-            read_unit(code, leader)
+            want(code, leader)
     for code in conf.get("units") or {}:
-        read_unit(code, GROUP_UNIT_PREFIX + code)
+        want(code, GROUP_UNIT_PREFIX + code)
+
+    cached, missing = {}, []
+    for name in reads:
+        hit, members = deps.directory_cache.peek(
+            cache.group_members_key(name))
+        if hit:
+            cached[name] = members
+        else:
+            missing.append(name)
+
+    total = (len(missing) + DIRECTORY_BATCH - 1) // DIRECTORY_BATCH
+
+    def report(done, failed):
+        if progress is not None:
+            progress({"phase": "index", "done": done, "total": total,
+                      "failed_batches": failed})
+
+    fetched = {}
+    if total:
+        report(0, 0)
+        with ThreadPoolExecutor(
+                max_workers=min(DIRECTORY_WORKERS, total)) as pool:
+            futures = {
+                pool.submit(_read_members,
+                            missing[i:i + DIRECTORY_BATCH]):
+                i // DIRECTORY_BATCH
+                for i in range(0, len(missing), DIRECTORY_BATCH)}
+            done = 0
+            for future in as_completed(futures):
+                fetched.update(future.result())  # DirectoryError raises
+                done += 1
+                report(done, 0)
+
+    for name, members in cached.items():
+        if members:
+            for key, strength in reads[name]:
+                for user in members:
+                    add(user, key, strength)
+    for name, members in fetched.items():
+        if members:
+            for key, strength in reads[name]:
+                for user in members:
+                    add(user, key, strength)
     return index
 
 
-def _index_cached(conf):
+def _index_cached(conf, progress=None):
     """The membership index, cached per conf file version: one build is
     one NSS read per (group x member list), so a day's worth of
     classifications shares it, and a conf edit (new mtime) addresses a
     different key — a hand-fix shows on the next request. A conf without
-    a ``_source`` (hand-built in tests) is built uncached."""
+    a ``_source`` (hand-built in tests) is built uncached. Only the
+    cache-miss leader builds, so only the leader reports progress; a
+    follower joining the Future reuses the result silently."""
     source = conf.get("_source")
     if source is None:
-        return membership_index(conf)
+        return membership_index(conf, progress=progress)
     path, mtime = source
-    return deps.route_cache.get_or_set(
-        ("prof_groups_index", path, mtime), CLASSIFIED_TTL,
-        lambda: membership_index(conf))
+    return deps.directory_cache.get_or_set(
+        cache.prof_groups_index_key(path, mtime), CLASSIFIED_TTL,
+        lambda: membership_index(conf, progress=progress))
 
 
 # ---- classification ----------------------------------------------------
@@ -402,7 +482,9 @@ def classify(username, groups, index, conf):
 
 def _groups_cached(username):
     """One user's RAW NSS group list, cached per user (24 h / 1 h for a
-    user the directory does not know).
+    user the directory does not know), in deps.directory_cache — the
+    per-user entries alone run into the thousands and must never trigger
+    the route cache's clear-all eviction.
 
     The raw groups are cached, not the classification built from them:
     the classification also depends on prof_groups.conf and the
@@ -413,16 +495,23 @@ def _groups_cached(username):
     cannot re-hit NSS every request.
     """
     key = cache.user_groups_key(username)
-    hit, groups = deps.route_cache.peek(key)
+    hit, groups = deps.directory_cache.peek(key)
     if hit:
         return groups
     groups = deps.user_groups(username)
-    deps.route_cache.set(
+    deps.directory_cache.set(
         key, CLASSIFIED_TTL if groups is not None else UNKNOWN_TTL, groups)
     return groups
 
 
-def resolve_users(usernames, conf=None, index=None):
+# A batch worker's per-user lookup failure: resolve_users discards it
+# (the user stays out of the mapping and counts in coverage.failed) and
+# it never reaches the classification cache — a partial directory
+# failure must not memoize as an answer.
+_FAILED = object()
+
+
+def resolve_users(usernames, conf=None, index=None, progress=None):
     """Classify many users, with per-user coverage.
 
     Returns ``(mapping, coverage)``: mapping is ``{user: classify()}``
@@ -433,18 +522,75 @@ def resolve_users(usernames, conf=None, index=None):
     Unaffiliated). Raises DirectoryError only when EVERY lookup failed —
     a total directory outage is a 502, a partial one a served response
     with a coverage banner.
+
+    The lookups are the other half of the countable directory work (plan
+    §3): cached raw lists are peeked out of deps.directory_cache, the
+    misses run in DIRECTORY_BATCH-sized batches on DIRECTORY_WORKERS
+    threads reporting ``{"phase": "users", "done", "total",
+    "failed_batches"}`` through ``progress`` (a batch with at least one
+    failed lookup counts once in failed_batches; coverage.failed stays
+    the authoritative per-user count). Classification and the coverage
+    counters then run on the calling thread in sorted(usernames) order,
+    so the output is deterministic and identical to a sequential build.
     """
     if conf is None:
         conf = load_prof_groups()
     if index is None:
-        index = _index_cached(conf)
+        index = _index_cached(conf, progress=progress)
+    usernames = sorted(usernames)
+    cached, missing = {}, []
+    for username in usernames:
+        hit, groups = deps.directory_cache.peek(
+            cache.user_groups_key(username))
+        if hit:
+            cached[username] = groups
+        else:
+            missing.append(username)
+
+    def read_batch(names):
+        out = []
+        for username in names:
+            try:
+                out.append((username, _groups_cached(username)))
+            except deps.DirectoryError:
+                out.append((username, _FAILED))
+        return out
+
+    total = (len(missing) + DIRECTORY_BATCH - 1) // DIRECTORY_BATCH
+
+    def report(done, failed):
+        if progress is not None:
+            progress({"phase": "users", "done": done, "total": total,
+                      "failed_batches": failed})
+
+    results = dict(cached)
+    if total:
+        report(0, 0)
+        failed_batches = 0
+        with ThreadPoolExecutor(
+                max_workers=min(DIRECTORY_WORKERS, total)) as pool:
+            futures = [
+                pool.submit(read_batch, missing[i:i + DIRECTORY_BATCH])
+                for i in range(0, len(missing), DIRECTORY_BATCH)]
+            done = 0
+            for future in as_completed(futures):
+                batch_failed = False
+                for username, groups in future.result():
+                    if groups is _FAILED:
+                        batch_failed = True
+                    else:
+                        results[username] = groups
+                if batch_failed:
+                    failed_batches += 1
+                done += 1
+                report(done, failed_batches)
+
     mapping, failed = {}, 0
     users = ingroup = deptonly = unaffili = unresolv = 0
-    for username in sorted(usernames):
+    for username in usernames:
         users += 1
-        try:
-            groups = _groups_cached(username)
-        except deps.DirectoryError:
+        groups = results.get(username, _FAILED)
+        if groups is _FAILED:
             failed += 1
             continue
         result = classify(username, groups, index, conf)

@@ -244,6 +244,21 @@ def vram_progress_key(since_hours):
     return ("vram_progress", since_hours)
 
 
+def groups_progress_key(since_hours, running_only):
+    """The Groups classification's stable progress-store key, read by the
+    /api/groups/progress poll and written by whichever route is running
+    the classification (/api/groups and the /api/groups/{id}/users
+    drill-down publish under the same key — both run the same NSS
+    pipeline, and both chips showing the same numbers is the point, the
+    same collapse as vram_progress_key).
+
+    ``level`` is excluded: it is an in-process roll-up and changes no
+    fetch. ``running_only`` is kept: it selects which job owners are
+    classified, so it changes the work the batches do.
+    """
+    return ("groups_progress", since_hours, running_only)
+
+
 def node_detail_key(name, view, start):
     return ("nodedetail", name, view, start)
 
@@ -275,6 +290,32 @@ def snapshot_key():
     instant queries, so running-only views and the Nodes view read the
     same instant (plan §1)."""
     return ("snapshot",)
+
+
+def gid_name_key(gid):
+    """One gid's NSS group name (deps.group_name), memoized across every
+    user who carries the gid — a gid's name is directory-wide, not per
+    user, so one grp.getgrgid read serves all of them. The TTL lives
+    with the value (24 h for a named gid, 1 h for one the directory does
+    not name), so entries are stored via TtlCache.set, not get_or_set."""
+    return ("gid_name", gid)
+
+
+def prof_groups_index_key(path, mtime):
+    """The membership index's identity: one build is one NSS read per
+    (group x member list), shared by every classification within the
+    TTL. Keyed by the conf's (path, mtime) — a conf edit (new mtime)
+    addresses a different key, so a hand-fix shows on the next request."""
+    return ("prof_groups_index", path, mtime)
+
+
+def groups_classification_key(path, mtime, usernames):
+    """One /api/groups classification pass (the resolve_users mapping and
+    coverage): keyed per conf version and per sorted owner set, since a
+    classification depends on both. A level change is excluded — it is an
+    in-process roll-up of the same classification, so switching levels
+    within the TTL is an instant hit."""
+    return ("groups_classified", path, mtime, tuple(sorted(usernames)))
 
 
 def group_members_key(group_name):
@@ -344,18 +385,19 @@ def day_chunk_key(day_start_iso):
 
 
 progress_store = {}
-"""Latest batched accounting progress, keyed per fetch scope.
+"""Latest batched-fetch progress, keyed per fetch scope.
 
-Two publishers write here and their poll routes read it: the queue's
+Three publishers write here and their poll routes read it: the queue's
 long-window wait-history fetch (the shared sacct window dump, keyed by
-``cache.sacct_window_key``) and the VRAM distribution's sacct
-enrichment (keyed by ``cache.vram_progress_key``). Each publisher
-seeds its entry at fetch start ({"done", "total", "failed_batches"}),
-replaces it after every finished batch, and pops it in a ``finally`` —
-so a poll never observes a finished or failed fetch's stale state, and
-a fetch that crashed leaves no in-flight-looking entry behind. Only the
-cache-miss leader that actually runs the fetch touches its key;
-followers that join via the route-cache Future never do.
+``cache.vram_progress_key``, which the VRAM enrichment shares) and the
+Groups tab's directory phase (the membership-index and per-user
+classification batches, keyed by ``cache.groups_progress_key``). Each
+publisher seeds its entry at fetch start ({"done", "total",
+"failed_batches"}), replaces it after every finished batch, and pops it
+in a ``finally`` — so a poll never observes a finished or failed fetch's
+stale state, and a fetch that crashed leaves no in-flight-looking entry
+behind. Only the cache-miss leader that actually runs the fetch touches
+its key; followers that join via the route-cache Future never do.
 """
 
 

@@ -1,6 +1,8 @@
 import pytest
 from test_app import client, fake_prom  # noqa: F401
 
+import cache
+import deps
 import slurm
 import sources
 
@@ -54,6 +56,20 @@ def pytest_addoption(parser):
         help="Regenerate tests/golden/*.json from the current API responses "
              "instead of comparing against them.",
     )
+
+
+@pytest.fixture(autouse=True)
+def _fresh_directory_cache():
+    """Drop the directory (NSS) caches between tests.
+
+    deps.directory_cache holds the Groups tab's member lists, per-user
+    group lists, gid->name memo, membership index and classification —
+    all keyed on real directory content a test may patch differently
+    from its neighbour (fixtures that replace deps.route_cache with a
+    fresh TtlCache replace this one too, but the autouse clear keeps
+    every other test honest).
+    """
+    deps.directory_cache = cache.TtlCache(max_size=32768)
 
 
 @pytest.fixture(autouse=True)
