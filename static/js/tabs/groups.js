@@ -20,7 +20,8 @@ import { $, isPlainClick } from "../core/dom.js";
 import {
   fmt, fmtInt, pctBar, escapeHtml, chipList, html, raw, tsToDate, userLink,
 } from "../core/format.js";
-import { setResultsLoading, showPanelError, panelOk } from "../core/panel.js";
+import { setResultsLoading, setResultsLoadingMessage, resetResultsLoadingMessage, showPanelError, panelOk } from "../core/panel.js";
+import { batchText, pollProgress } from "../core/progress.js";
 import { api } from "../core/api.js";
 import { loaded, setUrl, openUser } from "../core/router.js";
 import { createTable } from "../core/table.js";
@@ -55,6 +56,15 @@ export async function loadGroups() {
   const params = new URLSearchParams({ since_hours: $("gWindow").value });
   if ($("gRunning").checked) params.set("running_only", "true");
   params.set("level", $("gLevel").value);
+  // Poll the directory phase's progress while the request runs, so a
+  // cold load shows real batch progress instead of an opaque spinner.
+  // The poll stops when the response lands; both the list and an open
+  // drill-down's chips poll the same (window, running_only) key, so
+  // both show the same numbers.
+  const stopPolling = pollProgress("/api/groups/progress?" + params,
+    () => token === groupsToken,
+    (prog) => setGroupsProgress("groupsResults", prog),
+    () => resetResultsLoadingMessage("groupsResults"));
   try {
     const data = await api("/api/groups?" + params);
     if (token !== groupsToken) return;
@@ -75,8 +85,20 @@ export async function loadGroups() {
     if (token === groupsToken)
       showPanelError("groupsResults", e, loadGroups, "the group list");
   } finally {
+    stopPolling();
     if (token === groupsToken) setResultsLoading("groupsResults", false);
   }
+}
+
+// The loading chip's batch text for one directory phase: the membership
+// index's member-list reads first, then the owners' classification
+// ("users" — and anything else — reads as the classification).
+export function setGroupsProgress(resultsId, prog) {
+  const prefix = prog.phase === "index"
+    ? "Reading group member lists"
+    : "Classifying job owners";
+  setResultsLoadingMessage(resultsId, batchText(
+    prefix, prog.done, prog.total, prog.failed_batches));
 }
 
 /* Deep-link state (/groups?school=&level=&running=) — router.js calls
@@ -327,6 +349,12 @@ async function loadGroupMembers(gid) {
   const params = new URLSearchParams({ since_hours: $("gWindow").value });
   if ($("gRunning").checked) params.set("running_only", "true");
   params.set("level", $("gLevel").value);
+  // The same collapsed progress key as the list: one classification
+  // serves both routes, so both chips show the same batch numbers.
+  const stopPolling = pollProgress("/api/groups/progress?" + params,
+    () => token === membersToken,
+    (prog) => setGroupsProgress("groupMembersResults", prog),
+    () => resetResultsLoadingMessage("groupMembersResults"));
   try {
     const data = await api("/api/groups/" + encodeURIComponent(gid) +
       "/users?" + params);
@@ -338,6 +366,7 @@ async function loadGroupMembers(gid) {
       showPanelError("groupMembersResults", e,
         () => loadGroupMembers(gid), "the member list");
   } finally {
+    stopPolling();
     if (token === membersToken) setResultsLoading("groupMembersResults", false);
   }
 }

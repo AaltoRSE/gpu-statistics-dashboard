@@ -82,10 +82,19 @@ const BENIGN = {
 
 // boot: build the DOM at /groups, route the fetch stub by URL, import a
 // fresh groups module against it. Options:
-//   gateGroups  hold /api/groups behind a gate (releaseGroups() pops the
-//               FIFO of pending responses, resolving each with the next
-//               body from bodies[] in order)
-//   bodies      response bodies for successive /api/groups fetches
+//   gateGroups   hold /api/groups behind a gate (releaseGroups() pops the
+//                FIFO of pending responses, resolving each with the next
+//                body from bodies[] in order)
+//   bodies       response bodies for successive /api/groups fetches
+//   failGroups   answer /api/groups with a 502 (the request decides the
+//                panel's fate; the poll is best-effort)
+//   gateMembers  hold the drill-down /api/groups/{id}/users behind a gate
+//                (releaseMembers() pops it)
+//   progress     body for every /api/groups/progress poll (default null)
+//   polls        per-tick poll bodies, consumed in order (last repeats) —
+//                lets a test give the two requests' polls different
+//                numbers
+//   progress404  make the progress route answer 404 (stale backend)
 async function boot(opts, bust) {
   const bodies = opts.bodies || [BODY1];
   const dom = new JSDOM(html, { url: "http://localhost/groups" });
@@ -96,16 +105,38 @@ async function boot(opts, bust) {
   // As in partitions-parallel.test.js: setUrl only calls pushState, and
   // jsdom's own History object would keep the runner's event loop alive.
   global.history = { pushState() {}, replaceState() {} };
-  global.setInterval = () => 0;
-  global.clearInterval = () => {};
+  // Capture interval callbacks so tests can drive poll ticks manually;
+  // panel.js's freshness timer also registers one at import time, which
+  // is why ticks target the LAST registered interval.
+  const intervals = [];
+  const clearedIds = [];
+  global.setInterval = (fn) => { intervals.push(fn); return intervals.length; };
+  global.clearInterval = (id) => { clearedIds.push(id); };
   global.Plotly = { newPlot: () => {}, react: () => {} };
   const urls = [];
   const gates = [];
+  const memberGates = [];
   let bodyIndex = 0;
+  let pollIndex = 0;
+  const polls = opts.polls
+    || (opts.progress !== undefined ? [opts.progress] : [null]);
   global.fetch = (url) => {
     urls.push(String(url));
     const u = String(url);
+    if (u.startsWith("/api/groups/progress")) {
+      if (opts.progress404) {
+        return Promise.resolve({ ok: false, status: 404,
+                                 json: () => Promise.resolve({}) });
+      }
+      const body = polls[Math.min(pollIndex++, polls.length - 1)];
+      return Promise.resolve({ ok: true, json: () => Promise.resolve(body) });
+    }
     if (u.startsWith("/api/groups/")) {
+      if (opts.gateMembers) {
+        return new Promise((resolve) => memberGates.push(() => resolve({
+          ok: true, json: () => Promise.resolve({ ...MEMBERS_BODY }),
+        })));
+      }
       return Promise.resolve({
         ok: true, json: () => Promise.resolve({ ...MEMBERS_BODY }),
       });
@@ -114,6 +145,11 @@ async function boot(opts, bust) {
       return Promise.resolve({
         ok: true, json: () => Promise.resolve({ ...BENIGN }),
       });
+    }
+    if (opts.failGroups) {
+      return Promise.resolve({ ok: false, status: 502,
+                               statusText: "Bad Gateway",
+                               json: () => Promise.resolve({}) });
     }
     if (opts.gateGroups) {
       return new Promise((resolve) => gates.push(() => resolve({
@@ -128,9 +164,10 @@ async function boot(opts, bust) {
   };
   const mod = await import("../static/js/tabs/groups.js?cb=" + bust);
   return {
-    dom, mod, urls,
+    dom, mod, urls, intervals, clearedIds,
     releaseGroups: () => { while (gates.length) gates.shift()(); },
     releaseOne: () => { if (gates.length) gates.shift()(); },
+    releaseMembers: () => { while (memberGates.length) memberGates.shift()(); },
   };
 }
 
@@ -413,4 +450,162 @@ test("the leader cell links to the Users tab and clicking it does not drill down
   await new Promise((r) => setTimeout(r, 0));
   assert.ok(ctx.urls.find((u) => u.includes("/api/groups/kyrkiv1/users")),
     "row click fetched the drill-down");
+});
+
+// ---- directory-phase progress polling ----------------------------------
+
+test("the group list polls the directory phase and shows its batch text", async (t) => {
+  const ctx = await boot({
+    gateGroups: true,
+    progress: { phase: "users", done: 2, total: 5, failed_batches: 1 },
+  }, 20);
+  t.after(() => ctx.dom.window.close());
+  const doc = ctx.dom.window.document;
+  const pending = ctx.mod.loadGroups();
+  // one poll tick: the poll fetches (reusing the data request's exact
+  // params) and the owners-classification batch state lands on the chip
+  await ctx.intervals.at(-1)();
+  const dataUrl = ctx.urls.find((u) => u.startsWith("/api/groups?"));
+  const pollUrl = ctx.urls.find((u) => u.startsWith("/api/groups/progress"));
+  assert.ok(dataUrl && pollUrl, "both the data request and the poll fired");
+  assert.equal(pollUrl, "/api/groups/progress?" + dataUrl.split("?")[1]);
+  const chip = doc.querySelector("#groupsResults .results-loading");
+  assert.match(chip.textContent,
+    /Classifying job owners: batch 2 of 5 \(1 failed\)…/);
+  ctx.releaseGroups();
+  await pending;
+  assert.ok(ctx.clearedIds.length >= 1, "the poll was cleared on success");
+});
+
+test("the index phase reads as the member-lists label", async (t) => {
+  const ctx = await boot({
+    gateGroups: true,
+    progress: { phase: "index", done: 1, total: 39, failed_batches: 0 },
+  }, 21);
+  t.after(() => ctx.dom.window.close());
+  const doc = ctx.dom.window.document;
+  const pending = ctx.mod.loadGroups();
+  await ctx.intervals.at(-1)();
+  assert.match(
+    doc.querySelector("#groupsResults .results-loading").textContent,
+    /Reading group member lists: batch 1 of 39…/);
+  ctx.releaseGroups();
+  await pending;
+});
+
+test("an idle poll hands the chip back to the base label", async (t) => {
+  // Between phases (and after the directory work) the key is popped and
+  // the poll answers null — or done == total — and the chip must return
+  // to "Loading group efficiency…" instead of freezing on the last batch.
+  const ctx = await boot({
+    gateGroups: true,
+    polls: [
+      { phase: "index", done: 1, total: 2, failed_batches: 0 },
+      null,
+      { phase: "users", done: 2, total: 5, failed_batches: 0 },
+      { phase: "users", done: 5, total: 5, failed_batches: 0 },
+    ],
+  }, 22);
+  t.after(() => ctx.dom.window.close());
+  const doc = ctx.dom.window.document;
+  const chip = () => doc.querySelector("#groupsResults .results-loading");
+  const pending = ctx.mod.loadGroups();
+  const tick = ctx.intervals.at(-1);
+  await tick();
+  assert.match(chip().textContent, /Reading group member lists/);
+  await tick(); // null: onIdle resets
+  assert.equal(chip().textContent, "Loading group efficiency…");
+  await tick();
+  assert.match(chip().textContent, /Classifying job owners: batch 2 of 5…/);
+  await tick(); // done == total: idle again
+  assert.equal(chip().textContent, "Loading group efficiency…");
+  ctx.releaseGroups();
+  await pending;
+});
+
+test("the poll stops itself after a 404 from a stale backend", async (t) => {
+  const ctx = await boot({ gateGroups: true, progress404: true }, 23);
+  t.after(() => ctx.dom.window.close());
+  const doc = ctx.dom.window.document;
+  const pending = ctx.mod.loadGroups();
+  await ctx.intervals.at(-1)(); // one tick gets the 404
+  assert.ok(ctx.clearedIds.length >= 1,
+    "the 404 cleared the poll interval (no per-second request storm)");
+  ctx.releaseGroups();
+  await pending;
+});
+
+test("the poll interval is cleared when the request errors", async (t) => {
+  const ctx = await boot({ failGroups: true }, 23);
+  t.after(() => ctx.dom.window.close());
+  const doc = ctx.dom.window.document;
+  await ctx.mod.loadGroups();
+  const panel = doc.getElementById("groupsResults");
+  assert.equal(panel.classList.contains("loading"), false);
+  assert.ok(ctx.clearedIds.length >= 1, "the poll was cleared on error");
+});
+
+test("a superseded request's poll cannot overwrite the new label", async (t) => {
+  // The two polls answer DIFFERENT numbers: if the stale poll wrote the
+  // chip, its older batch count would be visible (identical numbers
+  // would prove nothing).
+  const ctx = await boot({
+    gateGroups: true,
+    polls: [
+      { phase: "users", done: 1, total: 5, failed_batches: 0 },
+      { phase: "users", done: 4, total: 5, failed_batches: 0 },
+    ],
+  }, 24);
+  t.after(() => ctx.dom.window.close());
+  const doc = ctx.dom.window.document;
+  const chip = () => doc.querySelector("#groupsResults .results-loading");
+  const first = ctx.mod.loadGroups();    // token 1, poll interval A
+  const stalePoll = ctx.intervals.at(-1);
+  await stalePoll();                     // token 1 is current: chip updates
+  assert.match(chip().textContent, /batch 1 of 5/);
+  const second = ctx.mod.loadGroups();   // token 2: chip reset synchronously
+  assert.ok(!/batch/.test(chip().textContent),
+    "a new request resets the chip before its first poll");
+  await ctx.intervals.at(-1)();          // token 2 is current: chip updates
+  assert.match(chip().textContent, /batch 4 of 5/);
+  await stalePoll();                     // token 1 is stale: must not write
+  assert.match(chip().textContent, /batch 4 of 5/,
+    "the stale request's poll left the current chip alone");
+  ctx.releaseGroups();
+  await Promise.all([first, second]);
+});
+
+test("the member drill-down polls the same key and clears the same way", async (t) => {
+  const ctx = await boot({
+    gateMembers: true,
+    progress: { phase: "users", done: 3, total: 5, failed_batches: 1 },
+  }, 25);
+  t.after(() => ctx.dom.window.close());
+  const doc = ctx.dom.window.document;
+  await ctx.mod.loadGroups();
+  const tr = doc.querySelector("#groupTable tr.row[data-gid='kyrkiv1']");
+  tr.dispatchEvent(new ctx.dom.window.MouseEvent("click", { bubbles: true }));
+  await new Promise((r) => setTimeout(r, 0));
+  // the drill-down registered the last poll interval: one tick fetches
+  // (reusing its data request's params) and shows the same batch numbers
+  // the list chip would show (one collapsed key)
+  await ctx.intervals.at(-1)();
+  const dataUrl = ctx.urls.find((u) => u.includes("/users?"));
+  const pollUrl = ctx.urls.filter((u) =>
+    u.startsWith("/api/groups/progress")).pop();
+  assert.equal(pollUrl, "/api/groups/progress?" + dataUrl.split("?")[1]);
+  const chip = doc.querySelector("#groupMembersResults .results-loading");
+  assert.match(chip.textContent,
+    /Classifying job owners: batch 3 of 5 \(1 failed\)…/);
+  ctx.releaseMembers();
+  await new Promise((r) => setTimeout(r, 0));
+  assert.ok(ctx.clearedIds.length >= 1, "the drill-down's poll was cleared");
+  // a re-click superseding the first drill-down resets its chip
+  const chipText = () =>
+    doc.querySelector("#groupMembersResults .results-loading").textContent;
+  tr.dispatchEvent(new ctx.dom.window.MouseEvent("click", { bubbles: true }));
+  assert.ok(!/batch/.test(chipText()),
+    "a new drill-down request resets the chip before its first poll");
+  ctx.releaseMembers();
+  await new Promise((r) => setTimeout(r, 0));
 });
