@@ -170,6 +170,150 @@ class UsersResponse(BaseModel):
     users: List[UserRow]
 
 
+# ---- /api/groups, /api/groups/{group_id}/users -------------------------
+
+class School(BaseModel):
+    code: str = Field(description="Department-code prefix the school's "
+                      "departments start with (T1-T6, A8, E7, ...).")
+    short: str = Field(description="Short name used as the school filter "
+                       "value and on rows (SCI, ELEC, ...; Other for "
+                       "legacy/university prefixes).")
+    full: Optional[str] = Field(
+        default=None,
+        description="Full school name from prof_groups.conf; null for the "
+        "synthetic Other a department code that matches no prefix gets.")
+
+
+class GroupTopUser(BaseModel):
+    user: str
+    util_gpu_hours: float
+
+
+class GroupCoverage(BaseModel):
+    users: int = Field(description="Distinct job owners the roll-up "
+                       "attempted to classify.")
+    in_prof_group: int = Field(description="Users classified into a "
+                               "professor research group.")
+    dept_only: int = Field(description="Users with an osasto department "
+                           "but no professor group; their row always "
+                           "renders.")
+    unaffiliated: int = Field(description="Known users with no "
+                              "professor group and no osasto-t* group; "
+                              "their row always renders.")
+    unresolved: int = Field(description="Users the directory does not "
+                            "know; their activity rolls up under the "
+                            "always-present Unaffiliated row.")
+    failed: int = Field(description="Users whose NSS lookup errored "
+                        "(partial directory outage). Their activity is in "
+                        "no row — disclosed here, not folded into "
+                        "unaffiliated.")
+
+
+class GroupRow(BaseModel):
+    group_id: str = Field(description="Roll-up row identity: the group "
+          "leader's username, unit:<CODE> for a shared unit (several "
+          "professors share the unit, so the row has no single leader), "
+          "dept:TNNN ('<Department>, no professor group' at group "
+          "level), or the always-present unaffiliated row — unresolved "
+          "users (the directory does not know them) roll up under it "
+          "too. Use it for the drill-down path.")
+    group_name: str
+    leader: Optional[str] = Field(
+        default=None,
+        description="The professor group's leader username; null for "
+        "shared-unit, department and special rows.")
+    leader_name: Optional[str] = Field(
+        default=None,
+        description="The leader's display name from prof_groups.conf; "
+        "null for shared-unit, department and special rows (the unit "
+        "name itself is the row's group_name).")
+    unit_codes: List[str] = Field(
+        default_factory=list,
+        description="The AD unit codes the group reads its NSS member "
+        "groups from (T40106, ...); empty for department and special "
+        "rows.")
+    dept_code: Optional[str] = None
+    dept_name: Optional[str] = None
+    school_code: Optional[str] = Field(
+        default=None,
+        description="School short name (SCI, ELEC, ...), Other when the "
+        "department code matches no school prefix, null for the "
+        "Unaffiliated row.")
+    school_name: Optional[str] = None
+    users: int
+    jobs: int
+    running_jobs: int
+    mean_util: float = Field(
+        description="Sample-weighted mean utilization across ALL member "
+        "jobs' GPU series (sum of per-job sample sums / sum of sample "
+        "counts) — not the mean of per-user means.")
+    util_gpu_hours: float = Field(
+        description="Utilization-weighted GPU-hours, summed over members' "
+        "Users-tab GPU-hours; a group's figure equals the sum of its "
+        "members' values there.")
+    gpu_hours: float = Field(
+        description="Observed GPU-hours: the window GPU time the members' "
+        "GPU series covered (the denominator of the utilization "
+        "weighting) — the only allocation figure the Prometheus-only "
+        "pipeline has, since the Groups pipeline runs no sacct fetch.")
+    vram_avg: Optional[float] = None
+    low_eff_jobs: int = Field(
+        description="Member jobs whose mean utilization is under 30%.")
+    top_users: List[GroupTopUser]
+
+
+class GroupsResponse(BaseModel):
+    window: Window
+    level: str = Field(description="The roll-up level this response used "
+                       "(group or department).")
+    schools: List[School]
+    coverage: GroupCoverage
+    count: int
+    groups: List[GroupRow]
+
+
+class GroupMember(BaseModel):
+    user: str
+    jobs: int
+    running_jobs: int
+    mean_util: float
+    util_gpu_hours: float
+    vram_avg: Optional[float] = None
+    gpu_types: List[str]
+    group: Optional[str] = Field(
+        default=None,
+        description="The user's primary professor group (the leader's "
+        "username); null for department-only and Unaffiliated users — "
+        "unresolved users (the directory does not know them) among "
+        "them.")
+    membership: Optional[str] = Field(
+        default=None,
+        description="How the user belongs to their primary group: "
+        "leader, paid (the unit's laitos group), external (the unit's "
+        "auto-ext group — a visitor from outside the university), staff "
+        "or everyone.")
+    dept_code: Optional[str] = None
+    school_code: Optional[str] = None
+    own_dept: Optional[str] = Field(
+        default=None,
+        description="The user's own osasto department — for a group "
+        "member this can differ from the row's department, which is the "
+        "professor's.")
+    extra_groups: List[str] = Field(
+        description="The user's other professor groups when several "
+        "claim them (the roll-up uses the strongest membership).")
+    status: str
+
+
+class GroupMembersResponse(BaseModel):
+    group_id: str
+    group_name: str
+    level: str
+    window: Window
+    count: int
+    users: List[GroupMember]
+
+
 # ---- /api/partitions, /api/partitions/vram -----------------------------
 class PartitionRow(BaseModel):
     name: str = Field(description="Canonical GPU type (short scontrol "

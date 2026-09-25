@@ -23,11 +23,17 @@ from test_app import SACCT, FakeProm  # noqa: E402
 import deps  # noqa: E402
 import sources  # noqa: E402
 
-# The seven windowed/tab endpoints, all read for the same 24 h window.
+# The windowed/tab endpoints, all read for the same 24 h window. The
+# groups routes belong here deliberately: their only external read
+# beyond the shared sources is per-user NSS (uncounted, cached), so
+# their presence in this list is what proves the Groups tab adds no
+# Prometheus/sacct/scontrol fetch of its own.
 WINDOW_HITS = [
     ("/api/jobs", {"since_hours": 24}),
     ("/api/users", {"since_hours": 24}),
     ("/api/jobs", {"since_hours": 24, "user": "alice"}),
+    ("/api/groups", {"since_hours": 24}),
+    ("/api/groups/kyrkiv1/users", {"since_hours": 24}),
     ("/api/partitions", {"since_hours": 24}),
     ("/api/partitions/queue", {"since_hours": 24}),
     ("/api/partitions/vram", {"since_hours": 24}),
@@ -284,6 +290,27 @@ def test_users_route_gathers_four_sources(client, fake_prom, monkeypatch):
     assert r.status_code == 200
     assert gate.timeouts == [], \
         "the users route's four sources must be gathered in parallel"
+
+
+def test_groups_route_gathers_four_sources(client, fake_prom, monkeypatch):
+    # The Groups pipeline shares the users route's exact source shape —
+    # its gather must overlap the same way (the NSS lookups run after
+    # the responses land and are not gated here).
+    real_nodes = deps.show_nodes
+    gate = OverlapGate(("util_range", "vram_range", "scontrol_nodes"),
+                       ("live_util_instant", "live_vram_instant"))
+    monkeypatch.setattr(deps, "get_prom", lambda: GatedProm(gate, [
+        ("range", UTIL_FRAG, "util_range"),
+        ("range", VRAM_PCT_FRAG, "vram_range"),
+        ("instant", UTIL_FRAG, "live_util_instant"),
+        ("instant", NODE_VRAM_FRAG, "live_vram_instant"),
+    ]))
+    monkeypatch.setattr(
+        deps, "show_nodes", _gated_fn(gate, "scontrol_nodes", real_nodes))
+    r = client.get("/api/groups", params={"since_hours": 24})
+    assert r.status_code == 200
+    assert gate.timeouts == [], \
+        "the groups route's four sources must be gathered in parallel"
 
 
 def test_gates_catch_sequential_fetches():

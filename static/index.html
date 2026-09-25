@@ -28,6 +28,7 @@
   <button data-tab="jobs" class="active">Jobs<span class="tab-badge" id="jobsLimitBadge" hidden></span></button>
   <button data-tab="partitions">Partitions</button>
   <button data-tab="users">Users</button>
+  <button data-tab="groups">Groups</button>
   <button data-tab="nodes">Nodes</button>
 </nav>
 <main>
@@ -359,6 +360,101 @@
     </div>
   </section>
 
+  <!-- ============ GROUPS ============ -->
+  <section class="tabpage" id="tab-groups">
+    <div class="filter-card">
+      <h2>Groups</h2>
+      <div class="controls" style="margin-bottom:0">
+        <label>Window
+          <select id="gWindow">
+            <option value="24" selected>last 24 h</option>
+            <option value="72">last 3 days</option>
+            <option value="168">last 7 days</option>
+            <option value="336">last 14 days</option>
+            <option value="720">last 30 days</option>
+          </select>
+        </label>
+        <label>School
+          <select id="gSchool"><option value="">all schools</option></select>
+        </label>
+        <label>Level
+          <select id="gLevel">
+            <option value="group" selected>Professor group</option>
+            <option value="department">Department</option>
+          </select>
+        </label>
+        <label class="row"><input id="gRunning" type="checkbox"> Running only</label>
+        <label>Search (group / department)
+          <input id="gSearch" class="user-search" type="text"
+                 placeholder="type to filter — no fetch">
+        </label>
+        <button id="gRefresh" title="re-fetch the group list"><span aria-hidden="true">&#8635;</span> refresh</button>
+        <span class="control-meta">
+          <span class="meta-count" id="gMetaCount"></span>
+          <span class="small" id="gMeta"></span>
+          <span class="small" data-fresh-for="groupsResults"></span>
+        </span>
+      </div>
+    </div>
+    <div class="hint coverage-banner" id="groupsCoverage" hidden></div>
+    <div id="groupsResults" class="results-panel loading">
+      <div class="results-content">
+        <div class="card">
+          <h2>Mean utilization by group <span class="small" id="gChartNote"></span></h2>
+          <div class="chart" id="groupsBarPlot"></div>
+          <div class="empty-state" id="groupsBarEmpty" hidden>No groups match the current filters.</div>
+          <div class="legend" id="groupsSchoolLegend"></div>
+        </div>
+        <div class="card" style="margin-top:14px">
+          <h2>Group table <span class="small" id="gCount"></span><button type="button" class="glossary-btn" data-glossary="prof-groups" title="What is this?">?</button></h2>
+          <div class="table-scroll">
+            <table id="groupTable">
+              <thead><tr>
+                <th data-k="group_name">Group</th>
+                <th data-k="leader_name">Leader</th>
+                <th data-k="school_code">School</th>
+                <th class="num" data-k="users">Users</th>
+                <th class="num" data-k="jobs">Jobs</th>
+                <th class="num" data-k="running_jobs">Running</th>
+                <th class="num" data-k="mean_util">Mean util %</th>
+                <th class="num" data-k="gpu_hours">GPU-hours held</th>
+                <th class="num" data-k="vram_avg">VRAM %</th>
+                <th class="num" data-k="low_eff_jobs" title="member jobs whose mean utilization is under 30%">&lt;30% jobs</th>
+              </tr></thead>
+              <tbody></tbody>
+            </table>
+          </div>
+          <div class="hint">Rows are professors&rsquo; research groups &mdash; the Aalto AD unit each professor leads, its members read from that unit&rsquo;s NSS groups. Mean utilization is weighted by every member job&rsquo;s GPU samples, not averaged per user. GPU-hours held = the window GPU time the members&rsquo; GPUs were reserved. The Unaffiliated row (no professor group or department, including users the directory does not know) is always shown &mdash; an empty row means nobody is in it, not that nobody exists. Click a row for the group&rsquo;s members; click the leader&rsquo;s name to open them in the Users tab. Click a column header to sort.</div>
+        </div>
+      </div>
+      <div class="results-loading">Loading group efficiency&hellip;</div>
+    </div>
+    <div id="groupMembersResults" class="results-panel" style="display:none">
+      <div class="results-content">
+        <div class="card" id="groupMembersCard">
+          <h2 id="groupMembersTitle">Members</h2>
+          <div class="table-scroll compact">
+            <table id="memberTable">
+              <thead><tr>
+                <th data-k="user">User</th>
+                <th data-k="group">Group</th>
+                <th class="num" data-k="jobs">Jobs</th>
+                <th class="num" data-k="running_jobs">Running</th>
+                <th class="num" data-k="mean_util">Mean util %</th>
+                <th class="num" data-k="util_gpu_hours">GPU-hours</th>
+                <th class="num" data-k="vram_avg">VRAM %</th>
+                <th data-k="extra_groups">Other groups</th>
+              </tr></thead>
+              <tbody></tbody>
+            </table>
+          </div>
+          <div class="hint">Click a user to open them in the Users tab. Extra units lists the member&rsquo;s other laitos groups when they hold several &mdash; the roll-up uses the one their department matches.</div>
+        </div>
+      </div>
+      <div class="results-loading">Loading group members&hellip;</div>
+    </div>
+  </section>
+
   <!-- ============ NODES ============ -->
   <section class="tabpage" id="tab-nodes">
     <div class="controls">
@@ -436,10 +532,42 @@
       on it, regardless of how busy that job's GPUs actually were. A type
       can have high occupancy and low utilization (jobs running but idle)
       or the reverse.</dd>
-    <dt id="glossary-util-gpu-hours">GPU-hours (Users table)</dt>
+    <dt id="glossary-util-gpu-hours">GPU-hours (Users table and group members)</dt>
     <dd>Utilization-weighted GPU-hours: mean utilization &times; GPU time.
       Ranks users by how much they actually used, not how much they were
       allocated. Not the same figure as a job's effective GPU-hours below.</dd>
+    <dt id="glossary-prof-groups">Professor group (Groups tab)</dt>
+    <dd>A row is one professor&rsquo;s research group: the Aalto AD unit
+      the professor leads, with members read from that unit&rsquo;s NSS
+      groups &mdash; the laitos group (people paid there), the staff
+      group, the everyone group and the auto-ext group (external
+      visitors from outside the university) &mdash; plus the professor
+      themself. A unit AD ties to several professors
+      gets its own leaderless row, &ldquo;&lt;Unit&gt; (shared
+      unit)&rdquo;, whose members are that unit&rsquo;s NSS groups
+      alone. A user in no professor group but with a department
+      (osasto) rolls up under &ldquo;&lt;Department&gt;, no professor
+      group&rdquo;, and the department level collapses
+      everyone into their department &mdash; a group member under their
+      professor&rsquo;s, everyone else under their own.</dd>
+    <dt id="glossary-groups-mean-util">Mean utilization (Groups table)</dt>
+    <dd>The same time-weighted mean as everywhere else, weighted across
+      ALL of the group's member jobs&rsquo; GPU samples &mdash; a group of a
+      10,000-sample job and a 10-sample job reads like the big job, not
+      like the average of two users. The Users rows inside a group are
+      not averaged per user.</dd>
+    <dt id="glossary-gpu-hours-held">GPU-hours held (Groups table)</dt>
+    <dd>The window GPU time the members&rsquo; GPUs were reserved for,
+      observed from the exporter&rsquo;s per-GPU series &mdash; the
+      denominator of the utilization weighting. The Groups pipeline runs
+      no sacct fetch, so this is the only allocation figure it has;
+      utilization-weighted GPU-hours divided by GPU-hours held equals the
+      group&rsquo;s mean utilization.</dd>
+    <dt id="glossary-low-eff-jobs">&lt;30% jobs (Groups table)</dt>
+    <dd>How many of the group&rsquo;s jobs averaged under 30% GPU
+      utilization in the window &mdash; where a conversation about wasted
+      reservations starts, not a verdict: short inference jobs and
+      debug runs live here too.</dd>
     <dt id="glossary-gpu-hours-eff">Effective GPU-hours (a user's jobs)</dt>
     <dd>Effective GPU-hours: allocated GPU-hours (gpus &times; elapsed time)
       &times; mean utilization, once sacct/scontrol metadata resolves the

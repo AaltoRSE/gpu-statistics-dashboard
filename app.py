@@ -14,7 +14,8 @@ from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from api import health, jobs, nodes, partitions, spa, users
+from api import groups, health, jobs, nodes, partitions, spa, users
+from deps import DirectoryError
 from prom import PrometheusError
 from slurm import SlurmError
 
@@ -33,12 +34,22 @@ def prom_error_handler(request, exc):
 @app.exception_handler(SlurmError)
 def slurm_error_handler(request, exc):
     return JSONResponse(content={"error": "slurm_unreachable",
+                                  "detail": str(exc)}, status_code=502)
+
+
+@app.exception_handler(DirectoryError)
+def directory_error_handler(request, exc):
+    # NSS down (no user resolvable) or prof_groups.conf unreadable: the
+    # Groups tab's directory data is unavailable — 502, never a silent
+    # all-unaffiliated table.
+    return JSONResponse(content={"error": "directory_unreachable",
                                  "detail": str(exc)}, status_code=502)
 
 
 app.include_router(health.router)
 app.include_router(jobs.router)
 app.include_router(users.router)
+app.include_router(groups.router)
 app.include_router(partitions.router)
 app.include_router(nodes.router)
 app.include_router(spa.router)

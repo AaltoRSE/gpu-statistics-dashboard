@@ -23,7 +23,7 @@ def index():
 # than a "/{full_path:path}" catch-all so a mistyped /api/* path still
 # 404s instead of silently returning HTML.
 _VIEW_PATHS = [
-    "/jobs", "/partitions", "/users", "/nodes",
+    "/jobs", "/partitions", "/users", "/groups", "/nodes",
     "/job/{jobid}", "/node/{nodename}",
     "/partition/{partition}", "/user/{username}",
 ]
