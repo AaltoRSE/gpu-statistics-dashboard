@@ -9,7 +9,7 @@
 
 import { $, isPlainClick } from "../core/dom.js";
 import { escapeHtml, fmt, fmtInt, pctBar, html, raw, compareStrings, tsToDate, partitionLink, fmtDuration, fmtSacctTime, jobLink, userLink } from "../core/format.js";
-import { setResultsLoading, setResultsLoadingMessage, showPanelError, panelOk } from "../core/panel.js";
+import { setResultsLoading, setResultsLoadingMessage, resetResultsLoadingMessage, showPanelError, panelOk } from "../core/panel.js";
 import { renderPlot, plotTheme, partBarColor } from "../core/plot.js";
 import { api } from "../core/api.js";
 import { loaded, setUrl, openPartition, openJob, openUser } from "../core/router.js";
@@ -76,7 +76,7 @@ export async function loadPartitions() {
   // reaching that trailing await. Its own token/origin gating (loadVram)
   // still keeps a superseded VRAM load from clearing a newer one's chip.
   loadVram();
-  setResultsLoading("partitionsResults", true, "Loading GPU utilization history…");
+  setResultsLoading("partitionsResults", true, "Loading GPU type summary…");
   // The queue is a separate, slower endpoint (squeue + sacct): start it
   // immediately so both requests are in flight together, and never let
   // its completion gate the Prometheus-backed charts below.
@@ -130,7 +130,8 @@ async function loadPartitionQueue() {
   const stopPolling = pollProgress("/api/partitions/queue/progress?" + params,
     () => token === queueToken,
     (prog) => setQueueProgress(prog.done, prog.total,
-                              prog.failed_batches));
+                              prog.failed_batches),
+    () => resetResultsLoadingMessage("queueResults"));
   let data;
   try {
     data = await api("/api/partitions/queue?" + params);
@@ -174,13 +175,16 @@ function batchText(prefix, done, total, failed) {
 }
 
 // Best-effort once-a-second progress polling for a batched fetch: calls
-// onUpdate with each poll's batch state while isCurrent holds, stops
-// itself after a 404 (a stale backend without the progress route must
-// not be hammered every second), ignores any other error, and returns
-// the cleanup function every success/error/supersession path must call.
-// The token gate keeps a late poll from a superseded request from
-// overwriting the new request's reset label.
-function pollProgress(url, isCurrent, onUpdate) {
+// onUpdate with each poll's batch state while isCurrent holds, calls
+// onIdle when the endpoint answers but has no in-flight batch (the phase
+// finished — its key is popped on completion — or the dump was cached, or
+// the batches are all done and the request is in its slower, unbatched
+// remainder), stops itself after a 404 (a stale backend without the
+// progress route must not be hammered every second), ignores any other
+// error, and returns the cleanup function every success/error/supersession
+// path must call. The token gate keeps a late poll from a superseded
+// request from overwriting the new request's reset label.
+function pollProgress(url, isCurrent, onUpdate, onIdle) {
   const pollTimer = setInterval(async () => {
     try {
       const resp = await fetch(url);
@@ -190,7 +194,9 @@ function pollProgress(url, isCurrent, onUpdate) {
       }
       if (!resp.ok || !isCurrent()) return;
       const prog = await resp.json();
-      if (isCurrent() && prog && prog.total) onUpdate(prog);
+      if (!isCurrent()) return;
+      if (prog && prog.total && prog.done < prog.total) onUpdate(prog);
+      else if (onIdle) onIdle();
     } catch (_) { /* progress is best-effort; the request decides */ }
   }, 1000);
   return () => clearInterval(pollTimer);
@@ -582,7 +588,8 @@ export async function loadVram() {
   const stopPolling = pollProgress(
     "/api/partitions/vram/progress?" + params,
     () => token === vramToken,
-    (prog) => setVramProgress(prog.done, prog.total, prog.failed_batches));
+    (prog) => setVramProgress(prog.done, prog.total, prog.failed_batches),
+    () => resetResultsLoadingMessage("vramResults"));
   try {
     const data = await api("/api/partitions/vram?" + params);
     if (token !== vramToken) return; // a newer VRAM request supersedes this one
