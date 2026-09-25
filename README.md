@@ -107,6 +107,15 @@ OS-level preference applies when no choice has been saved.
   folded into Unaffiliated). When every lookup fails (or the config
   file is unreadable) the tab shows a 502 (`directory_unreachable`),
   never a silent all-unaffiliated table.
+- **Loading progress** — a cold load shows its directory phase on the
+  chip, polled once a second from `/api/groups/progress` (the same
+  poller the Partitions tabs use): first "Reading group member lists:
+  batch k of M…", then "Classifying job owners: batch k of M…"; the
+  Prometheus phase before it and the slower remainder after it show the
+  base label with an elapsed-seconds suffix. Both the list chip and an
+  open drill-down's chip poll the same key, so both show the same
+  numbers, and the classification runs once for both. A warm load makes
+  zero directory calls and no batch text at all.
 
 ### Partitions tab
 - Per-Slurm-partition view: mean utilization per partition (time-weighted
@@ -285,6 +294,7 @@ sections.
 | `GET /api/nodes/{name}?view=job_start\|1\|6\|24` | per-GPU utilization/VRAM series for one node (`job_start` = since the earliest active job started) |
 | `GET /api/groups?since_hours=&running_only=&level=group\|department` | GPU efficiency per professor research group over the window: the Users aggregation rolled up by professor group (the AD unit a `prof_groups.conf` row names; membership from that unit's NSS groups, `auto-ext-` included for external visitors), a leaderless `unit:<CODE>` shared-unit row (several professors, one unit), or department, classified from each job owner's NSS groups. Rows carry leader/leader_name/unit_codes (null/— for shared-unit rows), group/department/school naming, sample-weighted `mean_util`, `util_gpu_hours` (members' Users-tab GPU-hours summed), observed `gpu_hours`, `low_eff_jobs` (<30%), `top_users`; the response adds `schools`, `coverage` (`in_prof_group`/`dept_only`/`unaffiliated`/`unresolved`/`failed` users) and `window`. The `unaffiliated` and `unresolved` rows are always present. No new upstream fetch: the window sources are the shared ones, per-user group lists are cached 24 h (1 h for unknown users) and per-group member lists 24 h |
 | `GET /api/groups/{group_id}/users?since_hours=&running_only=&level=` | the drill-down: one roll-up row's members with their own classification (`group`, `membership` kind, `dept_code`, `own_dept`, `extra_groups`); 404 for a group id absent from the window |
+| `GET /api/groups/progress?since_hours=&running_only=&level=` | batched directory progress for the classification (`level` accepted, ignored — the poll reuses the data request's query string): `{"phase": "index" \| "users", "done", "total", "failed_batches"}` while the batches run, JSON null between phases and after completion. Both group routes publish under one key, so the list and an open drill-down's chips show the same numbers |
 
 Short in-memory TTL caches (20–300 s, at both the app and Prometheus-client
 layers) avoid re-hitting the same query while the admin drags filters around.
@@ -327,17 +337,27 @@ actually pull for one window read:
   shared sources are per-user NSS (`deps.user_groups`, the same
   `groups <user>` the shell resolves) and the configured groups'
   member lists (`deps.group_members`, one `getent group` per
-  unit/NSS-group spelling). User group lists are cached per user for
-  24 h (1 h for a user the directory does not know), member lists per
-  group for 24 h, and the membership index per `prof_groups.conf`
-  version — so a repeat request makes zero directory calls, a conf edit
-  shows on the next request, and `/api/users` + `/api/groups` in one
-  window add no upstream query at all.
-- **Progress keys** — the dump's chunked fetch publishes
-  `{done, total, failed_batches}` to `cache.progress_store` under one
-  window-scoped key (`cache.vram_progress_key`) that both progress polls
-  read; only the cache-miss leader writes it, and a finished or failed
-  fetch always clears it.
+  unit/NSS-group spelling). These live in a dedicated
+  `deps.directory_cache` — they number in the thousands and must never
+  trigger the route cache's clear-all eviction, which would otherwise
+  wipe every other tab's caches on every Groups load. The reads batch:
+  25 NSS reads per batch on 4 threads, reporting progress per finished
+  batch; the membership index is cached per `prof_groups.conf` version,
+  the classification per (conf version, owner set) for 60 s, a gid's
+  name is memoized directory-wide (`deps.group_name`), user group lists
+  are cached per user for 24 h (1 h for a user the directory does not
+  know) and member lists per group for 24 h — so a repeat request makes
+  zero directory calls, a conf edit shows on the next request, a partial
+  failure is retried instead of memoized, and `/api/users` +
+  `/api/groups` in one window add no upstream query at all.
+- **Progress keys** — batched fetches publish
+  `{done, total, failed_batches}` to `cache.progress_store` under
+  window-scoped keys their progress polls read: the sacct dump's chunked
+  fetch under `cache.vram_progress_key` (shared by the queue and VRAM
+  polls) and the Groups classification's directory batches under
+  `cache.groups_progress_key` (shared by the group-list and drill-down
+  polls). Only the cache-miss leader writes a key, and a finished or
+  failed fetch always clears it.
 
 ## Data semantics (important)
 
