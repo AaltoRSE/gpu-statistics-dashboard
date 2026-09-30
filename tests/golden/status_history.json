@@ -5,6 +5,8 @@
     "gpus": 48
   },
   "coverage": {
+    "blocked_pending_counted": true,
+    "blocked_pending_jobs": 0,
     "chunks": 8,
     "complete": true,
     "failed_chunks": 0,

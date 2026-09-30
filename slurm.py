@@ -667,23 +667,41 @@ def parse_sacct_status(output):
     return records
 
 
+# Final states a job can reach without ever becoming eligible (blocked by
+# a dependency or a hold, then cancelled, or failed at submission). COMPLETED
+# is left out: a never-eligible completion is vanishingly rare, and its
+# state query alone costs as much as the whole default query.
+NEVER_ELIGIBLE_END_STATES = "CA,F,TO,OOM,NF,BF,DL,PR,RV"
+
+
 def sacct_status(start_iso, end_iso):
     """Every user's jobs active in one bounded interval, all partitions.
 
     One chunk of the Status tab's cluster-wide history: unlike
     ``sacct_allocations`` there is no ``-r`` — CPU partitions are the
-    point — and no ``--state`` filter (submitted, started and ended
-    counts need every state). ``-S``/``-E`` without ``--state`` selects
-    the jobs that were pending or running at any time inside the
-    interval, so the caller attributes each event (submit, start, end)
-    to the chunk its timestamp falls in. ``SlurmError`` propagates so
-    the chunking layer can retry once and count the failure.
+    point. ``-S``/``-E`` without ``--state`` selects by *eligible* time:
+    every job that became eligible before the interval's end and had not
+    ended before its start (pending, running or ended inside it). So a
+    job appears in every chunk from its eligible time on, and the caller
+    attributes each event to one chunk.
+
+    That default selection never returns a job that was never eligible —
+    one blocked by a dependency or a hold and then cancelled. A second,
+    state-filtered query (``--state`` selects final states by END time)
+    adds exactly those rows (no Eligible time; the default query already
+    has every other one). It is cheap: the terminal states other than
+    COMPLETED are a small share of the rows. ``SlurmError`` from either
+    propagates so the chunking layer can retry once and count the
+    failure.
     """
-    return parse_sacct_status(_run([
-        "sacct", "--allusers", "-X",
-        "-S", start_iso, "-E", end_iso,
-        "-o", ",".join(STATUS_FIELDS), "--parsable2", "--noheader",
-    ], timeout=120))
+    base = ["sacct", "--allusers", "-X", "-S", start_iso, "-E", end_iso,
+            "-o", ",".join(STATUS_FIELDS), "--parsable2", "--noheader"]
+    records = parse_sacct_status(_run(base, timeout=120))
+    ended = parse_sacct_status(_run(
+        base[:7] + ["--state=" + NEVER_ELIGIBLE_END_STATES] + base[7:],
+        timeout=120))
+    records.extend(r for r in ended if not r["eligible"])
+    return records
 
 
 def sacct_jobs(job_ids, start_iso=None, workers=8):

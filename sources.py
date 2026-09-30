@@ -439,7 +439,9 @@ def status_history(progress_key=None):
     live running-job IDs (the 30 s scontrol job snapshot) let the
     reduction drop sacct's stale "still running" rows; when scontrol is
     unreadable the reduction falls back to an age cut-off and the
-    coverage says so.
+    coverage says so. The squeue pending snapshot (30 s) supplies the
+    submissions sacct cannot see yet: jobs still blocked by a dependency
+    or hold.
 
     Raises ``SlurmError`` when every chunk failed, so a total outage is
     never cached as an empty week; a partial failure is cached (300 s)
@@ -455,6 +457,12 @@ def status_history(progress_key=None):
         except SlurmError:
             return None
 
+    def pending_or_none():
+        try:
+            return pending_jobs()
+        except SlurmError:
+            return None
+
     def fetch():
         now = deps.now()
         start = int(now) // status.HOUR * status.HOUR \
@@ -465,8 +473,9 @@ def status_history(progress_key=None):
         # The scontrol job snapshot (seconds on a busy controller) runs
         # alongside the sacct chunks; a chunk waits for it only once its
         # own rows are in hand and it reaches the reduction.
-        with ThreadPoolExecutor(max_workers=1) as pool:
+        with ThreadPoolExecutor(max_workers=2) as pool:
             live = pool.submit(live_running_ids)
+            pending = pool.submit(pending_or_none)
 
             def fetch_chunk(chunk_start_iso, chunk_end_iso):
                 # The window's own bounds are epochs already; converting
@@ -485,12 +494,13 @@ def status_history(progress_key=None):
                 chunks, fetch_chunk, cache.status_day_key,
                 progress_key=progress_key)
             live_ids = live.result()
+            queued = pending.result()
         if not results:
             raise SlurmError("every sacct history chunk failed")
         return status.merge_history(
             [results[i] for i in sorted(results)], start, now,
             total_chunks=len(chunks),
-            running_verified=live_ids is not None)
+            running_verified=live_ids is not None, pending=queued)
 
     return deps.route_cache.get_or_set(
         cache.status_history_key(), 300, fetch)

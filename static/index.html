@@ -112,7 +112,7 @@
               <tbody></tbody>
             </table>
           </div>
-          <div class="hint">A GPU job requested or holds at least one GPU; every other job is a CPU job. Array tasks count individually. Failed = failed, out of memory, timed out, node failure, boot failure or deadline; the final-state table below breaks it down. Queue wait is Eligible &rarr; Start of the jobs that started in the window &mdash; time blocked by a dependency, a hold or an array throttle is not wait. Windows are hour-aligned and include the current hour, so &ldquo;past 24 hours&rdquo; covers 24&ndash;25 hours.</div>
+          <div class="hint">A GPU job requested or holds at least one GPU; every other job is a CPU job. Array tasks count individually; submitted includes jobs still blocked by a dependency or hold, and cancelled includes jobs cancelled while blocked. Failed = failed, out of memory, timed out, node failure, boot failure or deadline; the final-state table below breaks it down. Queue wait is Eligible &rarr; Start of the jobs that started in the window &mdash; time blocked by a dependency, a hold or an array throttle is not wait. Windows are hour-aligned and include the current hour, so &ldquo;past 24 hours&rdquo; covers 24&ndash;25 hours.</div>
         </div>
         <div class="card" style="margin-top:14px">
           <div class="detail-head">

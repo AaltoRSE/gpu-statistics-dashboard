@@ -70,7 +70,8 @@ const HISTORY = {
   series: { t: T, cpu: series(1), gpu: series(10) },
   coverage: { chunks: 8, failed_chunks: 0, complete: true, records: 10,
               stale_running_rows: 3, unverified_running_rows: 0,
-              running_verified: true },
+              running_verified: true, blocked_pending_counted: true,
+              blocked_pending_jobs: 2 },
   capacity: { cpus: 17232, gpus: 475 },
 };
 
@@ -225,6 +226,18 @@ test("partial accounting coverage is disclosed, not hidden", async (t) => {
   const banner = doc.getElementById("sHistCoverage");
   assert.equal(banner.hidden, false);
   assert.match(banner.textContent, /1 of 8 days of accounting data could not be read/);
+  assert.doesNotMatch(banner.textContent, /pending queue/);
+});
+
+test("an unreadable queue is disclosed as missing blocked submissions", async (t) => {
+  const history = { ...HISTORY, coverage: { ...HISTORY.coverage,
+                                            blocked_pending_counted: false } };
+  const { dom, mod, doc } = await boot({ history }, "noqueue");
+  t.after(() => dom.window.close());
+  await mod.loadStatus();
+  const banner = doc.getElementById("sHistCoverage");
+  assert.equal(banner.hidden, false);
+  assert.match(banner.textContent, /still blocked by a dependency or hold/);
 });
 
 test("the root path lands on the Status tab", async (t) => {

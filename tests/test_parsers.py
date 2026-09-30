@@ -699,24 +699,37 @@ def test_parse_sacct_status_rows():
 
 
 def test_sacct_status_command(monkeypatch):
-    # All partitions (no -r), no --state filter, allocations only (-X).
+    # All partitions (no -r), allocations only (-X): the default query
+    # selects by eligible time, and a terminal-state query adds the jobs
+    # that never became eligible — and only those, the default query
+    # already has every row with an Eligible time.
     import slurm
 
-    cmds = {}
+    cmds = []
 
     def fake_run(cmd, timeout=30):
-        cmds["cmd"], cmds["timeout"] = cmd, timeout
+        cmds.append((cmd, timeout))
+        if any(c.startswith("--state=") for c in cmd):
+            return "\n".join([
+                # cancelled while a dependency blocked it: no Eligible
+                _status_line("9", "9", "CANCELLED by 7", eligible="Unknown",
+                             start="Unknown"),
+                # also in the default result: must not be added twice
+                _status_line("100", "100", "CANCELLED by 7"),
+            ])
         return _status_line() + "\n"
 
     monkeypatch.setattr(slurm, "_run", fake_run)
     rows = slurm.sacct_status("2026-09-29T00:00:00", "2026-09-30T00:00:00")
-    assert len(rows) == 1
-    assert cmds["cmd"] == [
-        "sacct", "--allusers", "-X",
-        "-S", "2026-09-29T00:00:00", "-E", "2026-09-30T00:00:00",
-        "-o", ",".join(STATUS_FIELDS), "--parsable2", "--noheader"]
-    assert "-r" not in cmds["cmd"] and "--state" not in cmds["cmd"]
-    assert cmds["timeout"] == 120
+    assert [r["jobid"] for r in rows] == ["100", "9"]
+    base = ["sacct", "--allusers", "-X",
+            "-S", "2026-09-29T00:00:00", "-E", "2026-09-30T00:00:00"]
+    tail = ["-o", ",".join(STATUS_FIELDS), "--parsable2", "--noheader"]
+    assert cmds == [
+        (base + tail, 120),
+        (base + ["--state=CA,F,TO,OOM,NF,BF,DL,PR,RV"] + tail, 120),
+    ]
+    assert not any("-r" in cmd for cmd, _ in cmds)
 
 
 def test_queue_pending_command(monkeypatch):

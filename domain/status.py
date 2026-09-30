@@ -120,13 +120,21 @@ def _empty_cell():
 def reduce_chunk(records, lo, hi, now, live_ids):
     """Reduce one chunk's sacct status rows to hourly counters.
 
-    ``[lo, hi)`` are the chunk's epoch bounds. sacct returns every job
-    pending or running at any time inside them, so a job can appear in
-    several chunks; each EVENT is counted only in the chunk its
-    timestamp falls in, which makes summing chunks exact without any
-    JobID dedupe:
+    ``[lo, hi)`` are the chunk's epoch bounds; the chunk whose ``hi``
+    reaches ``now`` is the live edge. sacct returns a job in every chunk
+    from its eligible time on (``slurm.sacct_status``), so a job can
+    appear in several chunks; each EVENT is counted in exactly one of
+    them, which makes summing chunks exact without any JobID dedupe:
 
-    - submitted: Submit in the chunk, weighted by array tasks;
+    - submitted, weighted by array tasks and bucketed at the Submit
+      hour (which may belong to an earlier chunk — a throttled array
+      task can be submitted days before it is eligible, and sacct first
+      returns it where it became eligible): counted in the chunk holding
+      the job's Start, else its End, else — still pending — in the live
+      edge. Each of those is an event that has already happened, so a
+      cached past day is complete; and a pending array's range row
+      counts its remaining tasks only in the always-fresh edge, never
+      in a cached day its started tasks have since left;
     - started: Start in the chunk, with its Eligible -> Start queue
       wait as a sample (only when Eligible is known and not after
       Start);
@@ -143,14 +151,19 @@ def reduce_chunk(records, lo, hi, now, live_ids):
       rest are recorded as unverified.
 
     Returns ``{"lo", "hi", "records", "hours", "waits", "phantoms",
-    "unverified"}`` — hours maps an hour's epoch to per-class counters,
-    waits an hour's epoch to per-class ``array('l')`` samples, and the
-    last two are the raw IDs of stale and unverified running rows.
+    "unverified", "pending_ids"}`` — hours maps an hour's epoch to
+    per-class counters, waits an hour's epoch to per-class
+    ``array('l')`` samples, phantoms/unverified are the raw IDs of stale
+    and unverified running rows, and pending_ids (live edge only) the
+    raw IDs of the still-pending rows, which ``merge_history`` uses to
+    add the blocked jobs sacct cannot see without counting any twice.
     """
     hours = {}
     waits = {}
     phantoms = set()
     unverified = set()
+    pending_ids = set()
+    live_edge = hi >= now
     epoch_of = {}
 
     def epoch(text):
@@ -181,9 +194,17 @@ def reduce_chunk(records, lo, hi, now, live_ids):
         cls = job_class(r.get("gpus"))
         tasks = array_tasks(r.get("jobid"))
         submit = epoch(r.get("submit"))
-        if submit is not None and lo <= submit < hi:
-            cell(submit, cls)["submitted"] += tasks
         start = epoch(r.get("start"))
+        end = epoch(r.get("end"))
+        anchor = start if start is not None else end
+        if anchor is None:
+            owns_submit = live_edge
+            if live_edge:
+                pending_ids.add(r.get("jobid_raw") or r.get("jobid"))
+        else:
+            owns_submit = lo <= anchor < hi
+        if submit is not None and owns_submit:
+            cell(submit, cls)["submitted"] += tasks
         if start is not None and lo <= start < hi:
             cell(start, cls)["started"] += 1
             eligible = epoch(r.get("eligible"))
@@ -192,7 +213,6 @@ def reduce_chunk(records, lo, hi, now, live_ids):
                 per_hour = waits.setdefault(
                     hour, {c: array("l") for c in CLASSES})
                 per_hour[cls].append(int(start - eligible))
-        end = epoch(r.get("end"))
         state = base_state(r.get("state"))
         if (end is not None and lo <= end < hi
                 and state not in _NON_TERMINAL):
@@ -216,7 +236,8 @@ def reduce_chunk(records, lo, hi, now, live_ids):
         if b > a:
             hold(a, b, cls, r.get("ncpus") or 0, r.get("gpus") or 0)
     return {"lo": lo, "hi": hi, "records": len(records), "hours": hours,
-            "waits": waits, "phantoms": phantoms, "unverified": unverified}
+            "waits": waits, "phantoms": phantoms, "unverified": unverified,
+            "pending_ids": pending_ids}
 
 
 # ---- history: merge ---------------------------------------------------
@@ -249,13 +270,22 @@ def _summary(cells, samples):
     }
 
 
-def merge_history(chunks, start, now, total_chunks, running_verified):
+def merge_history(chunks, start, now, total_chunks, running_verified,
+                  pending=None):
     """Merge reduced chunks into the Status tab's history payload.
 
     ``start`` is the hour-aligned window start, ``now`` its end.
     ``chunks`` holds only the chunks that fetched; an hour no fetched
     chunk covers reads as null in every series (a gap, never a zero)
     and is left out of the summaries, which ``coverage`` discloses.
+
+    ``pending`` is the squeue pending snapshot (None when squeue is
+    unreadable). sacct never returns a job that has not become eligible
+    yet, so the pending jobs a dependency or hold still blocks — no
+    eligible time — are added to "submitted" from here, at their submit
+    hour, unless the live edge chunk already holds them. Without the live
+    edge (it failed) or squeue they cannot be deduplicated and are left
+    out, and ``coverage.blocked_pending_counted`` says so.
 
     The week window is the whole history, ``[start, now]``; the day
     window starts 24 hours before the current hour. Both include the
@@ -293,6 +323,21 @@ def merge_history(chunks, start, now, total_chunks, running_verified):
             merged = waits.setdefault(hour, {c: [] for c in CLASSES})
             for cls, samples in per_class.items():
                 merged[cls].extend(samples)
+    blocked_added = 0
+    edge = chunks[-1] if chunks and chunks[-1]["hi"] >= now else None
+    if pending is not None and edge is not None:
+        for j in pending:
+            if j.get("eligible") or j.get("jobid") in edge["pending_ids"]:
+                continue
+            submit = sacct_epoch(j["submit"]) if j.get("submit") else None
+            if submit is None or not start <= submit < now:
+                continue
+            hour = int(submit // HOUR) * HOUR
+            cls = job_class(max(j.get("gpus") or 0, j.get("req_gpus") or 0))
+            merged = hours.setdefault(hour, {c: _empty_cell() for c in CLASSES})
+            merged[cls]["submitted"] += j.get("array_tasks") or 1
+            blocked_added += 1
+
     # A row judged stale in one chunk and unverified in another (chunks
     # cached from fetches with and without the live job set) counts
     # once, as stale.
@@ -359,6 +404,8 @@ def merge_history(chunks, start, now, total_chunks, running_verified):
             "stale_running_rows": len(phantoms),
             "unverified_running_rows": len(unverified),
             "running_verified": running_verified,
+            "blocked_pending_counted": pending is not None and edge is not None,
+            "blocked_pending_jobs": blocked_added,
         },
     }
 

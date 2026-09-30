@@ -392,6 +392,11 @@ function renderHistory() {
       + "(scontrol unavailable), so the held-resources charts may include "
       + fmtInt(cov.unverified_running_rows) + " stale accounting rows.");
   }
+  if (!cov.blocked_pending_counted) {
+    notes.push("The pending queue could not be read, so jobs submitted but "
+      + "still blocked by a dependency or hold are missing from "
+      + "\u201csubmitted\u201d.");
+  }
   banner.hidden = !notes.length;
   banner.textContent = notes.join(" ");
   const w = d.windows;

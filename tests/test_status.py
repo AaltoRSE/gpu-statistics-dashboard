@@ -82,9 +82,74 @@ def test_reduce_chunk_attributes_each_event_to_its_hour():
     assert h[H0 + HR]["cpu"]["cpu_s"] == HR * 4 + HR
     assert h[H0 + 2 * HR]["cpu"]["cpu_s"] == 10 * M * 4 + HR
     assert h[H0 + 3 * HR]["cpu"]["cpu_s"] == HR
-    # nothing submitted or started outside [lo, hi) leaks in
-    assert sum(c["submitted"] for per in h.values() for c in per.values()) == 5
+    # the array cancelled while pending ended here, so its submission is
+    # this chunk's to count — at its submit hour, before the chunk
+    assert h[H0 - 2 * HR]["gpu"]["submitted"] == 2
+    # job 11 started before the chunk: its submission is another chunk's
+    assert sum(c["submitted"] for per in h.values() for c in per.values()) == 7
     assert out["records"] == 4
+    # the live edge remembers its pending rows for the squeue dedupe
+    assert out["pending_ids"] == {"7"}
+
+
+def test_submission_counts_once_where_the_job_first_shows_up():
+    # sacct returns a job from its eligible time on: a throttled array
+    # task submitted in chunk 1 but eligible (and started) in chunk 2 is
+    # absent from chunk 1's rows. Its submission must still count, once,
+    # at its submit hour.
+    task = row("50_3", "COMPLETED", H0 + HR, H0 + 5 * HR, H0 + 5 * HR,
+               H0 + 6 * HR, raw="53")
+    now = H0 + 8 * HR
+    first = status.reduce_chunk([], H0, H0 + 4 * HR, now, set())
+    second = status.reduce_chunk([task], H0 + 4 * HR, now, now, set())
+    merged = status.merge_history([first, second], H0, now, total_chunks=2,
+                                  running_verified=True)
+    assert merged["series"]["cpu"]["submitted"][:2] == [0, 1]
+    assert merged["summary"]["week"]["cpu"]["submitted"] == 1
+
+
+def test_pending_rows_count_only_in_the_live_edge():
+    # A pending array appears in every chunk since it became eligible;
+    # only the always-fresh edge counts its remaining tasks, so a cached
+    # past day never double-counts tasks that have since started.
+    pending = row("60_[4-9]", "PENDING", H0 + HR, H0 + HR, raw="60")
+    now = H0 + 30 * HR
+    past_day = status.reduce_chunk([pending], H0, H0 + 24 * HR, now, set())
+    edge = status.reduce_chunk([pending], H0 + 24 * HR, now, now, set())
+    merged = status.merge_history([past_day, edge], H0, now, total_chunks=2,
+                                  running_verified=True)
+    assert merged["summary"]["week"]["cpu"]["submitted"] == 6
+    assert past_day["pending_ids"] == set() and edge["pending_ids"] == {"60"}
+
+
+def test_blocked_pending_jobs_come_from_squeue_once():
+    now = H0 + 3 * HR
+    edge = status.reduce_chunk(
+        [row("70", "PENDING", H0 + 10 * M, H0 + 10 * M)], H0, now, now, set())
+    pending = [
+        # sacct already has it (eligible): not added again
+        {"jobid": "70", "submit": _cluster_iso(H0 + 10 * M),
+         "eligible": _cluster_iso(H0 + 10 * M), "gpus": 0, "req_gpus": 0,
+         "array_tasks": 1},
+        # blocked by a dependency: sacct cannot see it — added
+        {"jobid": "71", "submit": _cluster_iso(H0 + HR + 5 * M), "eligible": "",
+         "gpus": 0, "req_gpus": 1, "array_tasks": 3},
+        # blocked, but submitted before the window: not a submission here
+        {"jobid": "72", "submit": _cluster_iso(H0 - HR), "eligible": "",
+         "gpus": 0, "req_gpus": 0, "array_tasks": 1},
+    ]
+    merged = status.merge_history([edge], H0, now, total_chunks=1,
+                                  running_verified=True, pending=pending)
+    week = merged["summary"]["week"]
+    assert (week["cpu"]["submitted"], week["gpu"]["submitted"]) == (1, 3)
+    assert merged["series"]["gpu"]["submitted"][1] == 3
+    assert merged["coverage"]["blocked_pending_counted"] is True
+    assert merged["coverage"]["blocked_pending_jobs"] == 1
+    # squeue unreadable: nothing added, and the coverage says so
+    merged = status.merge_history([edge], H0, now, total_chunks=1,
+                                  running_verified=True, pending=None)
+    assert merged["summary"]["week"]["gpu"]["submitted"] == 0
+    assert merged["coverage"]["blocked_pending_counted"] is False
 
 
 def test_reduce_chunk_running_rows_need_the_live_job_set():
@@ -336,6 +401,17 @@ def test_status_history_endpoint(client):
     assert held[1787896800] == 16.0   # 2026-08-28T09:00 local
     assert held[1787979600] == 16.0   # 2026-08-29T08:00, the next day
     assert held[1787983200] == 0.0    # 2026-08-29T09:00, timed out
+
+
+def test_status_history_counts_blocked_submissions_from_squeue(
+        client, monkeypatch):
+    monkeypatch.setattr(deps, "queue_pending", lambda: [
+        {"jobid": "800", "partition": "gpu-h200", "reason": "Dependency",
+         "submit": "2026-08-30T16:00:00", "eligible": "", "gpus": 1,
+         "req_gpus": 1, "array_tasks": 2}])
+    body = client.get("/api/status/history").json()
+    assert body["summary"]["day"]["gpu"]["submitted"] == 5 + 2
+    assert body["coverage"]["blocked_pending_jobs"] == 1
 
 
 def test_status_history_warm_and_refresh_fetch_counts(client, monkeypatch):

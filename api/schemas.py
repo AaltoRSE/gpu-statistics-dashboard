@@ -625,6 +625,14 @@ class StatusCoverage(BaseModel):
         description="Running rows counted without the live job set to "
                     "confirm them (scontrol unavailable).")
     running_verified: bool
+    blocked_pending_counted: bool = Field(
+        description="False when squeue (or the live-edge chunk) was "
+                    "unavailable: submissions still blocked by a "
+                    "dependency or hold — which sacct cannot see — are "
+                    "then missing from 'submitted'.")
+    blocked_pending_jobs: int = Field(
+        description="Pending jobs, never yet eligible, added to "
+                    "'submitted' from the squeue snapshot.")
 
 
 class StatusCapacity(BaseModel):

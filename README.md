@@ -40,7 +40,8 @@ jobs** (at least one GPU). Two panels load and fail independently.
   partition's nodes, cores, GPUs, running and pending jobs (a job listing
   several partitions is pending in each — not additive).
 - **Past 24 hours and past 7 days** (sacct, every partition): tiles and a
-  summary table of jobs submitted (array tasks count individually),
+  summary table of jobs submitted (array tasks count individually; jobs
+  still blocked by a dependency or hold come from the squeue snapshot),
   started, completed, **failed** (FAILED, OUT_OF_MEMORY, TIMEOUT,
   NODE_FAIL, BOOT_FAIL, DEADLINE), cancelled and other, and the mean /
   median / P90 **queue wait** — Eligible → Start, so time blocked by a
@@ -250,20 +251,28 @@ actually pull for one window read:
   300 s. The queue's wait history and the VRAM enrichment read the same
   dump; jobs it cannot enrich (e.g. array parents) fall back to a per-ID
   row cache (`KeyedBatchCache`, 300 s per ID, 1 h once terminal).
-- **Status history** — `sources.status_history` reads the past seven days
-  of every partition (`deps.sacct_status`, no `-r`) through the same
-  day-chunk loader as the dump above (edges fresh, full days cached 1 h),
-  but reduces each chunk to hourly CPU/GPU counters the moment it arrives:
-  a week is ~200k rows, and only the counters are cached (300 s
-  assembled). Each event — submit, start, end — counts in the chunk its
-  timestamp falls in, so overlapping chunk results sum exactly without a
-  JobID dedupe. sacct keeps stale "still running" rows for jobs that died
-  without an accounting record; those are dropped against the live
-  `scontrol show job` set (read alongside the chunks), with a 30-day age
-  cut-off and a coverage flag when scontrol is down. A total sacct outage
-  is never cached. The Status tab's live panel reads the shared scontrol
-  snapshots plus a 30 s squeue snapshot (`sources.pending_jobs`; the
-  Partitions queue keeps re-reading squeue per request).
+- **Status history** — `sources.status_history` reads the past seven days of
+  every partition (`deps.sacct_status`, no `-r`) through the same day-chunk
+  loader as the dump above (edges fresh, full days cached 1 h), but reduces
+  each chunk to hourly CPU/GPU counters the moment it arrives: a week is
+  ~200k rows, and only the counters are cached (300 s assembled). Every
+  event is counted in exactly one chunk, so overlapping chunk results sum
+  exactly without a JobID dedupe: a start or an end in the chunk its
+  timestamp falls in; a submission (bucketed at its submit hour) in the
+  chunk holding the job's start, else its end, else — still pending — the
+  always-fresh edge chunk, because sacct selects by *eligible* time and a
+  throttled array task can be submitted days before sacct first returns it.
+  Jobs that never became eligible are invisible to that selection: a second,
+  cheap `--state=CA,F,…` query per chunk (selection by end time) adds the
+  ones cancelled or failed while blocked, and the squeue snapshot adds the
+  ones still blocked (deduplicated against the edge chunk's pending rows).
+  sacct keeps stale "still running" rows for jobs that died without an
+  accounting record; those are dropped against the live `scontrol show job`
+  set (read alongside the chunks), with a 30-day age cut-off and a coverage
+  flag when scontrol is down. A total sacct outage is never cached. The
+  Status tab's live panel reads the shared scontrol snapshots plus a 30 s
+  squeue snapshot (`sources.pending_jobs`; the Partitions queue keeps
+  re-reading squeue per request).
 - **Fan-out** — each route gathers its independent sources concurrently
   (`sources.gather`), so no window fetch waits on another.
 - **Progress keys** — the dump's chunked fetch publishes
