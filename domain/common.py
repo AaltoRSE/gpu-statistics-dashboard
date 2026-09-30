@@ -6,7 +6,66 @@ used by jobs, partitions, vram, and every route's response body alike,
 so they have no single domain owner — they live here instead.
 """
 
+from datetime import datetime
+
 import deps
+from slurm import CLUSTER_TZ
+
+
+def sacct_epoch(value):
+    """A sacct Europe/Helsinki-naive string to epoch seconds; None when
+    missing/invalid.
+
+    sacct prints naive cluster-local (Europe/Helsinki) strings; interpret
+    them on that wall clock, never the process's (deployment hosts vary).
+    """
+    try:
+        naive = datetime.fromisoformat(value)
+    except (TypeError, ValueError):
+        return None
+    if naive.tzinfo is not None:
+        return naive.timestamp()
+    return naive.replace(tzinfo=CLUSTER_TZ).timestamp()
+
+
+def median(values):
+    """Ordinary median of a numeric list, empty input yielding None.
+
+    Odd count: the middle value. Even count: the mean of the two middle
+    values, rounded to an integer ONLY for integer inputs ([1, 2] -> 2,
+    not 1); float lists keep the exact mean (display rounding happens at
+    the caller).
+    """
+    ordered = sorted(values)
+    if not ordered:
+        return None
+    middle = len(ordered) // 2
+    if len(ordered) % 2:
+        return ordered[middle]
+    a, b = ordered[middle - 1], ordered[middle]
+    mean = (a + b) / 2
+    return round(mean) if isinstance(a, int) and isinstance(b, int) else mean
+
+
+def wait_percentiles(samples):
+    """Wait summary of a list of waits in seconds: P50, P90, average and
+    sample count, shared by the Partitions tab's completed-job waits and
+    the Status tab's queue waits.
+
+    P50 is the ordinary median (mean of the two middle waits when the
+    sample count is even, integer-rounded). P90 is nearest-rank
+    (ceil(0.90 * n)), so the reported percentile is always an observed
+    wait. No samples reads as null figures with a 0 count — never a
+    zero wait.
+    """
+    ordered = sorted(samples)
+    if not ordered:
+        return {"wait_p50_s": None, "wait_p90_s": None,
+                "wait_avg_s": None, "wait_samples": 0}
+    p90 = ordered[-(-9 * len(ordered) // 10) - 1]
+    return {"wait_p50_s": median(ordered), "wait_p90_s": p90,
+            "wait_avg_s": round(sum(ordered) / len(ordered)),
+            "wait_samples": len(ordered)}
 
 
 def step_for_range(seconds):

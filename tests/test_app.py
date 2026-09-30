@@ -316,10 +316,9 @@ def client(fake_prom):
 
 def _epoch(s):
     # sacct/squeue strings are Europe/Helsinki-naive (the cluster wall
-    # clock); interpret them the way domain._sacct_epoch does, not on
-    # the process TZ.
-    from domain.partitions import _sacct_epoch
-    return _sacct_epoch(s)
+    # clock); interpret them the way domain.common.sacct_epoch does, not
+    # on the process TZ.
+    return domain.common.sacct_epoch(s)
 
 
 def test_health(client):
@@ -908,10 +907,10 @@ def test_wait_statistics_percentiles():
                    "wait_avg_s": None, "wait_samples": 0,
                    "wait_per_gpu_hour_weighted": None}
     # even ints -> rounded mean, floats keep precision
-    assert dp._median([]) is None
-    assert dp._median([10, 20, 30]) == 20
-    assert dp._median([1, 2]) == 2
-    assert dp._median([0.5, 1.5]) == 1.0
+    assert domain.common.median([]) is None
+    assert domain.common.median([10, 20, 30]) == 20
+    assert domain.common.median([1, 2]) == 2
+    assert domain.common.median([0.5, 1.5]) == 1.0
 
 
 def test_started_wait_summary_excludes_invalid_records(client, fake_prom,
