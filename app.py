@@ -14,7 +14,7 @@ from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from api import health, jobs, nodes, partitions, spa, users
+from api import health, jobs, nodes, partitions, spa, status, users
 from prom import PrometheusError
 from slurm import SlurmError
 
@@ -37,6 +37,7 @@ def slurm_error_handler(request, exc):
 
 
 app.include_router(health.router)
+app.include_router(status.router)
 app.include_router(jobs.router)
 app.include_router(users.router)
 app.include_router(partitions.router)

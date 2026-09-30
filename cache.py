@@ -309,6 +309,32 @@ def day_chunk_key(day_start_iso):
     return ("sacct_day_chunk", day_start_iso)
 
 
+def squeue_pending_key():
+    """The Status tab's 30 s squeue pending snapshot. The Partitions
+    queue deliberately re-reads squeue per request and never uses it."""
+    return ("squeue_pending",)
+
+
+def status_history_key():
+    """The Status tab's assembled seven-day history, cached 300 s."""
+    return ("status_history",)
+
+
+def status_day_key(day_start_iso):
+    """One full past day of the Status tab's cluster-wide history,
+    already reduced to hourly counters, cached 1 h. Full past days are
+    immutable once their midnight passes; the edge chunks are never
+    cached here."""
+    return ("status_day_chunk", day_start_iso)
+
+
+def status_progress_key():
+    """The Status history fetch's progress-store key, read by
+    /api/status/history/progress. The history has one window, so one
+    key."""
+    return ("status_progress",)
+
+
 progress_store = {}
 """Latest batched accounting progress, keyed per fetch scope.
 

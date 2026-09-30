@@ -21,7 +21,8 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import cache
 import deps
 import gpu_groups
-from domain.common import step_for_range
+from domain import status
+from domain.common import sacct_epoch, step_for_range
 from slurm import CLUSTER_TZ, SlurmError
 
 # The per-GPU raw series every Jobs/Users/partition view derives from
@@ -412,6 +413,87 @@ def sacct_window(since_hours, progress=None, progress_key=None):
 
     return deps.route_cache.get_or_set(
         cache.sacct_window_key(since_hours), 300, fetch)
+
+
+def pending_jobs():
+    """The 30 s-cached squeue pending snapshot the Status tab reads.
+
+    The Partitions queue calls ``deps.queue_pending`` per request on
+    purpose (a window change must re-read the live queue); the Status
+    tab has no window and auto-refreshes, so it shares one snapshot per
+    30 s instead of running squeue for every viewer on every tick.
+    """
+    return deps.route_cache.get_or_set(
+        cache.squeue_pending_key(), 30, deps.queue_pending)
+
+
+def status_history(progress_key=None):
+    """The Status tab's cluster-wide job history: the past seven days,
+    hour-aligned, reduced to hourly CPU/GPU counters.
+
+    The window ``[floor_hour(now) - 168 h, now]`` is fetched as
+    Helsinki-midnight chunks through ``_load_day_chunks`` (edges fresh,
+    full past days cached 1 h), each chunk reduced by
+    ``domain.status.reduce_chunk`` the moment it arrives — only the
+    reduced counters are cached, never a week's ~170k raw rows. The
+    live running-job IDs (the 30 s scontrol job snapshot) let the
+    reduction drop sacct's stale "still running" rows; when scontrol is
+    unreadable the reduction falls back to an age cut-off and the
+    coverage says so.
+
+    Raises ``SlurmError`` when every chunk failed, so a total outage is
+    never cached as an empty week; a partial failure is cached (300 s)
+    with its gaps disclosed in ``coverage``.
+    """
+
+    def live_running_ids():
+        try:
+            return {
+                jobid for jobid, job in scontrol_jobs().items()
+                if status.base_state(job.get("state")) in ("RUNNING",
+                                                           "COMPLETING")}
+        except SlurmError:
+            return None
+
+    def fetch():
+        now = deps.now()
+        start = int(now) // status.HOUR * status.HOUR \
+            - status.HISTORY_HOURS * status.HOUR
+        chunks = _helsinki_chunks(_local(start), _local(now))
+        first_iso = chunks[0][0].isoformat(timespec="seconds")
+        last_iso = chunks[-1][1].isoformat(timespec="seconds")
+        # The scontrol job snapshot (seconds on a busy controller) runs
+        # alongside the sacct chunks; a chunk waits for it only once its
+        # own rows are in hand and it reaches the reduction.
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            live = pool.submit(live_running_ids)
+
+            def fetch_chunk(chunk_start_iso, chunk_end_iso):
+                # The window's own bounds are epochs already; converting
+                # them back from local wall-clock text could land on the
+                # wrong side of a DST fold. Midnights are never
+                # ambiguous.
+                lo = (start if chunk_start_iso == first_iso
+                      else sacct_epoch(chunk_start_iso))
+                hi = (now if chunk_end_iso == last_iso
+                      else sacct_epoch(chunk_end_iso))
+                records = deps.sacct_status(chunk_start_iso, chunk_end_iso)
+                return status.reduce_chunk(
+                    records, lo, hi, now, live.result())
+
+            results, _failed, _ok = _load_day_chunks(
+                chunks, fetch_chunk, cache.status_day_key,
+                progress_key=progress_key)
+            live_ids = live.result()
+        if not results:
+            raise SlurmError("every sacct history chunk failed")
+        return status.merge_history(
+            [results[i] for i in sorted(results)], start, now,
+            total_chunks=len(chunks),
+            running_verified=live_ids is not None)
+
+    return deps.route_cache.get_or_set(
+        cache.status_history_key(), 300, fetch)
 
 
 _NON_TERMINAL_STATES = frozenset({
