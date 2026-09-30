@@ -1,9 +1,9 @@
 /* Tab switching, shareable deep links (/job/<id>, /node/<name>,
- * /partition/<name>, /user/<name>, and the plain /jobs, /partitions,
- * /users, /nodes) and the cross-tab navigation helpers (openJob, openUser,
- * openNode, openPartition) that every tab module calls to jump to another
- * tab. rerenderAllPlots is the theme-toggle re-render sweep across all four
- * tabs.
+ * /partition/<name>, /user/<name>, and the plain /status, /jobs,
+ * /partitions, /users, /nodes) and the cross-tab navigation helpers
+ * (openJob, openUser, openNode, openPartition) that every tab module calls
+ * to jump to another tab. rerenderAllPlots is the theme-toggle re-render
+ * sweep across all five tabs.
  *
  * This module imports every tab module, and every tab module imports this
  * one back (for openJob/openUser/openNode/openPartition, setUrl and the
@@ -15,19 +15,25 @@
 "use strict";
 
 import { $ } from "./dom.js";
+import * as statusTab from "../tabs/status.js";
 import * as jobsTab from "../tabs/jobs.js";
 import * as usersTab from "../tabs/users.js";
 import * as partitionsTab from "../tabs/partitions.js";
 import * as nodesTab from "../tabs/nodes.js";
 
-export const loaded = { jobs: false, partitions: false, users: false, nodes: false };
+export const loaded = {
+  status: false, jobs: false, partitions: false, users: false, nodes: false,
+};
 
 // PLAN-1 3.4: document.title was the same string on every route despite
 // real per-tab URLs already existing (/jobs, /partitions, /users, /nodes,
 // and the job/node/user/partition deep links, which all resolve to one of
 // these four tabs). Every route funnels through showTab, so setting it
 // here covers all of them in one place.
-const TAB_TITLES = { jobs: "Jobs", partitions: "Partitions", users: "Users", nodes: "Nodes" };
+const TAB_TITLES = {
+  status: "Status", jobs: "Jobs", partitions: "Partitions", users: "Users",
+  nodes: "Nodes",
+};
 
 export function showTab(name) {
   document.querySelectorAll("nav.tabs button").forEach((b) =>
@@ -36,6 +42,7 @@ export function showTab(name) {
     p.classList.toggle("active", p.id === "tab-" + name));
   document.title = (TAB_TITLES[name] || "Dashboard") + " — Triton GPU Efficiency Dashboard";
   let p = Promise.resolve();
+  if (name === "status" && !loaded.status) p = statusTab.loadStatus();
   if (name === "jobs" && !loaded.jobs) p = jobsTab.loadJobs();
   if (name === "partitions" && !loaded.partitions) p = partitionsTab.loadPartitions();
   if (name === "users" && !loaded.users) p = usersTab.loadUsers();
@@ -100,6 +107,7 @@ export function restoreFromUrl() {
   }
   m = location.pathname.match(/^\/partition\/([^/]+)\/?$/);
   if (m) { openPartition(decodeURIComponent(m[1])); return; }
+  if (location.pathname === "/status") { showTab("status"); return; }
   if (location.pathname === "/jobs") { showTab("jobs"); return; }
   if (location.pathname === "/partitions") {
     clearPartitionSelection();
@@ -132,13 +140,15 @@ export function refreshActiveTab() {
   if (!active) return;
   if (active.querySelector(".results-panel.loading")) return;
   const name = active.id.replace(/^tab-/, "");
-  if (name === "jobs") jobsTab.loadJobs();
+  if (name === "status") statusTab.loadStatus();
+  else if (name === "jobs") jobsTab.loadJobs();
   else if (name === "partitions") partitionsTab.loadPartitions();
   else if (name === "users") usersTab.loadUsers();
   else if (name === "nodes") nodesTab.loadNodes();
 }
 
 export function rerenderAllPlots() {
+  statusTab.renderStatusPlots();
   if (loaded.jobs) {
     jobsTab.renderJobEfficiency();
     jobsTab.renderJobsView();

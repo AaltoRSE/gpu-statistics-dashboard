@@ -417,3 +417,4 @@ def test_status_history_without_scontrol_flags_unverified(client, monkeypatch):
 def test_status_deep_link_serves_the_shell(client):
     resp = client.get("/status")
     assert resp.status_code == 200
+    assert 'id="tab-status"' in resp.text

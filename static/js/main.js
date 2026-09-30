@@ -1,5 +1,5 @@
 /* Entry point: theme + health-check bootstrap, tab-nav wiring, and the
- * initial view (deep link or the Jobs tab). Importing the tab modules for
+ * initial view (deep link or the Status tab). Importing the tab modules for
  * their side effects (each wires its own DOM listeners at import time) is
  * what actually builds the page; this file just sequences startup. */
 "use strict";
@@ -15,6 +15,7 @@ import {
   refreshActiveTab,
 } from "./core/router.js";
 
+import "./tabs/status.js";
 import "./tabs/jobs.js";
 import "./tabs/users.js";
 import "./tabs/partitions.js";
@@ -50,9 +51,9 @@ document.querySelectorAll("nav.tabs button").forEach((b) =>
 
 checkHealth();
 if (location.pathname === "/" || location.pathname === "") {
-  // showTab (not loadJobs directly) so the root path also gets the
+  // showTab (not loadStatus directly) so the root path also gets the
   // per-tab document.title set for it, the same as every other route.
-  showTab("jobs");
+  showTab("status");
 } else {
   restoreFromUrl();
 }
