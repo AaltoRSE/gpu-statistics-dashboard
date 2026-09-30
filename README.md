@@ -1,25 +1,64 @@
 # Triton GPU Efficiency Dashboard
 
-Live admin dashboard for tracking **jobs**, **partitions**, and **nodes** GPU
-efficiency on the Triton cluster. A FastAPI backend collects data **on demand**
+Live admin dashboard for the Triton cluster's **status** (occupancy, queue
+and job throughput, cluster-wide) and for tracking **jobs**, **partitions**,
+and **nodes** GPU efficiency. A FastAPI backend collects data **on demand**
 (queried live while the admin works with the dashboard — no periodic
 collection) from:
 
 - **`sacct`** — job metadata (name, user, state, start/end, GPU allocation)
-- **`scontrol`** — node state and GPU capacity
+  and the Status tab's cluster-wide job history
+- **`scontrol`** — node state, CPU and GPU capacity, running jobs
 - **`squeue`** — the pending-job queue (`-t PD`) behind the Partitions tab's
-  queue status
+  queue status and the Status tab's pending jobs
 - **Prometheus** (`stats.triton.aalto.fi`) — `slurm_job_*` exporter metrics:
   per-GPU utilization and VRAM, live and historical
 
-The frontend is a plain-JS single page (Plotly.js via CDN) with three
-interactive tabs.
+The frontend is a plain-JS single page (Plotly.js via CDN) with five
+interactive tabs; `/` opens the Status tab.
 
 A **light/dark theme** toggle sits in the header (top right). Dark is the
 default; the light preference is remembered in `localStorage` and the
 OS-level preference applies when no choice has been saved.
 
 ## Features
+
+### Status tab
+The cluster at a glance — every partition, CPU and GPU alike — with every
+job figure split into **CPU jobs** (no GPU requested or held) and **GPU
+jobs** (at least one GPU). Two panels load and fail independently.
+
+- **Right now** (scontrol + squeue, 30 s snapshots): core and GPU
+  occupancy (allocated / total over every node, the `sinfo %C` figure;
+  unallocated capacity on down or draining nodes is *unavailable*),
+  running jobs, pending jobs (a pending array counts once, its array
+  tasks alongside; *eligible* jobs wait for resources or priority,
+  *blocked* ones on a dependency or hold), how long the eligible ones
+  have waited so far, and unavailable nodes. A stacked bar shows cores
+  and GPUs allocated / idle / unavailable, a bar chart why jobs are
+  waiting (pending reason, CPU vs GPU), and a sortable table each
+  partition's nodes, cores, GPUs, running and pending jobs (a job listing
+  several partitions is pending in each — not additive).
+- **Past 24 hours and past 7 days** (sacct, every partition): tiles and a
+  summary table of jobs submitted (array tasks count individually),
+  started, completed, **failed** (FAILED, OUT_OF_MEMORY, TIMEOUT,
+  NODE_FAIL, BOOT_FAIL, DEADLINE), cancelled and other, and the mean /
+  median / P90 **queue wait** — Eligible → Start, so time blocked by a
+  dependency, a hold or an array throttle does not count as wait (the
+  Partitions tab's columns measure Submit → Start). Charts: jobs per hour
+  by outcome with the submitted line (All / CPU / GPU toggle, no fetch),
+  cores held stacked by class and GPUs held against today's capacity,
+  and hourly median queue wait (means one legend click away). A
+  final-state table breaks the outcomes down, and an *Hourly data* table
+  holds the numbers behind the charts. Windows are hour-aligned and
+  include the current hour.
+- **Never a fake zero** — a source that cannot be read renders as
+  unavailable (a dead squeue is not an empty queue, a dead sacct is not
+  an idle week), and history hours from a day chunk that failed are gaps,
+  disclosed in a banner.
+- **Refresh** re-reads the scontrol/squeue snapshots and re-assembles the
+  history (its two edge day chunks re-fetch; full past days stay cached).
+  A cold history load shows its day-chunk batch progress on the chip.
 
 ### Jobs tab
 - Job table (top N by effective GPU-hours in the window, **N configurable**
@@ -120,9 +159,9 @@ OS-level preference applies when no choice has been saved.
 - Shareable URLs: `/job/<id>` (Jobs tab + job detail), `/node/<name>`
   (Nodes tab + node detail), `/partition/<name>` (Partitions tab scoped
   to that partition — trend and VRAM), `/user/<name>` (Users tab with
-  that user's jobs fetched), plus `/jobs`, `/partitions`, `/users`,
-  `/nodes` for the plain tabs (plain `/partitions` clears any partition
-  selection).
+  that user's jobs fetched), plus `/status`, `/jobs`, `/partitions`,
+  `/users`, `/nodes` for the plain tabs (plain `/partitions` clears any
+  partition selection). `/` opens the Status tab.
 - Cross-tab links: in the **Jobs** and **Users** job tables the **User**,
   **Partition**, and **Node** cells link to the Users, Partitions, and
   Nodes tabs respectively; in the **Nodes** tab each node name links to
@@ -154,8 +193,10 @@ Prometheus connection settings are read in this order:
 
 Cluster access is **strictly read-only**: the app uses explicit `sacct -j`
 lookups for job metadata, a bounded `sacct --allusers -X -S … -E …`
-query for completed-job wait statistics, `scontrol show nodes`, `squeue -t PD`,
-and Prometheus read queries.
+query for completed-job wait statistics, a bounded all-partition
+`sacct --allusers -X -S … -E …` query per day for the Status tab's history,
+`scontrol show nodes` / `show job`, `squeue -t PD`, and Prometheus read
+queries.
 
 ## API
 
@@ -170,6 +211,9 @@ and Prometheus read queries.
 | `GET /api/partitions/vram/progress?since_hours=&running_only=&partition=` | transient batch progress `{done, total, failed_batches}` of the window's in-flight sacct dump, or `null` when nothing is in flight (finished, cached, or failed). Keyed by the window only — the enrichment reads the same window-wide dump as the queue's wait history, so this poll and the queue's progress poll return the same batch state |
 | `GET /api/nodes?gpu_only=&refresh=` | node states (state/reason from `scontrol show node`) + live utilization/VRAM + active jobs (`refresh=true` bypasses the 30 s cache) |
 | `GET /api/nodes/{name}?view=job_start\|1\|6\|24` | per-GPU utilization/VRAM series for one node (`job_start` = since the earliest active job started) |
+| `GET /api/status/live?refresh=` | the cluster right now: `cpu`/`gpu` capacity (`alloc`, `idle`, `unavailable`, `total`, `occupancy_pct`), `nodes` (total, unavailable, by state), `running` and `pending` keyed `cpu`/`gpu` (pending: jobs, array tasks, eligible vs blocked, eligible age), `pending_reasons` and per-`partitions` rows. Each source has an `*_available` flag; its figures are null — never 0 — when it failed. `refresh=true` drops the 30 s scontrol/squeue snapshots |
+| `GET /api/status/history?refresh=` | the past seven days, every partition: hourly `series` per class (submitted, completed/failed/cancelled/other, wait mean and P50, average cores and GPUs held; null for an hour no chunk covered), `summary[day\|week][cpu\|gpu\|all]` (counts, final `states`, `wait_avg_s`/`wait_p50_s`/`wait_p90_s` Eligible → Start), exact `windows`, `coverage` (failed chunks, stale running rows excluded) and today's `capacity`. `available: false` (still 200) when sacct could not be read at all. `refresh=true` re-assembles it; full past days stay cached |
+| `GET /api/status/history/progress` | batch progress `{done, total, failed_batches}` of an in-flight history fetch (one batch per day chunk), or `null` |
 
 Short in-memory TTL caches (20–300 s, at both the app and Prometheus-client
 layers) avoid re-hitting the same query while the admin drags filters around.
@@ -206,13 +250,28 @@ actually pull for one window read:
   300 s. The queue's wait history and the VRAM enrichment read the same
   dump; jobs it cannot enrich (e.g. array parents) fall back to a per-ID
   row cache (`KeyedBatchCache`, 300 s per ID, 1 h once terminal).
+- **Status history** — `sources.status_history` reads the past seven days
+  of every partition (`deps.sacct_status`, no `-r`) through the same
+  day-chunk loader as the dump above (edges fresh, full days cached 1 h),
+  but reduces each chunk to hourly CPU/GPU counters the moment it arrives:
+  a week is ~200k rows, and only the counters are cached (300 s
+  assembled). Each event — submit, start, end — counts in the chunk its
+  timestamp falls in, so overlapping chunk results sum exactly without a
+  JobID dedupe. sacct keeps stale "still running" rows for jobs that died
+  without an accounting record; those are dropped against the live
+  `scontrol show job` set (read alongside the chunks), with a 30-day age
+  cut-off and a coverage flag when scontrol is down. A total sacct outage
+  is never cached. The Status tab's live panel reads the shared scontrol
+  snapshots plus a 30 s squeue snapshot (`sources.pending_jobs`; the
+  Partitions queue keeps re-reading squeue per request).
 - **Fan-out** — each route gathers its independent sources concurrently
   (`sources.gather`), so no window fetch waits on another.
 - **Progress keys** — the dump's chunked fetch publishes
   `{done, total, failed_batches}` to `cache.progress_store` under one
   window-scoped key (`cache.vram_progress_key`) that both progress polls
-  read; only the cache-miss leader writes it, and a finished or failed
-  fetch always clears it.
+  read, and the Status history under `cache.status_progress_key`; only
+  the cache-miss leader writes a key, and a finished or failed fetch
+  always clears it.
 
 ## Data semantics (important)
 
@@ -224,6 +283,13 @@ actually pull for one window read:
   allocation dump — one bounded `sacct --allusers -X -S … -E …` query per
   Helsinki-day chunk of the window (see Data flow), so short completed jobs
   are not lost between Prometheus scrapes.
+- The Status tab is cluster-wide, not GPU-only: a **GPU job** is one whose
+  sacct ReqTRES or AllocTRES (squeue `tres_req_str`, scontrol AllocTRES)
+  names at least one GPU, whatever partition it ran in; everything else
+  is a CPU job. Its **queue wait** is Eligible → Start, while the
+  Partitions tab's completed-job waits are Submit → Start — on Triton the
+  two differ by several hours on average, because dependency chains and
+  throttled arrays sit in the queue long before they are eligible.
 
 ## Tests
 
