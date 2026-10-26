@@ -279,7 +279,9 @@ def test_sacct_window_chunks_dedupe_and_progress(monkeypatch):
     states = []
     records, coverage, start, end = sources.sacct_window(
         36, progress=states.append, progress_key=("k", 36))
-    assert calls == [
+    # Chunks run concurrently, so the fetch order is not part of the
+    # contract; results are joined by chunk index, not arrival order.
+    assert sorted(calls) == [
         ("2026-09-22T03:30:00", "2026-09-23T00:00:00",
          ["gpu-debug", "gpu-h200"]),
         ("2026-09-23T00:00:00", "2026-09-23T15:30:00",
@@ -358,8 +360,9 @@ def test_sacct_window_expiry_refetches_edges_keeps_past_day(monkeypatch):
 
     records, coverage, start, end = sources.sacct_window(
         48, progress_key=("k", 48))
-    # 48 h back from NOW lands on 2026-09-21T15:30: edge, full day, edge.
-    assert calls == [
+    # 48 h back from NOW lands on 2026-09-21T15:30: edge, full day, edge
+    # (fetched concurrently, in no guaranteed order).
+    assert sorted(calls) == [
         ("2026-09-21T15:30:00", "2026-09-22T00:00:00"),
         ("2026-09-22T00:00:00", "2026-09-23T00:00:00"),
         ("2026-09-23T00:00:00", "2026-09-23T15:30:00"),

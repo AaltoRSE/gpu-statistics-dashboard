@@ -21,7 +21,8 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import cache
 import deps
 import gpu_groups
-from domain.common import step_for_range
+from domain import status
+from domain.common import sacct_epoch, step_for_range
 from slurm import CLUSTER_TZ, SlurmError
 
 # The per-GPU raw series every Jobs/Users/partition view derives from
@@ -265,21 +266,109 @@ def _helsinki_chunks(start_local, end_local):
     return chunks
 
 
+def _load_day_chunks(chunks, fetch_chunk, day_key, progress_key=None,
+                     progress=None):
+    """Fetch day-aligned chunks in parallel: the two edges fresh, full
+    past days through a 1 h per-day cache.
+
+    ``chunks`` are ``_helsinki_chunks`` bounds; ``fetch_chunk(start_iso,
+    end_iso)`` fetches one of them and ``day_key(start_iso)`` names a
+    full past day's cache entry. Only the edge chunks (first and last —
+    the ones touching the moving window bounds, so running jobs' state
+    must be current) are always fetched fresh; full past days are
+    immutable and shared through the per-day cache. Chunks run on four
+    workers, each retried once on ``SlurmError``; a chunk that fails
+    twice is counted, never allowed to discard the others.
+
+    Progress (``{"done", "total", "failed_batches"}``) is seeded at
+    ``done=0``, replaced after every finished chunk, and — under
+    ``progress_key`` in ``cache.progress_store`` — cleared in a
+    ``finally``, failed fetches included: a stale in-flight entry would
+    otherwise read as live progress on every later poll.
+
+    Returns ``(results, failed_batches, successful_batches)`` where
+    ``results`` maps chunk index -> that chunk's fetched value.
+    """
+    total = len(chunks)
+
+    def report(done, failed):
+        state = {"done": done, "total": total, "failed_batches": failed}
+        if progress_key is not None:
+            cache.progress_store[progress_key] = state
+        if progress is not None:
+            progress(state)
+
+    def fetch_fresh(chunk_start_iso, chunk_end_iso):
+        # One retry on SlurmError, then the chunk counts as failed.
+        for attempt in range(2):
+            try:
+                return fetch_chunk(chunk_start_iso, chunk_end_iso)
+            except SlurmError:
+                if attempt:
+                    raise
+
+    def load_chunk(index):
+        chunk_start, chunk_end = chunks[index]
+        chunk_start_iso = chunk_start.isoformat(timespec="seconds")
+        chunk_end_iso = chunk_end.isoformat(timespec="seconds")
+        is_edge = index == 0 or index == total - 1
+
+        def fresh():
+            return fetch_fresh(chunk_start_iso, chunk_end_iso)
+
+        if is_edge:
+            return fresh()
+        return deps.route_cache.get_or_set(
+            day_key(chunk_start_iso), 3600, fresh)
+
+    try:
+        # Seed both publishers with the initial batched-progress state
+        # (done=0), the same shape the resilient per-ID batches report.
+        report(0, 0)
+        results = {}
+        failed_batches = successful_batches = 0
+        if chunks:
+            with ThreadPoolExecutor(max_workers=min(4, total)) as pool:
+                futures = {pool.submit(load_chunk, i): i
+                           for i in range(total)}
+                done = 0
+                for future in as_completed(futures):
+                    index = futures[future]
+                    try:
+                        value = future.result()
+                    except SlurmError:
+                        value = None
+                    done += 1
+                    if value is None:
+                        failed_batches += 1
+                    else:
+                        successful_batches += 1
+                        results[index] = value
+                    report(done, failed_batches)
+        return results, failed_batches, successful_batches
+    finally:
+        if progress_key is not None:
+            cache.progress_store.pop(progress_key, None)
+
+
+def _local(epoch):
+    """Epoch seconds to a naive Europe/Helsinki datetime (sacct's clock)."""
+    return datetime.datetime.fromtimestamp(
+        epoch, CLUSTER_TZ).replace(tzinfo=None)
+
+
 def sacct_window(since_hours, progress=None, progress_key=None):
     """One window-wide sacct allocation dump, shared by wait history and
     VRAM enrichment (plan §3).
 
     Instead of every route running its own ``sacct`` calls, the window's
     allocations are fetched once as day-aligned chunks (Helsinki
-    midnights): the two edge chunks — which touch the moving window
-    bounds, so running jobs' Elapsed/State must be current — are always
+    midnights, ``_load_day_chunks``): the two edge chunks are always
     fetched fresh when the 300 s window entry expires, while full past
-    days are immutable and cached per day for 1 h, shared across every
-    window size that covers them. Chunks run on four workers, each
-    retried once; a chunk that fails twice is counted in the coverage
-    without discarding the others. A job spanning midnight appears in
-    both chunks; its final state lives in the later chunk, so duplicates
-    are dropped by JobID keeping the NEWEST chunk's row.
+    days are cached per day for 1 h, shared across every window size
+    that covers them. A job spanning midnight appears in both chunks;
+    its final state lives in the later chunk, so duplicates are dropped
+    by JobID keeping the NEWEST chunk's row.
 
     Returns ``(records, coverage, start, end)`` where start/end are the
     epoch bounds actually fetched — cached alongside the records so a
@@ -295,102 +384,126 @@ def sacct_window(since_hours, progress=None, progress_key=None):
     def fetch():
         now = deps.now()
         start, end = now - since_hours * 3600, now
-        start_local = datetime.datetime.fromtimestamp(
-            start, CLUSTER_TZ).replace(tzinfo=None)
-        end_local = datetime.datetime.fromtimestamp(
-            end, CLUSTER_TZ).replace(tzinfo=None)
-        chunks = _helsinki_chunks(start_local, end_local)
+        chunks = _helsinki_chunks(_local(start), _local(end))
         # GPU partitions only, from the cached scontrol snapshot: CPU
         # jobs never enter the dump (plan §3). An empty list omits -r.
         partitions = sorted(gpu_groups.partition_gpu_types(scontrol_nodes()))
-        total = len(chunks)
 
-        if progress_key is not None:
-            cache.progress_store[progress_key] = {
-                "done": 0, "total": total, "failed_batches": 0}
+        def fetch_chunk(chunk_start_iso, chunk_end_iso):
+            return deps.sacct_allocations(
+                chunk_start_iso, chunk_end_iso, partitions)
 
-        def report(done, failed):
-            state = {"done": done, "total": total, "failed_batches": failed}
-            if progress_key is not None:
-                cache.progress_store[progress_key] = state
-            if progress is not None:
-                progress(state)
-
-        # Seed both publishers with the initial batched-progress state
-        # (done=0), the same shape the resilient per-ID batches report.
-        report(0, 0)
-
-        def fetch_fresh(chunk_start_iso, chunk_end_iso):
-            # One retry on SlurmError, then the chunk counts as failed.
-            for attempt in range(2):
-                try:
-                    return deps.sacct_allocations(
-                        chunk_start_iso, chunk_end_iso, partitions)
-                except SlurmError:
-                    if attempt:
-                        raise
-
-        def load_chunk(index):
-            chunk_start, chunk_end = chunks[index]
-            chunk_start_iso = chunk_start.isoformat(timespec="seconds")
-            chunk_end_iso = chunk_end.isoformat(timespec="seconds")
-            # Only the two edge chunks (first and last — the ones touching
-            # the moving window bounds) are fetched fresh; full past days
-            # are immutable and shared through the per-day cache.
-            is_edge = index == 0 or index == total - 1
-
-            def fresh():
-                return fetch_fresh(chunk_start_iso, chunk_end_iso)
-
-            if is_edge:
-                return fresh()
-            return deps.route_cache.get_or_set(
-                cache.day_chunk_key(chunk_start_iso), 3600, fresh)
-
-        try:
-            results = {}
-            failed_batches = successful_batches = 0
-            if chunks:
-                with ThreadPoolExecutor(
-                        max_workers=min(4, total)) as pool:
-                    futures = {pool.submit(load_chunk, i): i
-                               for i in range(total)}
-                    done = 0
-                    for future in as_completed(futures):
-                        index = futures[future]
-                        try:
-                            records = future.result()
-                        except SlurmError:
-                            records = None
-                        done += 1
-                        if records is None:
-                            failed_batches += 1
-                        else:
-                            successful_batches += 1
-                            results[index] = records
-                        report(done, failed_batches)
-            # Newest chunk wins: a midnight-spanning job's final State and
-            # Elapsed live in the later chunk that contains its end.
-            records, seen = [], set()
-            for index in sorted(results, reverse=True):
-                for record in results[index]:
-                    if record["jobid"] not in seen:
-                        seen.add(record["jobid"])
-                        records.append(record)
-            coverage = {
-                "failed_batches": failed_batches,
-                "successful_batches": successful_batches,
-                "complete": failed_batches == 0,
-            }
-            return records, coverage, start, end
-        finally:
-            # Failed fetches clear too: a stale in-flight entry would
-            # otherwise read as live progress on every later poll.
-            if progress_key is not None:
-                cache.progress_store.pop(progress_key, None)
+        results, failed_batches, successful_batches = _load_day_chunks(
+            chunks, fetch_chunk, cache.day_chunk_key,
+            progress_key=progress_key, progress=progress)
+        # Newest chunk wins: a midnight-spanning job's final State and
+        # Elapsed live in the later chunk that contains its end.
+        records, seen = [], set()
+        for index in sorted(results, reverse=True):
+            for record in results[index]:
+                if record["jobid"] not in seen:
+                    seen.add(record["jobid"])
+                    records.append(record)
+        coverage = {
+            "failed_batches": failed_batches,
+            "successful_batches": successful_batches,
+            "complete": failed_batches == 0,
+        }
+        return records, coverage, start, end
 
     return deps.route_cache.get_or_set(
         cache.sacct_window_key(since_hours), 300, fetch)
+
+
+def pending_jobs():
+    """The 30 s-cached squeue pending snapshot the Status tab reads.
+
+    The Partitions queue calls ``deps.queue_pending`` per request on
+    purpose (a window change must re-read the live queue); the Status
+    tab has no window and auto-refreshes, so it shares one snapshot per
+    30 s instead of running squeue for every viewer on every tick.
+    """
+    return deps.route_cache.get_or_set(
+        cache.squeue_pending_key(), 30, deps.queue_pending)
+
+
+def status_history(progress_key=None):
+    """The Status tab's cluster-wide job history: the past seven days,
+    hour-aligned, reduced to hourly CPU/GPU counters.
+
+    The window ``[floor_hour(now) - 168 h, now]`` is fetched as
+    Helsinki-midnight chunks through ``_load_day_chunks`` (edges fresh,
+    full past days cached 1 h), each chunk reduced by
+    ``domain.status.reduce_chunk`` the moment it arrives — only the
+    reduced counters are cached, never a week's ~170k raw rows. The
+    live running-job IDs (the 30 s scontrol job snapshot) let the
+    reduction drop sacct's stale "still running" rows; when scontrol is
+    unreadable the reduction falls back to an age cut-off and the
+    coverage says so. The squeue pending snapshot (30 s) supplies the
+    submissions sacct cannot see yet: jobs still blocked by a dependency
+    or hold.
+
+    Raises ``SlurmError`` when every chunk failed, so a total outage is
+    never cached as an empty week; a partial failure is cached (300 s)
+    with its gaps disclosed in ``coverage``.
+    """
+
+    def live_running_ids():
+        try:
+            return {
+                jobid for jobid, job in scontrol_jobs().items()
+                if status.base_state(job.get("state")) in ("RUNNING",
+                                                           "COMPLETING")}
+        except SlurmError:
+            return None
+
+    def pending_or_none():
+        try:
+            return pending_jobs()
+        except SlurmError:
+            return None
+
+    def fetch():
+        now = deps.now()
+        start = int(now) // status.HOUR * status.HOUR \
+            - status.HISTORY_HOURS * status.HOUR
+        chunks = _helsinki_chunks(_local(start), _local(now))
+        first_iso = chunks[0][0].isoformat(timespec="seconds")
+        last_iso = chunks[-1][1].isoformat(timespec="seconds")
+        # The scontrol job snapshot (seconds on a busy controller) runs
+        # alongside the sacct chunks; a chunk waits for it only once its
+        # own rows are in hand and it reaches the reduction.
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            live = pool.submit(live_running_ids)
+            pending = pool.submit(pending_or_none)
+
+            def fetch_chunk(chunk_start_iso, chunk_end_iso):
+                # The window's own bounds are epochs already; converting
+                # them back from local wall-clock text could land on the
+                # wrong side of a DST fold. Midnights are never
+                # ambiguous.
+                lo = (start if chunk_start_iso == first_iso
+                      else sacct_epoch(chunk_start_iso))
+                hi = (now if chunk_end_iso == last_iso
+                      else sacct_epoch(chunk_end_iso))
+                records = deps.sacct_status(chunk_start_iso, chunk_end_iso)
+                return status.reduce_chunk(
+                    records, lo, hi, now, live.result())
+
+            results, _failed, _ok = _load_day_chunks(
+                chunks, fetch_chunk, cache.status_day_key,
+                progress_key=progress_key)
+            live_ids = live.result()
+            queued = pending.result()
+        if not results:
+            raise SlurmError("every sacct history chunk failed")
+        return status.merge_history(
+            [results[i] for i in sorted(results)], start, now,
+            total_chunks=len(chunks),
+            running_verified=live_ids is not None, pending=queued)
+
+    return deps.route_cache.get_or_set(
+        cache.status_history_key(), 300, fetch)
 
 
 _NON_TERMINAL_STATES = frozenset({

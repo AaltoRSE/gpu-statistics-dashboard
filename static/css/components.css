@@ -279,3 +279,28 @@ header .auto-refresh select { background:var(--panel2); color:var(--text); borde
 .glossary-dialog dd { margin:4px 0 0; color:var(--dim); font-size:13px; line-height:1.5; }
 .glossary-dialog #glossaryClose { margin-top:18px; background:var(--panel2); color:var(--text);
   border:1px solid var(--line); border-radius:6px; padding:6px 14px; cursor:pointer; font-size:12px; }
+
+/* Status tab: the headline tiles (proportional figures at display size),
+   their CPU/GPU split line, the short live charts, the job-class toggle
+   and the two-level summary table headers. */
+.stat.kpi { min-width:150px; padding:8px 14px; }
+.stat.kpi .stat-value { font-size:22px; font-variant-numeric:normal; }
+.stat .stat-sub { font-size:11px; color:var(--dim); margin-top:3px; white-space:nowrap; }
+.stat .stat-sub .legend-key { margin:0 4px 0 0; width:9px; height:9px; }
+.stat .stat-sub + .stat-sub { margin-top:1px; }
+.chart.short { height:230px; }
+.seg { display:inline-flex; margin-left:auto; border:1px solid var(--line); border-radius:6px;
+  overflow:hidden; }
+.seg button { background:var(--panel2); color:var(--dim); border:none; padding:4px 10px;
+  font:inherit; font-size:12px; cursor:pointer; }
+.seg button + button { border-left:1px solid var(--line); }
+.seg button[aria-pressed="true"] { background:var(--acc); color:var(--bg); font-weight:600; }
+.seg button:focus-visible { outline:2px solid var(--acc); outline-offset:-2px; }
+.summary-table th.group { text-align:center; }
+.summary-table td.metric { font-weight:600; }
+/* Only the first header row's first cell is the sticky entity column;
+   the second row's first cell is a data column under a rowspan. */
+.summary-table thead tr + tr th:first-child { position:static; box-shadow:none; }
+/* The Status tables are wide (two window groups x classes): scroll inside
+   their card at narrow widths instead of widening the page. */
+#tab-status .table-scroll { overflow-x:auto; }

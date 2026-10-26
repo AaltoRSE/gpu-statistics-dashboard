@@ -52,6 +52,8 @@ CASES = [
     ("partitions_vram_partition_filter", "/api/partitions/vram",
      {"since_hours": 24, "partition": "gpu-h100"}),
     ("nodes", "/api/nodes", {"gpu_only": "true"}),
+    ("status_live", "/api/status/live", {}),
+    ("status_history", "/api/status/history", {}),
     ("node_detail_job_start", "/api/nodes/gpu1", {"view": "job_start"}),
 ]
 

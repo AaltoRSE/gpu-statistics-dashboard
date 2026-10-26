@@ -31,6 +31,7 @@ from slurm import (  # noqa: F401 (re-exported)
     sacct_allocations,
     sacct_jobs,
     sacct_jobs_resilient,
+    sacct_status,
     show_jobs,
     show_nodes,
 )

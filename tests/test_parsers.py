@@ -9,12 +9,15 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from config import _read_jobgraph_conf  # noqa: E402
 from slurm import (  # noqa: E402
     SACCT_FIELDS,
+    STATUS_FIELDS,
     _parse_kv_block,
     _parse_sacct_row,
+    array_task_count,
     expand_node_list,
     parse_alloc_tres,
     parse_elapsed,
     parse_gres,
+    parse_sacct_status,
     parse_scontrol_jobs,
     parse_scontrol_nodes,
     parse_scontrol_partitions,
@@ -567,7 +570,9 @@ def test_parse_squeue_json_rows():
         "jobid": "20276510", "user": "jdoe", "partition": "gpu-a100-80g",
         "state": "PENDING",
         "submit": "2026-09-17T11:00:00", "start": "2026-09-18T08:00:00",
-        "reason": "Resources", "nodes": 2, "gpus": 4, "gpu_type": "a100"}
+        "reason": "Resources", "nodes": 2, "gpus": 4, "gpu_type": "a100",
+        # the Status tab's fields; this canned job carries none of them
+        "cpus": 0, "req_gpus": 0, "eligible": "", "array_tasks": 1}
     # unset start parses empty; no TRES anywhere parses zero GPUs
     assert rows[1]["user"] == "jsmith"
     # the untyped GRES form parses count without a type
@@ -610,6 +615,121 @@ def test_parse_squeue_json_timestamps_are_cluster_local():
     row = parse_squeue_json(_queue_json(
         [_sjob(1, "b", "gpu-h100", "gres/gpu:1", start=None)]))[0]
     assert row["start"] == ""
+
+
+def test_parse_squeue_json_status_fields():
+    # The Status tab's four extra fields: requested CPUs, the GPU count
+    # of the whole TRES request (the live twin of sacct's ReqTRES),
+    # the eligible time (unset while a dependency blocks the job) and
+    # the number of tasks a pending array record stands for.
+    job = _sjob(20157390, "u", "gpu-grace-h200-141g", reason="Priority")
+    job.update({
+        "cpus": {"set": True, "infinite": False, "number": 8},
+        "tres_req_str": "cpu=8,mem=160G,node=1,billing=141,gres/gpu=1,"
+                        "gres/gpu:gh200=1",
+        "eligible_time": _ts(1789635165),
+        "array_task_string": "1-4",
+    })
+    blocked = _sjob(17109378, "v", "batch-hsw,batch-csl", reason="Dependency")
+    blocked.update({
+        "cpus": {"set": True, "infinite": False, "number": 1},
+        "tres_req_str": "cpu=1,mem=2G,node=1,billing=1",
+        "eligible_time": _ts(0),
+        "array_task_string": "0-11%3",
+    })
+    rows = parse_squeue_json(_queue_json([job, blocked]))
+    assert rows[0]["cpus"] == 8
+    assert rows[0]["req_gpus"] == 1
+    assert rows[0]["eligible"] == "2026-09-17T11:52:45"
+    assert rows[0]["array_tasks"] == 4
+    assert rows[1]["cpus"] == 1
+    assert rows[1]["req_gpus"] == 0
+    assert rows[1]["eligible"] == ""   # epoch 0: still blocked
+    assert rows[1]["array_tasks"] == 12  # the %3 throttle is not a count
+
+
+def test_array_task_count():
+    assert array_task_count("") == 1
+    assert array_task_count(None) == 1
+    assert array_task_count("0-11%3") == 12
+    assert array_task_count("1,3,5-7") == 5
+    assert array_task_count("0-10:2") == 6
+    assert array_task_count("7") == 1
+    # an unparseable part still counts as one task, never zero
+    assert array_task_count("x") == 1
+
+
+def _status_line(jobid="100", raw="100", state="COMPLETED",
+                 submit="2026-09-29T10:00:00", eligible="2026-09-29T10:00:01",
+                 start="2026-09-29T10:05:00", end="2026-09-29T11:00:00",
+                 part="batch-csl", ncpus="4", req="cpu=4,mem=8G,node=1",
+                 alloc="cpu=4,mem=8G,node=1"):
+    return "|".join([jobid, raw, state, submit, eligible, start, end, part,
+                     ncpus, req, alloc])
+
+
+def test_parse_sacct_status_rows():
+    out = "\n".join([
+        _status_line(),
+        # a GPU job that never started: only ReqTRES names the GPU
+        _status_line("200_[0-11%3]", "200", "PENDING", start="Unknown",
+                     end="Unknown", part="gpu-h200-141g-short,gpu-a100-80g",
+                     ncpus="0", req="cpu=8,gres/gpu=2,mem=32G,node=1",
+                     alloc=""),
+        # a started GPU job: AllocTRES carries the allocation
+        _status_line("300", "300", "CANCELLED by 1234", part="gpu-h100-80g",
+                     req="cpu=2,gres/gpu=1,node=1",
+                     alloc="cpu=2,gres/gpu:h100=1,gres/gpu=1,node=1"),
+        _status_line("300.batch", "300.batch"),  # step rows are skipped
+        "",
+    ])
+    rows = parse_sacct_status(out)
+    assert [r["jobid"] for r in rows] == ["100", "200_[0-11%3]", "300"]
+    assert rows[0] == {
+        "jobid": "100", "jobid_raw": "100", "state": "COMPLETED",
+        "submit": "2026-09-29T10:00:00", "eligible": "2026-09-29T10:00:01",
+        "start": "2026-09-29T10:05:00", "end": "2026-09-29T11:00:00",
+        "partition": "batch-csl", "ncpus": 4, "gpus": 0}
+    # sacct's "Unknown" placeholders read as "" (the event has not happened)
+    assert rows[1]["start"] == "" and rows[1]["end"] == ""
+    assert rows[1]["gpus"] == 2
+    assert rows[2]["gpus"] == 1
+    assert rows[2]["state"] == "CANCELLED by 1234"
+    assert len(STATUS_FIELDS) == 11
+
+
+def test_sacct_status_command(monkeypatch):
+    # All partitions (no -r), allocations only (-X): the default query
+    # selects by eligible time, and a terminal-state query adds the jobs
+    # that never became eligible — and only those, the default query
+    # already has every row with an Eligible time.
+    import slurm
+
+    cmds = []
+
+    def fake_run(cmd, timeout=30):
+        cmds.append((cmd, timeout))
+        if any(c.startswith("--state=") for c in cmd):
+            return "\n".join([
+                # cancelled while a dependency blocked it: no Eligible
+                _status_line("9", "9", "CANCELLED by 7", eligible="Unknown",
+                             start="Unknown"),
+                # also in the default result: must not be added twice
+                _status_line("100", "100", "CANCELLED by 7"),
+            ])
+        return _status_line() + "\n"
+
+    monkeypatch.setattr(slurm, "_run", fake_run)
+    rows = slurm.sacct_status("2026-09-29T00:00:00", "2026-09-30T00:00:00")
+    assert [r["jobid"] for r in rows] == ["100", "9"]
+    base = ["sacct", "--allusers", "-X",
+            "-S", "2026-09-29T00:00:00", "-E", "2026-09-30T00:00:00"]
+    tail = ["-o", ",".join(STATUS_FIELDS), "--parsable2", "--noheader"]
+    assert cmds == [
+        (base + tail, 120),
+        (base + ["--state=CA,F,TO,OOM,NF,BF,DL,PR,RV"] + tail, 120),
+    ]
+    assert not any("-r" in cmd for cmd, _ in cmds)
 
 
 def test_queue_pending_command(monkeypatch):

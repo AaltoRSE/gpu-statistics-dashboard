@@ -1,0 +1,162 @@
+{
+  "cpu": {
+    "alloc": 80,
+    "idle": 568,
+    "occupancy_pct": 11.8,
+    "total": 680,
+    "unavailable": 32
+  },
+  "gpu": {
+    "alloc": 6,
+    "idle": 37,
+    "occupancy_pct": 12.5,
+    "total": 48,
+    "unavailable": 5
+  },
+  "jobs_available": true,
+  "nodes": {
+    "by_state": [
+      {
+        "cpu_nodes": 0,
+        "gpu_nodes": 2,
+        "state": "ALLOCATED"
+      },
+      {
+        "cpu_nodes": 1,
+        "gpu_nodes": 4,
+        "state": "IDLE"
+      },
+      {
+        "cpu_nodes": 0,
+        "gpu_nodes": 1,
+        "state": "MIXED"
+      }
+    ],
+    "total": 8,
+    "unavailable": 1
+  },
+  "nodes_available": true,
+  "partitions": [
+    {
+      "cpus_alloc": 0,
+      "cpus_total": 40,
+      "gpus_alloc": 0,
+      "gpus_total": 0,
+      "kind": "cpu",
+      "name": "batch",
+      "nodes": 1,
+      "pending_jobs": 0,
+      "running_jobs": 0
+    },
+    {
+      "cpus_alloc": 0,
+      "cpus_total": 128,
+      "gpus_alloc": 0,
+      "gpus_total": 4,
+      "kind": "gpu",
+      "name": "gpu-gh200",
+      "nodes": 1,
+      "pending_jobs": 0,
+      "running_jobs": 0
+    },
+    {
+      "cpus_alloc": 32,
+      "cpus_total": 64,
+      "gpus_alloc": 3,
+      "gpus_total": 8,
+      "kind": "gpu",
+      "name": "gpu-h100",
+      "nodes": 1,
+      "pending_jobs": 0,
+      "running_jobs": 0
+    },
+    {
+      "cpus_alloc": 16,
+      "cpus_total": 64,
+      "gpus_alloc": 2,
+      "gpus_total": 8,
+      "kind": "gpu",
+      "name": "gpu-h200",
+      "nodes": 1,
+      "pending_jobs": 0,
+      "running_jobs": 0
+    },
+    {
+      "cpus_alloc": 16,
+      "cpus_total": 128,
+      "gpus_alloc": 2,
+      "gpus_total": 16,
+      "kind": "gpu",
+      "name": "gpu-h200-ellis",
+      "nodes": 2,
+      "pending_jobs": 0,
+      "running_jobs": 0
+    },
+    {
+      "cpus_alloc": 32,
+      "cpus_total": 128,
+      "gpus_alloc": 1,
+      "gpus_total": 12,
+      "kind": "gpu",
+      "name": "gpu-h200-mig",
+      "nodes": 1,
+      "pending_jobs": 0,
+      "running_jobs": 0
+    },
+    {
+      "cpus_alloc": 0,
+      "cpus_total": 96,
+      "gpus_alloc": 0,
+      "gpus_total": 4,
+      "kind": "gpu",
+      "name": "gpu-v100-16g",
+      "nodes": 1,
+      "pending_jobs": 0,
+      "running_jobs": 0
+    },
+    {
+      "cpus_alloc": 0,
+      "cpus_total": 96,
+      "gpus_alloc": 0,
+      "gpus_total": 4,
+      "kind": "gpu",
+      "name": "gpu-v100-32g",
+      "nodes": 1,
+      "pending_jobs": 0,
+      "running_jobs": 0
+    }
+  ],
+  "pending": {
+    "cpu": {
+      "blocked_jobs": 0,
+      "eligible_age_avg_s": null,
+      "eligible_age_max_s": null,
+      "eligible_jobs": 0,
+      "jobs": 0,
+      "tasks": 0
+    },
+    "gpu": {
+      "blocked_jobs": 0,
+      "eligible_age_avg_s": null,
+      "eligible_age_max_s": null,
+      "eligible_jobs": 0,
+      "jobs": 0,
+      "tasks": 0
+    }
+  },
+  "pending_reasons": [],
+  "queue_available": true,
+  "running": {
+    "cpu": {
+      "cpus": 0,
+      "gpus": 0,
+      "jobs": 0
+    },
+    "gpu": {
+      "cpus": 0,
+      "gpus": 0,
+      "jobs": 0
+    }
+  },
+  "time": 1788100000
+}

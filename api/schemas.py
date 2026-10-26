@@ -610,3 +610,193 @@ class HealthResponse(BaseModel):
     ok: bool
     prometheus: str
     time: str
+
+
+# ---- /api/status/live, /api/status/history ----------------------------
+
+class Capacity(BaseModel):
+    """One resource's allocation right now, over every node."""
+    alloc: int
+    idle: int = Field(description="Unallocated capacity on nodes that can "
+                                  "take new work.")
+    unavailable: int = Field(description="Unallocated capacity on down, "
+                                         "draining or otherwise "
+                                         "unavailable nodes.")
+    total: int
+    occupancy_pct: Optional[float] = Field(
+        default=None,
+        description="alloc / total x 100 (the figure sinfo %C reports); "
+                    "null for a resource the cluster has none of.")
+
+
+class NodeStateCount(BaseModel):
+    state: str
+    cpu_nodes: int
+    gpu_nodes: int
+
+
+class NodeSummary(BaseModel):
+    total: int
+    unavailable: int
+    by_state: List[NodeStateCount]
+
+
+class RunningClass(BaseModel):
+    jobs: int
+    cpus: int = Field(description="Cores these running jobs hold.")
+    gpus: int = Field(description="GPUs these running jobs hold.")
+
+
+class PendingClass(BaseModel):
+    jobs: int = Field(description="Pending job records; a pending array "
+                                  "is one record.")
+    tasks: int = Field(description="Array tasks those records stand for "
+                                   "(a plain job counts 1).")
+    eligible_jobs: int = Field(description="Records the scheduler may "
+                                           "start now (queued for "
+                                           "resources or priority).")
+    blocked_jobs: int = Field(description="Records a dependency or hold "
+                                          "still keeps back.")
+    eligible_age_avg_s: Optional[int] = Field(
+        default=None, description="Mean time since the eligible records "
+                                  "became eligible; null with none.")
+    eligible_age_max_s: Optional[int] = None
+
+
+class PendingReason(BaseModel):
+    reason: str
+    cpu_jobs: int
+    gpu_jobs: int
+
+
+class StatusPartition(BaseModel):
+    name: str
+    kind: str = Field(description='"gpu" when the partition has GPU '
+                                  'nodes, else "cpu".')
+    nodes: int
+    cpus_alloc: int
+    cpus_total: int
+    gpus_alloc: int
+    gpus_total: int
+    running_jobs: Optional[int] = Field(
+        default=None, description="Null when the scontrol job snapshot "
+                                  "is unavailable.")
+    pending_jobs: Optional[int] = Field(
+        default=None,
+        description="Pending records listing this partition; a job that "
+                    "lists several partitions counts in each, so this "
+                    "column must not be summed. Null when squeue is "
+                    "unavailable.")
+
+
+class StatusLiveResponse(BaseModel):
+    time: int
+    nodes_available: bool
+    jobs_available: bool
+    queue_available: bool = Field(
+        description="False when squeue failed: pending figures are then "
+                    "null, never an empty queue.")
+    cpu: Optional[Capacity] = None
+    gpu: Optional[Capacity] = None
+    nodes: Optional[NodeSummary] = None
+    running: Optional[Dict[str, RunningClass]] = Field(
+        default=None, description='Running jobs keyed "cpu" / "gpu".')
+    pending: Optional[Dict[str, PendingClass]] = Field(
+        default=None, description='Pending jobs keyed "cpu" / "gpu".')
+    pending_reasons: Optional[List[PendingReason]] = None
+    partitions: Optional[List[StatusPartition]] = None
+
+
+class StatusSummary(BaseModel):
+    """One window x job class of the history."""
+    submitted: int = Field(description="Jobs submitted in the window; "
+                                       "array tasks count individually.")
+    started: int
+    completed: int
+    failed: int = Field(description="FAILED, OUT_OF_MEMORY, TIMEOUT, "
+                                    "NODE_FAIL, BOOT_FAIL and DEADLINE.")
+    cancelled: int
+    other: int = Field(description="Any other final state (PREEMPTED, "
+                                   "REVOKED, ...).")
+    ended: int
+    states: Dict[str, int] = Field(description="Final-state counts behind "
+                                               "the outcome groups.")
+    wait_p50_s: Optional[int] = None
+    wait_p90_s: Optional[int] = None
+    wait_avg_s: Optional[int] = Field(
+        default=None, description="Mean Eligible -> Start queue wait of "
+                                  "the jobs started in the window.")
+    wait_samples: int
+
+
+class StatusWindows(BaseModel):
+    day: Window
+    week: Window
+
+
+class StatusClassSeries(BaseModel):
+    submitted: List[Optional[int]]
+    started: List[Optional[int]]
+    completed: List[Optional[int]]
+    failed: List[Optional[int]]
+    cancelled: List[Optional[int]]
+    other: List[Optional[int]]
+    wait_avg_s: List[Optional[int]]
+    wait_p50_s: List[Optional[int]]
+    cpus_alloc: List[Optional[float]] = Field(
+        description="Average cores held per hour.")
+    gpus_alloc: List[Optional[float]] = Field(
+        description="Average GPUs held per hour.")
+
+
+class StatusSeries(BaseModel):
+    t: List[int] = Field(description="Hour-start epochs; the last hour "
+                                     "is the current, partial one.")
+    cpu: StatusClassSeries
+    gpu: StatusClassSeries
+
+
+class StatusCoverage(BaseModel):
+    chunks: int
+    failed_chunks: int
+    complete: bool
+    records: int
+    stale_running_rows: int = Field(
+        description="sacct rows still marked running for jobs the "
+                    "controller no longer runs; excluded from the "
+                    "resources-held series.")
+    unverified_running_rows: int = Field(
+        description="Running rows counted without the live job set to "
+                    "confirm them (scontrol unavailable).")
+    running_verified: bool
+    blocked_pending_counted: bool = Field(
+        description="False when squeue (or the live-edge chunk) was "
+                    "unavailable: submissions still blocked by a "
+                    "dependency or hold — which sacct cannot see — are "
+                    "then missing from 'submitted'.")
+    blocked_pending_jobs: int = Field(
+        description="Pending jobs, never yet eligible, added to "
+                    "'submitted' from the squeue snapshot.")
+
+
+class StatusCapacity(BaseModel):
+    cpus: int
+    gpus: int
+
+
+class StatusHistoryResponse(BaseModel):
+    available: bool = Field(
+        description="False when sacct could not be read at all; the "
+                    "other fields are then null — never an idle week.")
+    window: Optional[Window] = None
+    windows: Optional[StatusWindows] = None
+    summary: Optional[Dict[str, Dict[str, StatusSummary]]] = Field(
+        default=None,
+        description='summary["day"|"week"]["cpu"|"gpu"|"all"].')
+    series: Optional[StatusSeries] = None
+    coverage: Optional[StatusCoverage] = None
+    capacity: Optional[StatusCapacity] = Field(
+        default=None,
+        description="Current total cores and GPUs (scontrol), the "
+                    "reference lines of the resources-held charts; "
+                    "null when scontrol is unavailable.")

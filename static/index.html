@@ -12,7 +12,7 @@
 <body>
 <header>
   <h1>Triton GPU Efficiency Dashboard</h1>
-  <span class="sub">live data: sacct &middot; scontrol &middot; Prometheus &middot; all times Europe/Helsinki</span>
+  <span class="sub">live data: sacct &middot; scontrol &middot; squeue &middot; Prometheus &middot; all times Europe/Helsinki</span>
   <span class="live" id="health">checking&hellip;</span>
   <label class="auto-refresh" title="Automatically re-fetch the visible tab. Off by default — this hits sacct and Prometheus on every tick.">Auto-refresh
     <select id="autoRefresh">
@@ -25,7 +25,8 @@
   <button class="theme-btn" id="themeBtn" type="button" title="Toggle light/dark theme">&#9728;&#xFE0E; light</button>
 </header>
 <nav class="tabs">
-  <button data-tab="jobs" class="active">Jobs<span class="tab-badge" id="jobsLimitBadge" hidden></span></button>
+  <button data-tab="status" class="active">Status</button>
+  <button data-tab="jobs">Jobs<span class="tab-badge" id="jobsLimitBadge" hidden></span></button>
   <button data-tab="partitions">Partitions</button>
   <button data-tab="users">Users</button>
   <button data-tab="groups">Groups</button>
@@ -34,8 +35,165 @@
 <main>
   <div class="err" id="errBox"></div>
 
+  <!-- ============ STATUS ============ -->
+  <section class="tabpage active" id="tab-status">
+    <div class="controls">
+      <span class="control-meta">
+        <span class="meta-count">Cluster status</span>
+        <span class="small" id="sMeta"></span>
+        <span class="small" data-fresh-for="statusLiveResults"></span>
+      </span>
+      <span class="controls-actions">
+        <button id="sRefresh" title="re-read scontrol and squeue now and re-assemble the job history (full past days stay cached)"><span aria-hidden="true">&#8635;</span> refresh</button>
+      </span>
+    </div>
+
+    <div id="statusLiveResults" class="results-panel loading">
+      <div class="results-content">
+        <div class="card">
+          <h2>Right now <button type="button" class="glossary-btn" data-glossary="status-occupancy" title="What is this?">?</button></h2>
+          <div class="stat-row" id="sLiveTiles"></div>
+          <div class="hint coverage-banner warn" id="sLiveUnavailable" hidden></div>
+        </div>
+        <div class="grid two" style="margin-top:14px">
+          <div class="card">
+            <h2>Cores and GPUs in use</h2>
+            <div class="chart short" id="sResourcePlot"></div>
+            <div class="hint">Share of every node&rsquo;s capacity: allocated to a job, idle, or unavailable (down or draining and not allocated).</div>
+          </div>
+          <div class="card">
+            <h2>Why jobs are waiting <button type="button" class="glossary-btn" data-glossary="status-blocked" title="What is this?">?</button></h2>
+            <div class="chart short" id="sReasonPlot"></div>
+            <div class="hint">Pending jobs by Slurm&rsquo;s pending reason; a pending array counts once. Priority and Resources are queued for the scheduler; Dependency and held jobs are blocked.</div>
+          </div>
+        </div>
+        <div class="card" style="margin-top:14px">
+          <h2>Partitions <span class="small" id="sPartCount"></span></h2>
+          <div class="table-scroll">
+            <table id="statusPartTable">
+              <thead><tr>
+                <th data-k="name">Partition</th>
+                <th data-k="kind">Type</th>
+                <th class="num" data-k="nodes">Nodes</th>
+                <th class="num" data-k="cpus_alloc" title="allocated / total cores">Cores</th>
+                <th data-k="cpu_pct">Core use</th>
+                <th class="num" data-k="gpus_alloc" title="allocated / total GPUs">GPUs</th>
+                <th class="num" data-k="running_jobs">Running</th>
+                <th class="num" data-k="pending_jobs" title="pending jobs that list this partition; a job listing several partitions counts in each, so this column must not be summed">Pending</th>
+              </tr></thead>
+              <tbody></tbody>
+            </table>
+          </div>
+          <div class="hint">A node in several partitions counts toward each, and so does a pending job that lists several &mdash; rows overlap and must not be summed. Click a column header to sort.</div>
+        </div>
+      </div>
+      <div class="results-loading">Loading cluster status&hellip;</div>
+    </div>
+
+    <div id="statusHistoryResults" class="results-panel loading">
+      <div class="results-content">
+        <div class="hint coverage-banner warn" id="sHistCoverage" hidden></div>
+        <div id="sHistBody">
+        <div class="card" style="margin-top:14px">
+          <h2>Past 24 hours and past 7 days <button type="button" class="glossary-btn" data-glossary="status-job-class" title="What is this?">?</button> <span class="small" id="sHistMeta"></span></h2>
+          <div class="stat-row" id="sHistTiles"></div>
+          <div class="table-scroll">
+            <table id="statusSummaryTable" class="summary-table">
+              <thead>
+                <tr>
+                  <th rowspan="2">Jobs</th>
+                  <th colspan="3" class="group">Past 24 hours</th>
+                  <th colspan="3" class="group">Past 7 days</th>
+                </tr>
+                <tr>
+                  <th class="num">CPU jobs</th><th class="num">GPU jobs</th><th class="num">All</th>
+                  <th class="num">CPU jobs</th><th class="num">GPU jobs</th><th class="num">All</th>
+                </tr>
+              </thead>
+              <tbody></tbody>
+            </table>
+          </div>
+          <div class="hint">A GPU job requested or holds at least one GPU; every other job is a CPU job. Array tasks count individually; submitted includes jobs still blocked by a dependency or hold, and cancelled includes jobs cancelled while blocked. Failed = failed, out of memory, timed out, node failure, boot failure or deadline; the final-state table below breaks it down. Queue wait is Eligible &rarr; Start of the jobs that started in the window &mdash; time blocked by a dependency, a hold or an array throttle is not wait. Windows are hour-aligned and include the current hour, so &ldquo;past 24 hours&rdquo; covers 24&ndash;25 hours.</div>
+        </div>
+        <div class="card" style="margin-top:14px">
+          <div class="detail-head">
+            <h2>Jobs per hour, past 7 days</h2>
+            <span class="seg" id="sJobsClass" role="group" aria-label="Job class">
+              <button type="button" data-cls="all" aria-pressed="true">All jobs</button>
+              <button type="button" data-cls="cpu" aria-pressed="false">CPU jobs</button>
+              <button type="button" data-cls="gpu" aria-pressed="false">GPU jobs</button>
+            </span>
+          </div>
+          <div class="chart" id="sJobsPlot"></div>
+          <div class="hint">Bars: jobs that ended in each hour, by outcome. Line: jobs submitted in that hour.</div>
+        </div>
+        <div class="grid two" style="margin-top:14px">
+          <div class="card">
+            <h2>Cores held, past 7 days</h2>
+            <div class="chart" id="sCoresPlot"></div>
+            <div class="hint">Hourly average cores allocated to CPU jobs and to GPU jobs, stacked; the line is today&rsquo;s total core count.</div>
+          </div>
+          <div class="card">
+            <h2>GPUs held, past 7 days</h2>
+            <div class="chart" id="sGpusPlot"></div>
+            <div class="hint">Hourly average GPUs allocated; the line is today&rsquo;s total GPU count.</div>
+          </div>
+        </div>
+        <div class="card" style="margin-top:14px">
+          <h2>Queue wait per hour, past 7 days <button type="button" class="glossary-btn" data-glossary="status-queue-wait" title="What is this?">?</button></h2>
+          <div class="chart" id="sWaitPlot"></div>
+          <div class="hint">Median Eligible &rarr; Start wait of the jobs that started in each hour, on a log scale; click a &ldquo;mean&rdquo; legend entry to add the hourly means (dotted). A few long waits pull the mean far above the median.</div>
+        </div>
+        <div class="card" style="margin-top:14px">
+          <h2>Ended jobs by final state <button type="button" class="glossary-btn" data-glossary="status-failed" title="What is this?">?</button></h2>
+          <div class="table-scroll">
+            <table id="statusStateTable" class="summary-table">
+              <thead>
+                <tr>
+                  <th rowspan="2">Final state</th>
+                  <th rowspan="2">Counted as</th>
+                  <th colspan="2" class="group">Past 24 hours</th>
+                  <th colspan="2" class="group">Past 7 days</th>
+                </tr>
+                <tr>
+                  <th class="num">CPU jobs</th><th class="num">GPU jobs</th>
+                  <th class="num">CPU jobs</th><th class="num">GPU jobs</th>
+                </tr>
+              </thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </div>
+        <div class="card collapsible collapsed" id="sHourlyExplorer" style="margin-top:14px">
+          <div class="explorer-head">
+            <button type="button" class="explorer-toggle" id="sHourlyToggle" aria-expanded="false">&#9656; Hourly data</button>
+            <span class="small">the numbers behind the charts, newest hour first</span>
+          </div>
+          <div class="collapsible-body">
+          <div class="table-scroll compact">
+            <table id="statusHourlyTable">
+              <thead><tr>
+                <th>Hour</th>
+                <th class="num">Submitted CPU</th><th class="num">Submitted GPU</th>
+                <th class="num">Ended CPU</th><th class="num">Ended GPU</th>
+                <th class="num">Failed CPU</th><th class="num">Failed GPU</th>
+                <th class="num">Median wait CPU</th><th class="num">Median wait GPU</th>
+                <th class="num">Cores CPU jobs</th><th class="num">Cores GPU jobs</th>
+                <th class="num">GPUs</th>
+              </tr></thead>
+              <tbody></tbody>
+            </table>
+          </div>
+          </div>
+        </div>
+        </div>
+      </div>
+      <div class="results-loading">Loading job history&hellip;</div>
+    </div>
+  </section>
+
   <!-- ============ JOBS ============ -->
-  <section class="tabpage active" id="tab-jobs">
+  <section class="tabpage" id="tab-jobs">
     <div class="controls">
       <label>Window
         <select id="jWindow" disabled>
@@ -522,6 +680,34 @@
 <dialog id="glossaryDialog" class="glossary-dialog">
   <h2>Metric glossary</h2>
   <dl>
+    <dt id="glossary-status-occupancy">Occupancy (Status tab)</dt>
+    <dd>Allocated cores (or GPUs) divided by every node&rsquo;s total,
+      idle and unavailable nodes included &mdash; the figure
+      <code>sinfo</code> reports. Unavailable is capacity on down or
+      draining nodes that no job holds. Occupancy says a core or GPU is
+      reserved, not how busy it is: the other tabs measure GPU
+      utilization.</dd>
+    <dt id="glossary-status-job-class">CPU jobs and GPU jobs (Status tab)</dt>
+    <dd>A GPU job requested or holds at least one GPU, whichever
+      partition it ran in; every other job is a CPU job. A GPU job holds
+      cores too, so the cores-held chart stacks both classes.</dd>
+    <dt id="glossary-status-queue-wait">Queue wait (Status tab)</dt>
+    <dd>Start time minus eligible time: how long a job waited for the
+      scheduler once nothing but resources or priority kept it back.
+      Time held by a dependency, a user or admin hold, or an array&rsquo;s
+      concurrency limit is not queue wait. The Partitions tab&rsquo;s
+      wait columns measure Submit &rarr; Start instead, which includes
+      that time.</dd>
+    <dt id="glossary-status-blocked">Eligible and blocked pending jobs</dt>
+    <dd>An eligible pending job waits for resources or its priority turn.
+      A blocked one cannot start yet whatever the free capacity: it
+      waits on a dependency or is held. A pending array is one job with
+      many tasks.</dd>
+    <dt id="glossary-status-failed">Failed (Status tab)</dt>
+    <dd>Jobs that ended FAILED, OUT_OF_MEMORY, TIMEOUT, NODE_FAIL,
+      BOOT_FAIL or DEADLINE. Cancelled jobs (including ones cancelled
+      while pending) count separately; any other final state, such as
+      PREEMPTED, is &ldquo;other&rdquo;.</dd>
     <dt id="glossary-mean-util">Mean utilization</dt>
     <dd>Time-weighted mean GPU utilization over the window. GPU devices are
       collapsed to a per-job/per-node max first, so this measures &ldquo;how

@@ -4,7 +4,9 @@ Explicit ``sacct -j`` lookups enrich Prometheus-discovered jobs. Completed-job
 wait metrics use one bounded ``sacct --allusers -X -S … -E …`` query, avoiding
 scrape-sampling gaps and large concurrent ID batches. ``sacct_allocations``
 fetches one chunk of the window-wide allocation dump the shared-source layer
-(plan §3) assembles into per-day cached chunks. All calls are read-only.
+(plan §3) assembles into per-day cached chunks; ``sacct_status`` fetches one
+chunk of the Status tab's cluster-wide (every partition) job history. All
+calls are read-only.
 """
 
 import datetime
@@ -30,6 +32,24 @@ SACCT_FIELDS = [
     "AllocTRES",
     "NodeList",
     "NCPUS",
+]
+
+# The Status tab's cluster-wide history fields: lifecycle timestamps for
+# the submitted/started/ended counts and the Eligible -> Start queue wait,
+# plus CPU and GPU size (ReqTRES names the GPU request of a job that never
+# started; AllocTRES the allocation of one that did).
+STATUS_FIELDS = [
+    "JobID",
+    "JobIDRaw",
+    "State",
+    "Submit",
+    "Eligible",
+    "Start",
+    "End",
+    "Partition",
+    "NCPUS",
+    "ReqTRES",
+    "AllocTRES",
 ]
 
 _NODE_BLOCK = re.compile(r"^NodeName=(\S+)")
@@ -313,6 +333,29 @@ def parse_tres_per_node(text):
     return gpus, gpu_type
 
 
+def array_task_count(spec):
+    """The number of tasks a Slurm array index expression names.
+
+    ``0-11%3`` -> 12 (the ``%`` throttle limits concurrency, not the
+    count), ``1,3,5-7`` -> 5, ``0-10:2`` -> 6 (a stepped range), ``""``
+    -> 1 (not an array range: one job). An unparseable part counts as
+    one task rather than failing the whole count.
+    """
+    spec = (spec or "").split("%", 1)[0].strip()
+    if not spec:
+        return 1
+    count = 0
+    for part in spec.split(","):
+        m = re.fullmatch(r"(\d+)-(\d+)(?::(\d+))?", part.strip())
+        if m:
+            lo, hi = int(m.group(1)), int(m.group(2))
+            step = int(m.group(3) or 1) or 1
+            count += len(range(lo, hi + 1, step)) if hi >= lo else 1
+        else:
+            count += 1
+    return max(count, 1)
+
+
 def queue_pending():
     """Pending (PD) jobs from ``squeue --json``, hidden partitions included.
 
@@ -353,6 +396,15 @@ def parse_squeue_json(payload):
     then the typed request at equal counts. Jobs naming no GPU anywhere
     stay ``gpus=0`` so the queue depth stays exact. A missing/unset
     start time stays ``""``.
+
+    The Status tab reads four more fields: ``cpus`` (CPUs requested),
+    ``req_gpus`` (the GPU count of the job's whole TRES request,
+    ``tres_req_str`` — the same field sacct's ReqTRES shows, so a job
+    classifies as a GPU job the same way live and historically),
+    ``eligible`` (the ISO time the job became eligible to start, ``""``
+    while a dependency or hold still blocks it) and ``array_tasks``
+    (how many array tasks a pending array record stands for; 1 for a
+    plain job).
     """
     data = json.loads(payload)
     jobs = []
@@ -382,6 +434,10 @@ def parse_squeue_json(payload):
             "nodes": (j.get("node_count") or {}).get("number", 0) or 0,
             "gpus": gpus,
             "gpu_type": gpu_type,
+            "cpus": (j.get("cpus") or {}).get("number", 0) or 0,
+            "req_gpus": parse_alloc_tres(j.get("tres_req_str") or "")[0],
+            "eligible": _cluster_iso(_tres_epoch(j.get("eligible_time"))),
+            "array_tasks": array_task_count(j.get("array_task_string")),
         })
     return jobs
 
@@ -565,6 +621,86 @@ def sacct_allocations(start_iso, end_iso, partitions):
         if "." in row.get("JobID", ""):
             continue  # step rows
         records.append(_enrich_sacct_row(row))
+    return records
+
+
+def _sacct_time(value):
+    """A sacct timestamp field, ``""`` for the placeholders sacct prints
+    when the event has not happened (``Unknown``, ``None``)."""
+    value = (value or "").strip()
+    return "" if value in ("Unknown", "None") else value
+
+
+def parse_sacct_status(output):
+    """Parse ``--parsable2`` rows of ``STATUS_FIELDS`` into compact
+    Status-tab records.
+
+    Step rows are skipped (``-X`` should already omit them). ``gpus`` is
+    the larger of the requested (ReqTRES) and allocated (AllocTRES) GPU
+    counts: a pending or never-started job has only the request, a
+    started one both.
+    """
+    records = []
+    for line in output.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        parts = line.split("|")
+        if len(parts) < len(STATUS_FIELDS):
+            parts.extend([""] * (len(STATUS_FIELDS) - len(parts)))
+        row = dict(zip(STATUS_FIELDS, parts))
+        if "." in row["JobID"]:
+            continue  # step rows
+        records.append({
+            "jobid": row["JobID"],
+            "jobid_raw": row["JobIDRaw"],
+            "state": row["State"],
+            "submit": _sacct_time(row["Submit"]),
+            "eligible": _sacct_time(row["Eligible"]),
+            "start": _sacct_time(row["Start"]),
+            "end": _sacct_time(row["End"]),
+            "partition": row["Partition"],
+            "ncpus": _int(row["NCPUS"]),
+            "gpus": max(parse_alloc_tres(row["ReqTRES"])[0],
+                        parse_alloc_tres(row["AllocTRES"])[0]),
+        })
+    return records
+
+
+# Final states a job can reach without ever becoming eligible (blocked by
+# a dependency or a hold, then cancelled, or failed at submission). COMPLETED
+# is left out: a never-eligible completion is vanishingly rare, and its
+# state query alone costs as much as the whole default query.
+NEVER_ELIGIBLE_END_STATES = "CA,F,TO,OOM,NF,BF,DL,PR,RV"
+
+
+def sacct_status(start_iso, end_iso):
+    """Every user's jobs active in one bounded interval, all partitions.
+
+    One chunk of the Status tab's cluster-wide history: unlike
+    ``sacct_allocations`` there is no ``-r`` — CPU partitions are the
+    point. ``-S``/``-E`` without ``--state`` selects by *eligible* time:
+    every job that became eligible before the interval's end and had not
+    ended before its start (pending, running or ended inside it). So a
+    job appears in every chunk from its eligible time on, and the caller
+    attributes each event to one chunk.
+
+    That default selection never returns a job that was never eligible —
+    one blocked by a dependency or a hold and then cancelled. A second,
+    state-filtered query (``--state`` selects final states by END time)
+    adds exactly those rows (no Eligible time; the default query already
+    has every other one). It is cheap: the terminal states other than
+    COMPLETED are a small share of the rows. ``SlurmError`` from either
+    propagates so the chunking layer can retry once and count the
+    failure.
+    """
+    base = ["sacct", "--allusers", "-X", "-S", start_iso, "-E", end_iso,
+            "-o", ",".join(STATUS_FIELDS), "--parsable2", "--noheader"]
+    records = parse_sacct_status(_run(base, timeout=120))
+    ended = parse_sacct_status(_run(
+        base[:7] + ["--state=" + NEVER_ELIGIBLE_END_STATES] + base[7:],
+        timeout=120))
+    records.extend(r for r in ended if not r["eligible"])
     return records
 
 

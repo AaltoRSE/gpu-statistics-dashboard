@@ -145,6 +145,50 @@ GROUP_MEMBERS = {
 }
 
 
+def _status_row(jobid, state, submit, eligible="", start="", end="",
+                ncpus=4, gpus=0, raw=None, partition="batch"):
+    return {"jobid": jobid, "jobid_raw": raw or jobid.split("_")[0],
+            "state": state, "submit": submit, "eligible": eligible,
+            "start": start, "end": end, "partition": partition,
+            "ncpus": ncpus, "gpus": gpus}
+
+
+# The Status tab's cluster-wide sacct history (deps.sacct_status), in
+# Europe/Helsinki wall-clock strings. NOW is 2026-08-30T17:26:40 local,
+# so the seven-day history spans 2026-08-23T17:00 -> NOW and the past
+# 24 h starts at 2026-08-29T17:00. Every chunk gets the whole list —
+# events count only in the chunk their timestamp falls in, so that
+# stays exact (as real sacct's overlapping chunk results must).
+STATUS_HISTORY = [
+    # CPU job, completed today: 5 min Eligible -> Start wait
+    _status_row("501", "COMPLETED", "2026-08-30T10:00:00",
+                "2026-08-30T10:00:00", "2026-08-30T10:05:00",
+                "2026-08-30T11:00:00", ncpus=4),
+    # GPU job that ran out of memory today: 30 min wait
+    _status_row("502", "OUT_OF_MEMORY", "2026-08-30T12:00:00",
+                "2026-08-30T12:00:00", "2026-08-30T12:30:00",
+                "2026-08-30T13:00:00", ncpus=8, gpus=1,
+                partition="gpu-h200"),
+    # a pending four-task GPU array submitted today
+    _status_row("503_[0-3]", "PENDING", "2026-08-30T15:00:00",
+                "2026-08-30T15:00:00", gpus=1, partition="gpu-h200"),
+    # CPU job cancelled before it started, three days ago (week only)
+    _status_row("504", "CANCELLED by 1000", "2026-08-27T09:00:00",
+                "2026-08-27T09:00:00", end="2026-08-27T10:00:00"),
+    # a day-long CPU job across midnight that timed out (week only)
+    _status_row("506", "TIMEOUT", "2026-08-28T08:00:00",
+                "2026-08-28T08:00:00", "2026-08-28T09:00:00",
+                "2026-08-29T09:00:00", ncpus=16),
+    # dependency-held overnight: Eligible, not Submit, starts its wait
+    _status_row("507", "COMPLETED", "2026-08-29T23:30:00",
+                "2026-08-30T00:10:00", "2026-08-30T00:15:00",
+                "2026-08-30T00:45:00", ncpus=2),
+    # a stale "running" row: no End, and the controller does not know it
+    _status_row("99", "RUNNING", "2025-09-10T10:00:00",
+                "2025-09-10T10:00:00", "2025-09-10T11:00:00", ncpus=20),
+]
+
+
 class FakeProm:
     """Canned responses shaped like the real Prometheus API.
 
@@ -343,6 +387,11 @@ def fake_prom(monkeypatch):
         else None)
     # Empty pending queue by default; tests opt in via deps.queue_pending.
     monkeypatch.setattr(deps, "queue_pending", lambda: [])
+    # The Status tab's cluster-wide history: the canned rows for every
+    # chunk (tests opt in to failures or other rows).
+    monkeypatch.setattr(deps, "sacct_status",
+                        lambda start_iso, end_iso: [
+                            dict(r) for r in STATUS_HISTORY])
 
     def _show_nodes():
         fake.nodes_calls += 1
@@ -360,10 +409,9 @@ def client(fake_prom):
 
 def _epoch(s):
     # sacct/squeue strings are Europe/Helsinki-naive (the cluster wall
-    # clock); interpret them the way domain._sacct_epoch does, not on
-    # the process TZ.
-    from domain.partitions import _sacct_epoch
-    return _sacct_epoch(s)
+    # clock); interpret them the way domain.common.sacct_epoch does, not
+    # on the process TZ.
+    return domain.common.sacct_epoch(s)
 
 
 def test_health(client):
@@ -952,10 +1000,10 @@ def test_wait_statistics_percentiles():
                    "wait_avg_s": None, "wait_samples": 0,
                    "wait_per_gpu_hour_weighted": None}
     # even ints -> rounded mean, floats keep precision
-    assert dp._median([]) is None
-    assert dp._median([10, 20, 30]) == 20
-    assert dp._median([1, 2]) == 2
-    assert dp._median([0.5, 1.5]) == 1.0
+    assert domain.common.median([]) is None
+    assert domain.common.median([10, 20, 30]) == 20
+    assert domain.common.median([1, 2]) == 2
+    assert domain.common.median([0.5, 1.5]) == 1.0
 
 
 def test_started_wait_summary_excludes_invalid_records(client, fake_prom,

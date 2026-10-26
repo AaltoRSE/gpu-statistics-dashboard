@@ -3,34 +3,13 @@ the per-GPU window's partition view, and a node's live-job-start window.
 """
 
 from collections import defaultdict
-from datetime import datetime
-from zoneinfo import ZoneInfo
 
 import cache
 import gpu_groups
 import sources
-from domain.common import aggregate_by, series_values
+from domain.common import aggregate_by, sacct_epoch, series_values, wait_percentiles
 from prom import PrometheusError
 from slurm import expand_node_list
-
-CLUSTER_TZ = ZoneInfo("Europe/Helsinki")
-"""sacct prints naive cluster-local (Europe/Helsinki) strings; interpret
-them on that wall clock, never the process's (deployment hosts vary)."""
-
-
-def _sacct_epoch(value):
-    """A sacct Europe/Helsinki-naive string to epoch seconds; None when
-    missing/invalid."""
-    try:
-        naive = datetime.fromisoformat(value)
-    except (TypeError, ValueError):
-        return None
-    if naive.tzinfo is not None:
-        return naive.timestamp()
-    return naive.replace(tzinfo=CLUSTER_TZ).timestamp()
-
-
-
 
 WAIT_TOTAL_KEY = "__total__"
 """Cluster-wide sentinel key in ``started_wait_summary``'s result.
@@ -257,7 +236,7 @@ def node_job_start(name, now):
     for id in live:
         for row in rows_by_id.get(id) or []:
             if row.get("jobid") == id or row.get("jobid_raw") == id:
-                epoch = _sacct_epoch(row.get("start"))
+                epoch = sacct_epoch(row.get("start"))
                 if epoch:
                     starts.append(epoch)
                 break
@@ -385,7 +364,7 @@ def pending_queue_status(jobs, now, partition_types):
             out[g][kind + "_gpus"] += gpu_demand
         totals["unique_pending_jobs"] += 1
         totals["unique_gpus_requested"] += gpu_demand
-        submitted = _sacct_epoch(job["submit"])
+        submitted = sacct_epoch(job["submit"])
         waiting.append({
             "jobid": job["jobid"],
             "user": job["user"],
@@ -405,44 +384,13 @@ def pending_queue_status(jobs, now, partition_types):
     return dict(out), totals, waiting
 
 
-def _median(values):
-    """Ordinary median of a numeric list, empty input yielding None.
-
-    Odd count: the middle value. Even count: the mean of the two middle
-    values, rounded to an integer ONLY for integer inputs ([1, 2] -> 2,
-    not 1); float lists keep the exact mean (display rounding happens at
-    the caller).
-    """
-    ordered = sorted(values)
-    if not ordered:
-        return None
-    middle = len(ordered) // 2
-    if len(ordered) % 2:
-        return ordered[middle]
-    a, b = ordered[middle - 1], ordered[middle]
-    mean = (a + b) / 2
-    return round(mean) if isinstance(a, int) and isinstance(b, int) else mean
-
-
 def _wait_statistics(samples):
-    """Completed-job wait summary: percentiles, average, sample count.
-
-    P50 is the ordinary median (mean of the two middle waits when the
-    sample count is even, integer-rounded). P90 is nearest-rank
-    (ceil(0.90 * n)), so the reported percentile is always an observed
-    wait. ``wait_samples`` counts the valid Submit->Start records behind
-    those figures.
+    """Completed-job wait summary: percentiles, average, sample count
+    (``domain.common.wait_percentiles``), plus the size-weighted ratio
+    slot the caller fills. ``wait_samples`` counts the valid
+    Submit->Start records behind those figures.
     """
-    ordered = sorted(samples)
-    if not ordered:
-        return {"wait_p50_s": None, "wait_p90_s": None,
-                "wait_avg_s": None, "wait_samples": 0,
-                "wait_per_gpu_hour_weighted": None}
-    p90 = ordered[-(-9 * len(ordered) // 10) - 1]
-    return {"wait_p50_s": _median(ordered), "wait_p90_s": p90,
-            "wait_avg_s": round(sum(ordered) / len(ordered)),
-            "wait_samples": len(ordered),
-            "wait_per_gpu_hour_weighted": None}
+    return {**wait_percentiles(samples), "wait_per_gpu_hour_weighted": None}
 
 
 def wait_empty():
@@ -478,8 +426,8 @@ def completed_wait_summary(records, node_gpu_types, window_start, window_end,
         if rec.get("state") != "COMPLETED":
             excluded["state"] += 1
             continue
-        started = _sacct_epoch(rec.get("start"))
-        submitted = _sacct_epoch(rec.get("submit"))
+        started = sacct_epoch(rec.get("start"))
+        submitted = sacct_epoch(rec.get("submit"))
         if started is None or submitted is None:
             excluded["timestamps"] += 1
             continue

@@ -13,6 +13,8 @@ import { readFileSync } from "fs";
 const html = readFileSync(new URL("../static/index.html", import.meta.url), "utf8");
 
 const EXPECTED = {
+  statusLiveResults: "Loading cluster status…",
+  statusHistoryResults: "Loading job history…",
   jobDetailResults: "Loading job detail history…",
   jobEfficiencyResults: "Loading job history…",
   jobsResults: "Loading job history…",
@@ -85,6 +87,7 @@ test("every data panel starts in the loading state", () => {
   const dom = new JSDOM(html);
   const doc = dom.window.document;
   for (const id of [
+    "statusLiveResults", "statusHistoryResults",
     "jobEfficiencyResults", "jobsResults", "partitionsResults",
     "queueResults", "vramResults", "usersResults", "groupsResults",
     "nodesResults",
