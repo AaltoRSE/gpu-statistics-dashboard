@@ -162,12 +162,96 @@ class UserRow(BaseModel):
                     "gpu_hours_eff, which is allocation-based.")
     vram_avg: Optional[float] = None
     gpu_types: List[str]
+    fairshare: Optional[float] = Field(
+        default=None,
+        description="Slurm's Fair Tree fairshare factor (0-1, higher "
+                    "starts sooner) of the user's primary association "
+                    "(fairshare_account); null when sshare could not be "
+                    "read or does not list the user.")
+    fairshare_account: Optional[str] = Field(
+        default=None,
+        description="The account of the association fairshare comes "
+                    "from: the one with the most decayed usage, else the "
+                    "user's default account.")
 
 
 class UsersResponse(BaseModel):
     window: Window
     count: int
+    fairshare_available: bool = Field(
+        description="False when sshare could not be read: every row's "
+                    "fairshare is then null, not 0.")
     users: List[UserRow]
+
+
+# ---- /api/users/{user}/priority ---------------------------------------
+
+class FairshareAssociation(BaseModel):
+    account: str
+    raw_shares: Optional[int] = None
+    norm_shares: Optional[float] = Field(
+        default=None,
+        description="The association's share of its parent account's "
+                    "shares.")
+    raw_usage: Optional[int] = Field(
+        default=None,
+        description="Decayed usage (TRES-billing seconds; 14-day "
+                    "half-life on Triton).")
+    effective_usage: Optional[float] = Field(
+        default=None,
+        description="The association's share of its parent account's "
+                    "usage.")
+    fairshare: Optional[float] = Field(
+        default=None,
+        description="Fair Tree fairshare factor, 0-1, higher starts "
+                    "sooner.")
+    primary: bool = Field(
+        description="The association the Users table's fairshare "
+                    "column reports.")
+
+
+class PendingPriority(BaseModel):
+    jobid: str
+    partition: str
+    account: str
+    qos: str
+    priority: Optional[int] = Field(
+        default=None,
+        description="The job's priority in this partition: the weighted "
+                    "factors below summed, minus nice.")
+    age: Optional[int] = None
+    fairshare: Optional[int] = None
+    jobsize: Optional[int] = None
+    partition_factor: Optional[int] = None
+    qos_factor: Optional[int] = None
+    nice: Optional[int] = None
+    rank: int = Field(
+        description="1 + the number of pending jobs in this partition "
+                    "with a higher priority (ties share a rank). An "
+                    "order by priority, not a start-time forecast: "
+                    "backfill can start lower-ranked jobs first.")
+    queue_length: int = Field(
+        description="Pending jobs in this partition, this one included.")
+
+
+class UserPriorityResponse(BaseModel):
+    user: str
+    default_account: Optional[str] = Field(
+        default=None,
+        description="sacctmgr's default account; null when unknown or "
+                    "sacctmgr could not be read.")
+    fairshare_available: bool
+    associations: Optional[List[FairshareAssociation]] = Field(
+        default=None,
+        description="Every (account, user) association; null when sshare "
+                    "could not be read, empty for a user it does not "
+                    "list.")
+    pending_available: bool
+    pending: Optional[List[PendingPriority]] = Field(
+        default=None,
+        description="One row per pending job and partition it may run "
+                    "in, by partition then rank; null when sprio could "
+                    "not be read.")
 
 
 # ---- /api/groups, /api/groups/{group_id}/users -------------------------

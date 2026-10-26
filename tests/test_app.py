@@ -189,6 +189,48 @@ STATUS_HISTORY = [
 ]
 
 
+def _assoc(account, raw_usage, fairshare, raw_shares=30):
+    return {"account": account, "raw_shares": raw_shares,
+            "norm_shares": 0.0005, "raw_usage": raw_usage,
+            "effective_usage": 0.01 if raw_usage else 0.0,
+            "fairshare": fairshare}
+
+
+# sshare associations (deps.show_fairshare): alice's jobs run in
+# aalto_users beside an unused department account; bob uses two accounts
+# and mostly ellis_users; carol has no usage anywhere, so her default
+# account's association stands for her; dave is not listed at all.
+FAIRSHARE = {
+    "alice": [_assoc("cs", 0, 1.0, raw_shares=1),
+              _assoc("aalto_users", 5000, 0.25)],
+    "bob": [_assoc("aalto_users", 100, 0.6),
+            _assoc("ellis_users", 9000, 0.05)],
+    "carol": [_assoc("cs", 0, 1.0, raw_shares=1),
+              _assoc("aalto_users", 0, 0.47)],
+}
+DEFAULT_ACCOUNTS = {"alice": "aalto_users", "bob": "aalto_users",
+                    "carol": "aalto_users", "dave": "aalto_users"}
+
+
+def _sprio(jobid, user, partition, priority, fairshare=0):
+    return {"jobid": jobid, "user": user, "account": "aalto_users",
+            "partition": partition, "qos": "normal", "priority": priority,
+            "age": 1000, "fairshare": fairshare, "jobsize": 0,
+            "partition_factor": 10000, "qos_factor": 0, "nice": 0}
+
+
+# The pending queue's sprio rows (deps.show_priorities): alice's job 101
+# may run in two partitions; in gpu-h200 bob is ahead of her and erin
+# ties with her.
+PRIORITIES = [
+    _sprio("101", "alice", "gpu-h200", 5000, 2500),
+    _sprio("101", "alice", "gpu-h100", 3000, 2500),
+    _sprio("102", "bob", "gpu-h200", 9000, 500),
+    _sprio("103", "erin", "gpu-h200", 5000),
+    _sprio("104", "frank", "gpu-h100", 2000),
+]
+
+
 class FakeProm:
     """Canned responses shaped like the real Prometheus API.
 
@@ -387,6 +429,15 @@ def fake_prom(monkeypatch):
         else None)
     # Empty pending queue by default; tests opt in via deps.queue_pending.
     monkeypatch.setattr(deps, "queue_pending", lambda: [])
+    # The priority sources: the canned associations, default accounts
+    # and sprio queue above (tests opt in to failures).
+    monkeypatch.setattr(deps, "show_fairshare",
+                        lambda: {u: [dict(a) for a in assocs]
+                                 for u, assocs in FAIRSHARE.items()})
+    monkeypatch.setattr(deps, "show_default_accounts",
+                        lambda: dict(DEFAULT_ACCOUNTS))
+    monkeypatch.setattr(deps, "show_priorities",
+                        lambda: [dict(r) for r in PRIORITIES])
     # The Status tab's cluster-wide history: the canned rows for every
     # chunk (tests opt in to failures or other rows).
     monkeypatch.setattr(deps, "sacct_status",
@@ -527,6 +578,85 @@ def test_users_mean_util_weights_samples_not_effective_gpu_hours(client, monkeyp
                         lambda win, raw, types, vram=(): jobs)
     data = client.get("/api/users", params={"since_hours": 24}).json()
     assert data["users"][0]["mean_util"] == 50.0
+
+
+def test_users_fairshare_comes_from_the_most_used_association(client):
+    data = client.get("/api/users", params={"since_hours": 24}).json()
+    assert data["fairshare_available"] is True
+    by_user = {u["user"]: u for u in data["users"]}
+    # the account the jobs ran in, not the unused department account
+    assert by_user["alice"]["fairshare"] == 0.25
+    assert by_user["alice"]["fairshare_account"] == "aalto_users"
+    # two used accounts: the one with the most usage
+    assert by_user["bob"]["fairshare_account"] == "ellis_users"
+    assert by_user["bob"]["fairshare"] == 0.05
+    # no usage anywhere: the default account's association
+    assert by_user["carol"]["fairshare_account"] == "aalto_users"
+    assert by_user["carol"]["fairshare"] == 0.47
+    # sshare does not list dave: unknown, not 0
+    assert by_user["dave"]["fairshare"] is None
+    assert by_user["dave"]["fairshare_account"] is None
+
+
+def test_users_survive_an_sshare_failure(client, monkeypatch):
+    def boom():
+        raise slurm.SlurmError("sshare exited 1")
+    monkeypatch.setattr(deps, "show_fairshare", boom)
+    data = client.get("/api/users", params={"since_hours": 24}).json()
+    assert data["fairshare_available"] is False
+    assert data["count"] == 4
+    assert all(u["fairshare"] is None for u in data["users"])
+
+
+def test_users_fairshare_without_default_accounts(client, monkeypatch):
+    def boom():
+        raise slurm.SlurmError("sacctmgr exited 1")
+    monkeypatch.setattr(deps, "show_default_accounts", boom)
+    by_user = {u["user"]: u for u in client.get(
+        "/api/users", params={"since_hours": 24}).json()["users"]}
+    # usage still decides; with none, the first association listed
+    assert by_user["bob"]["fairshare_account"] == "ellis_users"
+    assert by_user["carol"]["fairshare_account"] == "cs"
+
+
+def test_user_priority_lists_associations_and_ranked_pending_jobs(client):
+    r = client.get("/api/users/alice/priority")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["user"] == "alice"
+    assert body["default_account"] == "aalto_users"
+    assert body["fairshare_available"] and body["pending_available"]
+    assert [(a["account"], a["primary"]) for a in body["associations"]] == [
+        ("cs", False), ("aalto_users", True)]
+    pending = [(p["jobid"], p["partition"], p["rank"], p["queue_length"])
+               for p in body["pending"]]
+    # one row per partition; bob is ahead in gpu-h200, erin ties alice
+    assert pending == [("101", "gpu-h100", 1, 2), ("101", "gpu-h200", 2, 3)]
+    assert body["pending"][0]["fairshare"] == 2500
+
+
+def test_user_priority_matches_case_drift(client):
+    body = client.get("/api/users/Alice/priority").json()
+    assert body["user"] == "alice"
+    assert len(body["pending"]) == 2
+
+
+def test_user_priority_unknown_user_is_empty_not_404(client):
+    r = client.get("/api/users/nobody/priority")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["associations"] == [] and body["pending"] == []
+    assert body["default_account"] is None
+
+
+def test_user_priority_sources_degrade_independently(client, monkeypatch):
+    def boom():
+        raise slurm.SlurmError("sprio exited 1")
+    monkeypatch.setattr(deps, "show_priorities", boom)
+    body = client.get("/api/users/alice/priority").json()
+    assert body["pending_available"] is False and body["pending"] is None
+    assert body["fairshare_available"] is True
+    assert len(body["associations"]) == 2
 
 
 def test_users_window_validation(client):

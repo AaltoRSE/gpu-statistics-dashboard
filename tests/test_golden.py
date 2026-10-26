@@ -38,6 +38,7 @@ CASES = [
      {"since_hours": 24, "partition": "gpu-h100"}),
     ("job_detail", "/api/jobs/1", {"since_hours": 24}),
     ("users", "/api/users", {"since_hours": 24}),
+    ("user_priority", "/api/users/alice/priority", {}),
     ("groups", "/api/groups", {"since_hours": 24}),
     ("groups_department_level", "/api/groups",
      {"since_hours": 24, "level": "department"}),

@@ -1,0 +1,58 @@
+{
+  "associations": [
+    {
+      "account": "cs",
+      "effective_usage": 0.0,
+      "fairshare": 1.0,
+      "norm_shares": 0.0005,
+      "primary": false,
+      "raw_shares": 1,
+      "raw_usage": 0
+    },
+    {
+      "account": "aalto_users",
+      "effective_usage": 0.01,
+      "fairshare": 0.25,
+      "norm_shares": 0.0005,
+      "primary": true,
+      "raw_shares": 30,
+      "raw_usage": 5000
+    }
+  ],
+  "default_account": "aalto_users",
+  "fairshare_available": true,
+  "pending": [
+    {
+      "account": "aalto_users",
+      "age": 1000,
+      "fairshare": 2500,
+      "jobid": "101",
+      "jobsize": 0,
+      "nice": 0,
+      "partition": "gpu-h100",
+      "partition_factor": 10000,
+      "priority": 3000,
+      "qos": "normal",
+      "qos_factor": 0,
+      "queue_length": 2,
+      "rank": 1
+    },
+    {
+      "account": "aalto_users",
+      "age": 1000,
+      "fairshare": 2500,
+      "jobid": "101",
+      "jobsize": 0,
+      "nice": 0,
+      "partition": "gpu-h200",
+      "partition_factor": 10000,
+      "priority": 5000,
+      "qos": "normal",
+      "qos_factor": 0,
+      "queue_length": 3,
+      "rank": 2
+    }
+  ],
+  "pending_available": true,
+  "user": "alice"
+}

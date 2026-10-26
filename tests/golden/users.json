@@ -1,7 +1,10 @@
 {
   "count": 4,
+  "fairshare_available": true,
   "users": [
     {
+      "fairshare": 0.47,
+      "fairshare_account": "aalto_users",
       "gpu_types": [
         "h100"
       ],
@@ -13,6 +16,8 @@
       "vram_avg": null
     },
     {
+      "fairshare": null,
+      "fairshare_account": null,
       "gpu_types": [
         "h200_3g.71gb"
       ],
@@ -24,6 +29,8 @@
       "vram_avg": null
     },
     {
+      "fairshare": 0.25,
+      "fairshare_account": "aalto_users",
       "gpu_types": [
         "NVIDIA H200"
       ],
@@ -35,6 +42,8 @@
       "vram_avg": 11.0
     },
     {
+      "fairshare": 0.05,
+      "fairshare_account": "ellis_users",
       "gpu_types": [
         "h200"
       ],
