@@ -38,6 +38,7 @@ from api.schemas import (
     PartitionsResponse,
     StatusHistoryResponse,
     StatusLiveResponse,
+    UserPriorityResponse,
     UsersResponse,
 )
 from deps import DirectoryError
@@ -66,6 +67,11 @@ Prometheus GPU exporter (per-GPU utilization and VRAM).
   Effective GPU-hours = allocated GPU-hours x mean utilization.
 - list_groups rolls users up into professor research groups (or
   departments); group_members drills into one row by its group_id.
+- Fairshare (list_users, user_priority) is Slurm's Fair Tree factor,
+  0-1: higher starts sooner, and it weighs most in a job's priority. A
+  user has one per account association. user_priority's rank orders a
+  pending job by priority within its partition; it is not a start-time
+  forecast (backfill can start lower-ranked jobs first).
 """
 
 mcp = MCPServer("triton-gpu-stats", instructions=INSTRUCTIONS)
@@ -206,12 +212,31 @@ def list_users(
                       "utilization-weighted GPU-hours.") = 50,
 ) -> dict[str, Any]:
     """Per-user GPU activity over the window: jobs, running jobs, mean
-    utilization, utilization-weighted GPU-hours, mean VRAM % and GPU
-    types, top `limit` by GPU-hours. `count` is the number of users
-    before the limit. Use list_jobs(user=...) for one user's jobs."""
+    utilization, utilization-weighted GPU-hours, mean VRAM %, GPU types
+    and the user's fairshare (with `fairshare_account`, the association
+    it comes from), top `limit` by GPU-hours. `count` is the number of
+    users before the limit; `fairshare_available: false` means sshare
+    could not be read. Use list_jobs(user=...) for one user's jobs and
+    user_priority(user) for their priority."""
     out = _call(users.api_users, UsersResponse, since_hours=since_hours)
     out["users"] = out["users"][:limit]
     return out
+
+
+@mcp.tool(annotations=READ_ONLY)
+def user_priority(
+    user: Annotated[str, Field(
+        min_length=1, description="Slurm user name (case-insensitive).")],
+) -> dict[str, Any]:
+    """One user's scheduling priority right now: every account
+    association's fairshare (shares, decayed usage, the Fair Tree factor;
+    `primary` marks the one list_users reports), their default account,
+    and each pending job per partition with its priority, the weighted
+    factors it sums (age, fairshare, jobsize, partition_factor,
+    qos_factor, minus nice), and its `rank` of `queue_length` pending
+    jobs in that partition. `*_available: false` means sshare or sprio
+    could not be read; a user Slurm does not know has empty lists."""
+    return _call(users.api_user_priority, UserPriorityResponse, user=user)
 
 
 @mcp.tool(annotations=READ_ONLY)

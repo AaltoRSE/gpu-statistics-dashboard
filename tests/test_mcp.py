@@ -21,8 +21,8 @@ from slurm import SlurmError  # noqa: E402
 
 TOOLS = {
     "cluster_status", "cluster_history", "list_jobs", "job_detail",
-    "list_users", "list_groups", "group_members", "partition_utilization",
-    "partition_queue", "list_nodes", "node_detail",
+    "list_users", "user_priority", "list_groups", "group_members",
+    "partition_utilization", "partition_queue", "list_nodes", "node_detail",
 }
 
 
@@ -201,3 +201,20 @@ def test_tool_call_over_streamable_http(fake_prom, mcp_http, monkeypatch):
     # the trailing slash is canonical; /mcp redirects to it
     assert mcp_http.post("/mcp", json=LIST, headers=headers,
                          follow_redirects=False).status_code == 307
+
+
+@pytest.mark.anyio
+async def test_list_users_carries_fairshare(client):
+    body = (await call("list_users")).structured_content
+    assert body["fairshare_available"] is True
+    by_user = {u["user"]: u for u in body["users"]}
+    assert by_user["alice"]["fairshare"] == 0.25
+    assert by_user["alice"]["fairshare_account"] == "aalto_users"
+
+
+@pytest.mark.anyio
+async def test_user_priority_matches_the_http_route(client):
+    r = await call("user_priority", {"user": "alice"})
+    assert not r.is_error
+    assert r.structured_content == \
+        client.get("/api/users/alice/priority").json()
