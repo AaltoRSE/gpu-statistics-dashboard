@@ -108,6 +108,18 @@ jobs** (at least one GPU). Two panels load and fail independently.
   with no GPU activity in the window.
 - **Running only** hides users with no live job and re-fetches the
   selected user's running jobs.
+- **Fairshare** column: Slurm's Fair Tree fairshare factor (0–1, higher
+  starts sooner) from one cached `sshare -a` call for every user. A user
+  has one association per account; the column shows the one their jobs
+  ran in most (by decayed usage), or their default account's when they
+  have no usage. When sshare cannot be read the column is empty (never 0)
+  and a warning says so.
+- Selecting a user also opens a **priority card**: every account
+  association (share, usage share, fairshare), the default account, and
+  each pending job per partition with its `sprio` priority, the weighted
+  factors it sums (fairshare, age, partition, QOS, job size) and its rank
+  among that partition's pending jobs — an order by priority, not a
+  start-time forecast (backfill can start a lower-ranked job first).
 
 ### Groups tab
 - The Users list rolled up per **professor research group**: a row is one
@@ -330,6 +342,8 @@ sections.
 | `GET /api/jobs?since_hours=&user=&partition=&search=&limit=&running_only=&refresh=` | job table (Prometheus discovery + sacct enrichment; `running_only=true` keeps only jobs with a live GPU series; `refresh=true` bypasses the 60 s window cache) plus `efficiency_histogram` (GPU-hours by 10%-wide mean-utilization bucket, 0-100) |
 | `GET /api/partitions/queue?since_hours=&running_only=` | live pending demand plus bounded completed-job wait metrics. `wait_history_coverage` reports accounting records examined, valid samples by GPU type, exclusions, failed batches, and completeness. |
 | `GET /api/jobs/{jobid}?since_hours=` | per-GPU utilization/VRAM series + metadata (human-readable `start`/`end` preserved as-is) |
+| `GET /api/users?since_hours=` | per-user GPU activity over the window (jobs, running jobs, mean utilization, utilization-weighted GPU-hours, VRAM, GPU types) plus `fairshare` / `fairshare_account` (the primary association's sshare factor); `fairshare_available: false` (fairshare null) when sshare could not be read |
+| `GET /api/users/{user}/priority` | one user's scheduling priority: every sshare `associations` row (`primary` marks the Users table's), `default_account` (sacctmgr) and `pending` sprio rows per job and partition (`priority`, weighted `age`/`fairshare`/`jobsize`/`partition_factor`/`qos_factor`, `nice`, `rank` of `queue_length`). Each source degrades on its own (`fairshare_available`, `pending_available`); an unknown user answers with empty lists |
 | `GET /api/partitions?since_hours=&running_only=` | utilization per GPU group + trend + `mean_occupancy` (window-average allocated share) + allocated/total GPU capacity; pending-job demand lives in `/api/partitions/queue`. A group is the Slurm partition, except MIG GPUs, which form their own group per node MIG GRES profile (`h200_3g.71gb`), so a MIG node never counts against its whole-GPU pool. Capacity is summed over all nodes of the group (idle included); a node shared by several partitions counts toward each |
 | `GET /api/partitions/vram?since_hours=&running_only=&partition=` | per-job VRAM records for the distribution chart (average per-GPU peak VRAM in GB, mean utilization, allocated GPU-hours); `partition` keeps only one GPU group (a Slurm partition or a MIG GRES profile). Binning and the utilization-range filter happen client-side. Every VRAM-bearing candidate is returned (`total` = `len(jobs)`); the sacct enrichment reads the shared window-wide dump (day chunks, one retry per chunk, partial coverage disclosed through `enriched_frac`/`failed_batches`), and jobs it cannot enrich go through the per-ID row cache |
 | `GET /api/partitions/vram/progress?since_hours=&running_only=&partition=` | transient batch progress `{done, total, failed_batches}` of the window's in-flight sacct dump, or `null` when nothing is in flight (finished, cached, or failed). Keyed by the window only — the enrichment reads the same window-wide dump as the queue's wait history, so this poll and the queue's progress poll return the same batch state |
@@ -369,7 +383,8 @@ $ .venv/bin/uvicorn app:app --host 0.0.0.0 --port 8090
 | `cluster_history(include_hourly)` | past 24 h / 7 d summaries (submitted, outcomes, Eligible → Start wait); the hourly series only on request |
 | `list_jobs(since_hours, user, partition, search, limit=20, running_only)` | the Jobs tab's table, top `limit` by effective GPU-hours |
 | `job_detail(jobid, since_hours, include_series)` | metadata plus a per-GPU mean / max / last summary (raw series on request) |
-| `list_users(since_hours, limit=50)` | the Users tab's per-user aggregation |
+| `list_users(since_hours, limit=50)` | the Users tab's per-user aggregation, with each user's fairshare |
+| `user_priority(user)` | one user's fairshare associations and pending jobs' priority breakdown and queue rank |
 | `list_groups(since_hours, running_only, level, school, limit=50)` | the Groups tab's professor-group (or department) roll-up |
 | `group_members(group_id, since_hours, running_only, level)` | one group row's members and how they belong to it |
 | `partition_utilization(since_hours, running_only, include_trend)` | per-GPU-group utilization, occupancy and capacity |
@@ -461,6 +476,13 @@ actually pull for one window read:
   Status tab's live panel reads the shared scontrol snapshots plus a 30 s
   squeue snapshot (`sources.pending_jobs`; the Partitions queue keeps
   re-reading squeue per request).
+- **Priority** — the Users tab's scheduler reads: `sources.fairshare`
+  (`sshare -a`, every association, cached 300 s — Slurm recomputes
+  fairshare every `PriorityCalcPeriod`, 5 min), `sources.default_accounts`
+  (`sacctmgr show user`, 1 h) and `sources.priorities` (`sprio`, the whole
+  pending queue, since a rank is relative to everyone, 30 s). `/api/users`
+  gathers the first two alongside its window sources, so the column adds
+  no latency; each read degrades on its own to null.
 - **Fan-out** — each route gathers its independent sources concurrently
   (`sources.gather`), so no window fetch waits on another.
 - **Group classification** — the Groups tab's external reads beyond the
@@ -479,7 +501,8 @@ actually pull for one window read:
   know) and member lists per group for 24 h — so a repeat request makes
   zero directory calls, a conf edit shows on the next request, a partial
   failure is retried instead of memoized, and `/api/users` +
-  `/api/groups` in one window add no upstream query at all.
+  `/api/groups` in one window add no Prometheus or sacct query beyond
+  the shared window sources.
 - **Progress keys** — batched fetches publish
   `{done, total, failed_batches}` to `cache.progress_store` under
   keys their progress polls read: the sacct dump's chunked
