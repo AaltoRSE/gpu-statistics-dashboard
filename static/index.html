@@ -475,6 +475,7 @@
           <button class="us-clear" id="userSelectedClear" type="button">clear selection</button>
         </div>
           <h2>User table <span class="small" id="uCount"></span></h2>
+          <div class="hint coverage-banner warn" id="uFairshareUnavailable" hidden>Fairshare unavailable: sshare could not be read, so the Fairshare column is empty (not zero).</div>
           <div class="table-scroll">
             <table id="userTable">
               <thead><tr>
@@ -484,15 +485,56 @@
                 <th class="num" data-k="mean_util">Mean util %</th>
                 <th class="num" data-k="util_gpu_hours">GPU-hours<button type="button" class="glossary-btn" data-glossary="util-gpu-hours" title="What is this?">?</button></th>
                 <th class="num" data-k="vram_avg">VRAM %</th>
+                <th class="num" data-k="fairshare">Fairshare<button type="button" class="glossary-btn" data-glossary="fairshare" title="What is this?">?</button></th>
                 <th data-k="gpu_types">GPU types</th>
               </tr></thead>
               <tbody></tbody>
             </table>
           </div>
-          <div class="hint">GPU-hours = utilization-weighted GPU-hours over the window (mean util &times; GPU time); the selected user&rsquo;s job table below shows allocation-based effective GPU-hours. The user box filters the list as you type (no fetch). Press Enter &mdash; or click a table row &mdash; to finalize the selection; only then are that user&rsquo;s jobs fetched below. Click a column header to sort.</div>
+          <div class="hint">GPU-hours = utilization-weighted GPU-hours over the window (mean util &times; GPU time); the selected user&rsquo;s job table below shows allocation-based effective GPU-hours. Fairshare is Slurm&rsquo;s current fairshare factor (0&ndash;1, higher starts sooner) for the account the user&rsquo;s jobs run in. The user box filters the list as you type (no fetch). Press Enter &mdash; or click a table row &mdash; to finalize the selection; only then are that user&rsquo;s priority and jobs fetched below. Click a column header to sort.</div>
         </div>
       </div>
       <div class="results-loading">Loading user history&hellip;</div>
+    </div>
+    <div id="userPriorityResults" class="results-panel" style="display:none">
+      <div class="results-content">
+        <div class="card" id="userPriorityCard">
+          <h2><span id="userPriorityTitle">Priority</span><button type="button" class="glossary-btn" data-glossary="job-priority" title="What is this?">?</button></h2>
+          <div class="hint coverage-banner warn" id="userPriorityNote" hidden></div>
+          <div class="table-scroll compact">
+            <table id="userAssocTable">
+              <thead><tr>
+                <th data-k="account">Account</th>
+                <th class="num" data-k="norm_shares">Share</th>
+                <th class="num" data-k="effective_usage">Usage share</th>
+                <th class="num" data-k="fairshare">Fairshare</th>
+                <th>In user table</th>
+              </tr></thead>
+              <tbody></tbody>
+            </table>
+          </div>
+          <h2 style="margin-top:14px">Pending jobs <span class="small" id="userPendingCount"></span></h2>
+          <div class="table-scroll compact">
+            <table id="userPendingTable">
+              <thead><tr>
+                <th data-k="jobid">Job</th>
+                <th data-k="partition">Partition</th>
+                <th data-k="qos">QOS</th>
+                <th class="num" data-k="priority">Priority</th>
+                <th class="num" data-k="rank">Rank</th>
+                <th class="num" data-k="fairshare">Fairshare</th>
+                <th class="num" data-k="age">Age</th>
+                <th class="num" data-k="partition_factor">Partition factor</th>
+                <th class="num" data-k="qos_factor">QOS factor</th>
+                <th class="num" data-k="jobsize">Job size</th>
+              </tr></thead>
+              <tbody></tbody>
+            </table>
+          </div>
+          <div class="hint">Share and usage share are the user&rsquo;s fraction of their account&rsquo;s shares and of its recent (decayed) usage: fairshare is high while usage share stays below share. One row per pending job and partition it may run in. Priority is the weighted factors summed, minus the job&rsquo;s nice value. Rank is the job&rsquo;s place among the partition&rsquo;s pending jobs by priority &mdash; not a start-time forecast: backfill can start a lower-ranked job that fits a gap first.</div>
+        </div>
+      </div>
+      <div class="results-loading">Loading the user&rsquo;s priority&hellip;</div>
     </div>
     <div id="userJobsResults" class="results-panel" style="display:none">
       <div class="results-content">
@@ -722,6 +764,24 @@
     <dd>Utilization-weighted GPU-hours: mean utilization &times; GPU time.
       Ranks users by how much they actually used, not how much they were
       allocated. Not the same figure as a job's effective GPU-hours below.</dd>
+    <dt id="glossary-fairshare">Fairshare (Users table)</dt>
+    <dd>Slurm&rsquo;s Fair Tree fairshare factor, from 0 to 1: the less a
+      user (and their account) used recently compared with their share,
+      the higher it is, and the sooner their jobs start. Usage decays,
+      so the factor recovers over time. A user has one per account
+      they belong to; the table shows the account their jobs ran in
+      most (by decayed usage), or their default account when they have
+      no usage. Select the user to see every account.</dd>
+    <dt id="glossary-job-priority">Job priority and rank (Users tab)</dt>
+    <dd>A pending job&rsquo;s priority is a weighted sum (sprio): its
+      fairshare, how long it has been eligible (age), its job size, the
+      partition and its QOS, minus its nice value. Each factor is shown
+      already weighted, so they add up to the priority. Rank is the
+      job&rsquo;s place among the pending jobs of one partition, sorted
+      by priority (equal priorities share a rank). The scheduler starts
+      jobs in that order when resources free up, but backfill can start
+      a lower-ranked job that fits a gap first, so rank is not a
+      start-time forecast.</dd>
     <dt id="glossary-prof-groups">Professor group (Groups tab)</dt>
     <dd>A row is one professor&rsquo;s research group: the Aalto AD unit
       the professor leads, with members read from that unit&rsquo;s NSS

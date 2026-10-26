@@ -2,8 +2,10 @@
  *
  * The user list is fetched once per window; the text box filters that
  * list locally as you type (no network). A selection is "finalized"
- * only on Enter or a table-row click — and only then is the selected
- * user's job list fetched (server-side user-scoped query).
+ * only on Enter or a table-row click — and only then are the selected
+ * user's priority card (fairshare associations, pending jobs' sprio
+ * priority and rank) and job list fetched (server-side user-scoped
+ * queries).
  *
  * See tabs/jobs.js for why this module and core/router.js import each
  * other. The user's job table (userJobsTable) is wired to the shared
@@ -29,6 +31,8 @@ let userSelected = null;   // finalized user name or null
 let userJobs = [];
 let usersToken = 0;
 let userJobsToken = 0;
+let userPriority = null;   // the selected user's /priority body, or null
+let userPriorityToken = 0;
 
 export async function loadUsers() {
   const token = ++usersToken;
@@ -40,6 +44,7 @@ export async function loadUsers() {
     userRows = data.users;
     const w = data.window;
     $("uMetaCount").textContent = data.count + " users";
+    $("uFairshareUnavailable").hidden = data.fairshare_available !== false;
     $("uMeta").textContent =
       tsToDate(w.start) + " → " + tsToDate(w.end);
     renderUserTable();
@@ -72,6 +77,7 @@ function userRowHtml(u) {
       <td class="num">${raw(pctBar(u.mean_util))}</td>
       <td class="num">${fmtInt(u.util_gpu_hours)}</td>
       <td class="num">${fmt(u.vram_avg)}</td>
+      <td class="num" title="${u.fairshare_account ? "account " + u.fairshare_account : ""}">${fmt(u.fairshare, 3)}</td>
       <td class="small chip-cell">${raw(chipList((u.gpu_types || []).map(escapeHtml)))}</td>
     </tr>`;
 }
@@ -96,7 +102,7 @@ const userTable = createTable({
     { key: "user", type: "text" }, { key: "jobs", type: "number" },
     { key: "running_jobs", type: "number" }, { key: "mean_util", type: "number" },
     { key: "util_gpu_hours", type: "number" }, { key: "vram_avg", type: "number" },
-    { key: "gpu_types", type: "text" },
+    { key: "fairshare", type: "number" }, { key: "gpu_types", type: "text" },
   ],
   defaultSort: { key: "util_gpu_hours", dir: "desc" },
   renderRow: userRowHtml,
@@ -125,6 +131,7 @@ export function finalizeUser(name) {
   name = (name || "").trim();
   if (!name) {
     userSelected = null;
+    $("userPriorityResults").style.display = "none";
     $("userJobsResults").style.display = "none";
     renderUserSelectedBanner();
     renderUserTable();
@@ -139,9 +146,115 @@ export function finalizeUser(name) {
   $("uSearch").value = finalName;
   renderUserSelectedBanner();
   renderUserTable();
+  loadUserPriority(finalName);
   loadUserJobs(finalName);
   setUrl("/user/" + encodeURIComponent(finalName));
 }
+
+// Fractions of the account's shares / usage as a percentage; a nonzero
+// share too small for two decimals must not read as zero.
+function sharePct(v) {
+  if (v === null || v === undefined) return "—";
+  const pct = v * 100;
+  return pct > 0 && pct < 0.01 ? "<0.01%" : fmt(pct, 2) + "%";
+}
+
+async function loadUserPriority(user) {
+  const token = ++userPriorityToken;
+  $("userPriorityResults").style.display = "block";
+  $("userPriorityTitle").textContent = "Priority · " + user;
+  setResultsLoading("userPriorityResults", true, "Loading the user’s priority…");
+  try {
+    const data = await api("/api/users/" + encodeURIComponent(user) + "/priority");
+    if (token !== userPriorityToken) return;
+    panelOk("userPriorityResults");
+    userPriority = data;
+    renderUserPriority();
+  } catch (e) {
+    if (token === userPriorityToken)
+      showPanelError("userPriorityResults", e, () => loadUserPriority(user), "the user’s priority");
+  } finally {
+    if (token === userPriorityToken) setResultsLoading("userPriorityResults", false);
+  }
+}
+
+function renderUserPriority() {
+  const p = userPriority;
+  $("userPriorityTitle").textContent = "Priority · " + p.user +
+    (p.default_account ? " · default account " + p.default_account : "");
+  const missing = [];
+  if (!p.fairshare_available) missing.push("sshare could not be read, so fairshare is unknown");
+  if (!p.pending_available) missing.push("sprio could not be read, so pending-job priorities are unknown");
+  const note = $("userPriorityNote");
+  note.textContent = missing.join(" · ");
+  note.hidden = !missing.length;
+  userAssocTable.setRows(p.associations || []);
+  const pending = p.pending || [];
+  const jobs = new Set(pending.map((r) => r.jobid)).size;
+  $("userPendingCount").textContent = p.pending
+    ? jobs + (jobs === 1 ? " job" : " jobs") : "";
+  userPendingTable.setRows(pending);
+}
+
+function userAssocRowHtml(a) {
+  return html`
+    <tr>
+      <td>${a.account}</td>
+      <td class="num" title="${a.raw_shares === null ? "" : a.raw_shares + " raw shares"}">${sharePct(a.norm_shares)}</td>
+      <td class="num">${sharePct(a.effective_usage)}</td>
+      <td class="num">${fmt(a.fairshare, 3)}</td>
+      <td>${a.primary ? "yes" : ""}</td>
+    </tr>`;
+}
+
+function userPendingRowHtml(r) {
+  return html`
+    <tr>
+      <td>${r.jobid}</td><td>${r.partition}</td><td>${r.qos}</td>
+      <td class="num">${fmtInt(r.priority)}</td>
+      <td class="num">${fmtInt(r.rank)} / ${fmtInt(r.queue_length)}</td>
+      <td class="num">${fmtInt(r.fairshare)}</td>
+      <td class="num">${fmtInt(r.age)}</td>
+      <td class="num">${fmtInt(r.partition_factor)}</td>
+      <td class="num">${fmtInt(r.qos_factor)}</td>
+      <td class="num">${fmtInt(r.jobsize)}</td>
+    </tr>`;
+}
+
+const userAssocTable = createTable({
+  el: $("userAssocTable"),
+  columns: [
+    { key: "account", type: "text" }, { key: "norm_shares", type: "number" },
+    { key: "effective_usage", type: "number" }, { key: "fairshare", type: "number" },
+  ],
+  defaultSort: { key: "effective_usage", dir: "desc" },
+  renderRow: userAssocRowHtml,
+  onRowClick: () => {},
+  emptyMessage: () => ({
+    text: userPriority && !userPriority.fairshare_available
+      ? "Fairshare unavailable." : "Slurm lists no account for " + userSelected + ".",
+    resetLabel: null,
+  }),
+});
+
+const userPendingTable = createTable({
+  el: $("userPendingTable"),
+  columns: [
+    { key: "jobid", type: "text" }, { key: "partition", type: "text" },
+    { key: "qos", type: "text" }, { key: "priority", type: "number" },
+    { key: "rank", type: "number" }, { key: "fairshare", type: "number" },
+    { key: "age", type: "number" }, { key: "partition_factor", type: "number" },
+    { key: "qos_factor", type: "number" }, { key: "jobsize", type: "number" },
+  ],
+  defaultSort: { key: "priority", dir: "desc" },
+  renderRow: userPendingRowHtml,
+  onRowClick: () => {},
+  emptyMessage: () => ({
+    text: userPriority && !userPriority.pending_available
+      ? "Pending-job priorities unavailable." : "No pending jobs for " + userSelected + ".",
+    resetLabel: null,
+  }),
+});
 
 async function loadUserJobs(user) {
   const token = ++userJobsToken;
@@ -239,6 +352,7 @@ const userJobsTable = createTable({
 
 $("uWindow").addEventListener("change", () => {
   userSelected = null;
+  $("userPriorityResults").style.display = "none";
   $("userJobsResults").style.display = "none";
   loadUsers();
 });
