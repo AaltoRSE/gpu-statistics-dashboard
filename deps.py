@@ -32,8 +32,11 @@ from slurm import (  # noqa: F401 (re-exported)
     sacct_jobs,
     sacct_jobs_resilient,
     sacct_status,
+    show_default_accounts,
+    show_fairshare,
     show_jobs,
     show_nodes,
+    show_priorities,
 )
 
 route_cache = TtlCache()

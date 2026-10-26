@@ -5,8 +5,10 @@ wait metrics use one bounded ``sacct --allusers -X -S … -E …`` query, avoidi
 scrape-sampling gaps and large concurrent ID batches. ``sacct_allocations``
 fetches one chunk of the window-wide allocation dump the shared-source layer
 (plan §3) assembles into per-day cached chunks; ``sacct_status`` fetches one
-chunk of the Status tab's cluster-wide (every partition) job history. All
-calls are read-only.
+chunk of the Status tab's cluster-wide (every partition) job history.
+``show_fairshare``, ``show_default_accounts`` and ``show_priorities`` read
+the scheduler's priority inputs (sshare, sacctmgr, sprio) for the Users
+tab. All calls are read-only.
 """
 
 import datetime
@@ -305,6 +307,132 @@ def show_nodes():
 
 def show_partitions():
     return parse_scontrol_partitions(_run(["scontrol", "show", "partitions"]))
+
+
+# One association per row: sshare prints the account tree depth-first,
+# parent accounts with an empty User, each Account indented by its depth.
+SSHARE_FIELDS = [
+    "Account",
+    "User",
+    "RawShares",
+    "NormShares",
+    "RawUsage",
+    "EffectvUsage",
+    "FairShare",
+]
+
+# sprio --format fields, in parse_sprio's column order: job id, user,
+# account, partition, QOS name, then the weighted priority and its
+# weighted summands (age, fairshare, job size, partition, QOS) and the
+# nice value subtracted from them.
+SPRIO_FORMAT = "%i|%u|%o|%r|%n|%Y|%A|%F|%J|%P|%Q|%N"
+
+
+def _number(value, cast):
+    """``cast(value)``, or None for a blank or unparseable field."""
+    try:
+        return cast(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def parse_sshare(output):
+    """Parse ``sshare -a -P -n -o SSHARE_FIELDS`` into user associations.
+
+    Returns ``{user: [association, ...]}`` in sshare's order, one
+    association per (account, user) pair: ``account`` (indentation
+    stripped), ``raw_shares``, ``norm_shares``, ``raw_usage`` (decayed
+    usage), ``effective_usage`` and ``fairshare`` (the Fair Tree factor,
+    0-1, higher starts sooner). Parent-account rows (no user) are
+    skipped; a blank or unparseable number is None, never 0.
+    """
+    users = {}
+    for line in output.splitlines():
+        parts = line.split("|")
+        if len(parts) < len(SSHARE_FIELDS):
+            continue
+        row = dict(zip(SSHARE_FIELDS, parts))
+        user = row["User"].strip()
+        if not user:
+            continue
+        users.setdefault(user, []).append({
+            "account": row["Account"].strip(),
+            "raw_shares": _number(row["RawShares"], int),
+            "norm_shares": _number(row["NormShares"], float),
+            "raw_usage": _number(row["RawUsage"], int),
+            "effective_usage": _number(row["EffectvUsage"], float),
+            "fairshare": _number(row["FairShare"], float),
+        })
+    return users
+
+
+def show_fairshare():
+    """Every user association's fairshare, from one ``sshare -a`` call."""
+    return parse_sshare(_run(
+        ["sshare", "-a", "-P", "-n", "-o", ",".join(SSHARE_FIELDS)],
+        timeout=60))
+
+
+def parse_default_accounts(output):
+    """Parse ``sacctmgr -nP show user format=User,DefaultAccount`` into
+    ``{user: default_account}``; a user without a default is left out."""
+    accounts = {}
+    for line in output.splitlines():
+        user, _, account = line.strip().partition("|")
+        if user and account:
+            accounts[user] = account
+    return accounts
+
+
+def show_default_accounts():
+    """Every user's default account (where a job without ``-A`` runs)."""
+    return parse_default_accounts(_run(
+        ["sacctmgr", "-nP", "show", "user", "format=User,DefaultAccount"],
+        timeout=30))
+
+
+def parse_sprio(output):
+    """Parse ``sprio -h -o SPRIO_FORMAT`` into pending-job priority rows.
+
+    sprio prints one row per pending job and partition it may run in.
+    Each row: ``jobid``, ``user``, ``account``, ``partition``, ``qos``
+    (name), the weighted ``priority`` and its weighted summands ``age``,
+    ``fairshare``, ``jobsize``, ``partition_factor`` and ``qos_factor``,
+    and ``nice``. A repeated (jobid, partition) row is kept once.
+    """
+    rows, seen = [], set()
+    for line in output.splitlines():
+        parts = line.strip().split("|")
+        if len(parts) < 12 or not parts[0]:
+            continue
+        key = (parts[0], parts[3])
+        if key in seen:
+            continue
+        seen.add(key)
+        num = [_number(p, float) for p in parts[5:12]]
+        priority, age, fairshare, jobsize, part, qos, nice = (
+            None if n is None else int(n) for n in num)
+        rows.append({
+            "jobid": parts[0],
+            "user": parts[1],
+            "account": parts[2],
+            "partition": parts[3],
+            "qos": parts[4],
+            "priority": priority,
+            "age": age,
+            "fairshare": fairshare,
+            "jobsize": jobsize,
+            "partition_factor": part,
+            "qos_factor": qos,
+            "nice": nice,
+        })
+    return rows
+
+
+def show_priorities():
+    """Every pending job's priority per partition, from one ``sprio``
+    call: a job's rank needs the whole queue, not only its owner's."""
+    return parse_sprio(_run(["sprio", "-h", "-o", SPRIO_FORMAT], timeout=30))
 
 
 def parse_tres_per_node(text):

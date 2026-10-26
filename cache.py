@@ -384,6 +384,25 @@ def day_chunk_key(day_start_iso):
     return ("sacct_day_chunk", day_start_iso)
 
 
+def fairshare_key():
+    """Every user association's sshare fairshare, cached 300 s: Slurm
+    recomputes fairshare once per PriorityCalcPeriod (5 min), so a
+    fresher read would return the same figures."""
+    return ("sshare_fairshare",)
+
+
+def default_accounts_key():
+    """Every user's sacctmgr default account, cached 1 h: it changes at
+    account-administration speed."""
+    return ("sacctmgr_default_accounts",)
+
+
+def priorities_key():
+    """The 30 s sprio snapshot of every pending job's priority — the
+    whole queue, since a job's rank is relative to everyone else's."""
+    return ("sprio_priorities",)
+
+
 def squeue_pending_key():
     """The Status tab's 30 s squeue pending snapshot. The Partitions
     queue deliberately re-reads squeue per request and never uses it."""

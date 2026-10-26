@@ -80,6 +80,17 @@ def gather(*thunks):
         return [f.result() for f in futures]
 
 
+def or_none(fetch):
+    """A source thunk that reads as None instead of raising SlurmError,
+    for a route whose sources each degrade on their own."""
+    def run():
+        try:
+            return fetch()
+        except SlurmError:
+            return None
+    return run
+
+
 def _range_pair(entry):
     """One ``["ts", "v"]`` / ``(ts, v)`` pair to parsed floats, or None
     when unparseable or NaN (the skips of domain.common.series_values,
@@ -425,6 +436,25 @@ def pending_jobs():
     """
     return deps.route_cache.get_or_set(
         cache.squeue_pending_key(), 30, deps.queue_pending)
+
+
+def fairshare():
+    """The 300 s-cached sshare associations of every user (one call for
+    the whole Users table, never one per user)."""
+    return deps.route_cache.get_or_set(
+        cache.fairshare_key(), 300, deps.show_fairshare)
+
+
+def default_accounts():
+    """The 1 h-cached sacctmgr default account of every user."""
+    return deps.route_cache.get_or_set(
+        cache.default_accounts_key(), 3600, deps.show_default_accounts)
+
+
+def priorities():
+    """The 30 s-cached sprio rows of every pending job."""
+    return deps.route_cache.get_or_set(
+        cache.priorities_key(), 30, deps.show_priorities)
 
 
 def status_history(progress_key=None):

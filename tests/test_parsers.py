@@ -15,13 +15,16 @@ from slurm import (  # noqa: E402
     array_task_count,
     expand_node_list,
     parse_alloc_tres,
+    parse_default_accounts,
     parse_elapsed,
     parse_gres,
     parse_sacct_status,
     parse_scontrol_jobs,
     parse_scontrol_nodes,
     parse_scontrol_partitions,
+    parse_sprio,
     parse_squeue_json,
+    parse_sshare,
     parse_tres_per_node,
 )
 
@@ -843,3 +846,66 @@ def test_sacct_resilient_progress_survives_failed_batch(monkeypatch):
     assert states[0]["total"] == 3
     assert states[-1]["done"] == 3
     assert states[-1]["failed_batches"] == 1
+
+
+# ``sshare -a -P -n -o Account,User,RawShares,NormShares,RawUsage,
+# EffectvUsage,FairShare`` as Triton prints it: parent accounts with no
+# user, accounts indented by depth, one user in two accounts.
+SSHARE_OUTPUT = """\
+root|||0.000000|74178896356|1.000000|
+ root|root|1|0.008547|0|0.000000|1.000000
+ aalto||99|0.846154|0|0.000000|
+  cs||30|0.272727|0|0.000000|
+   cs|firoozh1|1|0.001171|0|0.000000|1.000000
+  aalto_users|firoozh1|30|0.000477|41268|0.000001|0.125761
+  aalto_users|newuser|30|0.000477|0|0.000000|
+"""
+
+
+def test_parse_sshare_keeps_user_associations_only():
+    users = parse_sshare(SSHARE_OUTPUT)
+    assert set(users) == {"root", "firoozh1", "newuser"}
+    assert users["firoozh1"] == [
+        {"account": "cs", "raw_shares": 1, "norm_shares": 0.001171,
+         "raw_usage": 0, "effective_usage": 0.0, "fairshare": 1.0},
+        {"account": "aalto_users", "raw_shares": 30,
+         "norm_shares": 0.000477, "raw_usage": 41268,
+         "effective_usage": 0.000001, "fairshare": 0.125761},
+    ]
+
+
+def test_parse_sshare_blank_fairshare_is_none_not_zero():
+    assert parse_sshare(SSHARE_OUTPUT)["newuser"][0]["fairshare"] is None
+
+
+def test_parse_default_accounts():
+    assert parse_default_accounts(
+        "root|\naaarva|aalto_users\nbob|courses\n") == {
+            "aaarva": "aalto_users", "bob": "courses"}
+
+
+def test_parse_sprio_rows_and_dedupe():
+    out = (
+        "20157390|lintune5|aalto_users|gpu-grace-h200-141g|normal|442842|"
+        "10000|422843|0|10000|0|0\n"
+        "20370956|varjoa2|aalto_users|gpu-h200-141g-short|normal|27801|"
+        "10000|7802|0|10000|0|0\n"
+        "20370956|varjoa2|aalto_users|gpu-h200-141g-m|normal|27801|"
+        "10000|7802|0|10000|0|1500\n"
+        "20370956|varjoa2|aalto_users|gpu-h200-141g-m|normal|27801|"
+        "10000|7802|0|10000|0|1500\n"
+    )
+    rows = parse_sprio(out)
+    assert [(r["jobid"], r["partition"]) for r in rows] == [
+        ("20157390", "gpu-grace-h200-141g"),
+        ("20370956", "gpu-h200-141g-short"),
+        ("20370956", "gpu-h200-141g-m"),
+    ]
+    assert rows[0] == {
+        "jobid": "20157390", "user": "lintune5", "account": "aalto_users",
+        "partition": "gpu-grace-h200-141g", "qos": "normal",
+        "priority": 442842, "age": 10000, "fairshare": 422843,
+        "jobsize": 0, "partition_factor": 10000, "qos_factor": 0,
+        "nice": 0,
+    }
+    assert rows[2]["nice"] == 1500

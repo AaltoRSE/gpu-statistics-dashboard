@@ -13,17 +13,6 @@ from slurm import SlurmError
 router = APIRouter()
 
 
-def _or_none(fetch):
-    """A source thunk that reads as None instead of raising SlurmError:
-    each live source degrades on its own."""
-    def run():
-        try:
-            return fetch()
-        except SlurmError:
-            return None
-    return run
-
-
 @router.get("/api/status/live", response_model=StatusLiveResponse)
 def api_status_live(refresh: bool = Query(False)):
     """Occupancy, node states, running and pending jobs right now.
@@ -38,9 +27,9 @@ def api_status_live(refresh: bool = Query(False)):
                                     cache.scontrol_jobs_key(),
                                     cache.squeue_pending_key())
     nodes, jobs, pending = sources.gather(
-        _or_none(sources.scontrol_nodes),
-        _or_none(sources.scontrol_jobs),
-        _or_none(sources.pending_jobs),
+        sources.or_none(sources.scontrol_nodes),
+        sources.or_none(sources.scontrol_jobs),
+        sources.or_none(sources.pending_jobs),
     )
     return live_status(nodes, jobs, pending, deps.now())
 
