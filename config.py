@@ -4,6 +4,8 @@ Precedence (first wins):
 1. Environment variables ``PROM_URL`` / ``PROM_USER`` / ``PROM_PASSWORD``.
 2. ``jobgraph.conf`` (shared with the jobgraph tool): ``$JOBGRAPH_CONFIG``,
    then ``/etc/jobgraph.conf``, then ``~/.config/jobgraph.conf``.
+
+The MCP endpoint's bearer token is ``MCP_TOKEN`` (environment only).
 """
 
 import configparser
@@ -68,3 +70,12 @@ def load_config():
         "password": password or "",
         "timeout": timeout,
     }
+
+
+def mcp_token():
+    """The bearer token the /mcp/ endpoint requires, or None when
+    ``MCP_TOKEN`` is unset or empty — in which case the endpoint stays
+    disabled rather than open. Read per request rather than at import,
+    so a test's monkeypatched environment takes effect at once.
+    """
+    return os.environ.get("MCP_TOKEN") or None
