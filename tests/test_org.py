@@ -582,7 +582,9 @@ def test_resolve_users_reports_batches_and_cached_rerun_reports_none(
     mapping2, coverage2 = org.resolve_users(
         owners, conf(), index={}, progress=reports2.append)
     assert reports2 == []
-    assert calls == owners  # each owner was read exactly once, ever
+    # each owner was read exactly once, ever (batches run on several
+    # threads, so in no guaranteed order)
+    assert sorted(calls) == owners
     assert mapping2 == mapping and coverage2 == coverage
 
 

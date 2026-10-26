@@ -406,8 +406,9 @@ def test_sacct_window_chunks_stay_midnight_aligned_across_dst_fall_back(
 
     records, coverage, fetched_start, fetched_end = sources.sacct_window(72)
     # 72 epoch-hours back from Oct 26 15:30 EET is Oct 23 16:30 EEST — the
-    # offset change absorbs one wall hour.
-    assert calls == [
+    # offset change absorbs one wall hour. Chunks are fetched concurrently,
+    # in no guaranteed order.
+    assert sorted(calls) == [
         ("2026-10-23T16:30:00", "2026-10-24T00:00:00"),
         ("2026-10-24T00:00:00", "2026-10-25T00:00:00"),
         ("2026-10-25T00:00:00", "2026-10-26T00:00:00"),
