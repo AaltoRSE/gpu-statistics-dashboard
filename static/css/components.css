@@ -175,6 +175,10 @@ td.chip-cell { white-space:normal; }
 .queue-unique { font-size:15px; font-weight:700; color:var(--text);
   margin:2px 0 10px; }
 .queue-unique .small { font-weight:400; }
+/* Groups tab coverage banner: classification completeness, always legible
+   but quiet; problems (unmapped codes, failed lookups) tint it. */
+.coverage-banner { margin: 0 0 10px; }
+.coverage-banner.warn { color: var(--warn); }
 
 /* Panel-local loading: a small status chip plus a light dim — content stays
    readable (no blur) so a refresh never implies the shown data is gone.

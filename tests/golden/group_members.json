@@ -1,0 +1,30 @@
+{
+  "count": 1,
+  "group_id": "kyrkiv1",
+  "group_name": "Kyrki Ville",
+  "level": "group",
+  "users": [
+    {
+      "dept_code": "T410",
+      "extra_groups": [],
+      "gpu_types": [
+        "NVIDIA H200"
+      ],
+      "group": "kyrkiv1",
+      "jobs": 1,
+      "mean_util": 50.0,
+      "membership": "paid",
+      "own_dept": "T410",
+      "running_jobs": 1,
+      "school_code": "ELEC",
+      "status": "group",
+      "user": "alice",
+      "util_gpu_hours": 0.03,
+      "vram_avg": 11.0
+    }
+  ],
+  "window": {
+    "end": 1788100000,
+    "start": 1788013600
+  }
+}

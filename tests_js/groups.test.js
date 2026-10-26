@@ -1,0 +1,611 @@
+// Functional tests for the Groups tab: the school filter runs entirely
+// client-side (no fetch), a superseded response is dropped by its token,
+// the level toggle re-fetches server-side (group → department), the
+// coverage banner renders the professor-group buckets and warns on
+// lookup failures, pre-v2 level=unit deep links still land on the group
+// level, and the Unaffiliated row renders even when empty.
+// The member drill-down fetches on row click, shows each member's
+// extra groups, and links members (and the group leader's name) to the
+// Users tab.
+//
+// Node's own test runner + jsdom against the app's real index.html, same
+// harness shape as partitions-parallel.test.js: timers are stubbed so
+// node --test can never hang, and group responses are held behind gates
+// the tests release explicitly.
+import assert from "node:assert/strict";
+import { test } from "node:test";
+import { JSDOM } from "jsdom";
+import { readFileSync } from "fs";
+
+const html = readFileSync(new URL("../static/index.html", import.meta.url), "utf8");
+
+function group(gid, name, overrides) {
+  return {
+    group_id: gid, group_name: name, leader: null, leader_name: null,
+    unit_codes: [], dept_code: null, dept_name: null,
+    school_code: null, school_name: null, users: 1, jobs: 2,
+    running_jobs: 1, mean_util: 50, util_gpu_hours: 1.0, gpu_hours: 2.0,
+    vram_avg: null, low_eff_jobs: 0, top_users: [],
+    ...overrides,
+  };
+}
+
+const BODY1 = {
+  window: { start: 1000, end: 2000 }, level: "group", count: 3,
+  schools: [
+    { code: "T3", short: "SCI", full: "School of Science" },
+    { code: "T4", short: "ELEC", full: "School of Electrical Engineering" },
+  ],
+  coverage: { users: 4, in_prof_group: 2, dept_only: 1, unaffiliated: 1,
+              unresolved: 0, failed: 0 },
+  groups: [
+    group("dept:T313", "Computer Science, no professor group",
+          { school_code: "SCI", mean_util: 92.5 }),
+    group("unaffiliated", "Unaffiliated", { mean_util: 85 }),
+    group("kyrkiv1", "Kyrki Ville",
+          { leader: "kyrkiv1", leader_name: "Kyrki Ville",
+            unit_codes: ["T40106"], school_code: "ELEC", mean_util: 50 }),
+    group("unit:T21204", "Mechatronics (shared unit)",
+          { unit_codes: ["T21204"], school_code: "ENG", mean_util: 40 }),
+  ],
+};
+
+const BODY2 = {
+  ...BODY1,
+  level: "department", count: 2,
+  groups: [
+    group("dept:T410", "Department of Electrical Engineering and Automation",
+          { school_code: "ELEC" }),
+    group("unaffiliated", "Unaffiliated",
+          { users: 0, jobs: 0, running_jobs: 0, mean_util: 0 }),
+  ],
+};
+
+const MEMBERS_BODY = {
+  group_id: "kyrkiv1", group_name: "Kyrki Ville", level: "group",
+  window: { start: 1000, end: 2000 }, count: 1,
+  users: [{
+    user: "hannuse2", jobs: 2, running_jobs: 1, mean_util: 50,
+    util_gpu_hours: 1.0, vram_avg: 11, gpu_types: ["h200"],
+    group: "kyrkiv1", membership: "everyone",
+    dept_code: "T410", school_code: "ELEC", own_dept: "T411",
+    extra_groups: ["backstt1"], status: "group",
+  }],
+};
+
+// A benign body for the routes a leader-link click triggers on the way
+// to the Users tab (loadUsers, the selected user's job list) — enough
+// shape that those renders succeed and no promise chain rejects.
+const BENIGN = {
+  window: { start: 1000, end: 2000 }, count: 0, users: [], jobs: [],
+};
+
+// boot: build the DOM at /groups, route the fetch stub by URL, import a
+// fresh groups module against it. Options:
+//   gateGroups   hold /api/groups behind a gate (releaseGroups() pops the
+//                FIFO of pending responses, resolving each with the next
+//                body from bodies[] in order)
+//   bodies       response bodies for successive /api/groups fetches
+//   failGroups   answer /api/groups with a 502 (the request decides the
+//                panel's fate; the poll is best-effort)
+//   gateMembers  hold the drill-down /api/groups/{id}/users behind a gate
+//                (releaseMembers() pops it)
+//   progress     body for every /api/groups/progress poll (default null)
+//   polls        per-tick poll bodies, consumed in order (last repeats) —
+//                lets a test give the two requests' polls different
+//                numbers
+//   progress404  make the progress route answer 404 (stale backend)
+async function boot(opts, bust) {
+  const bodies = opts.bodies || [BODY1];
+  const dom = new JSDOM(html, { url: "http://localhost/groups" });
+  global.document = dom.window.document;
+  global.window = dom.window;
+  global.localStorage = dom.window.localStorage;
+  global.location = dom.window.location;
+  // As in partitions-parallel.test.js: setUrl only calls pushState, and
+  // jsdom's own History object would keep the runner's event loop alive.
+  global.history = { pushState() {}, replaceState() {} };
+  // Capture interval callbacks so tests can drive poll ticks manually;
+  // panel.js's freshness timer also registers one at import time, which
+  // is why ticks target the LAST registered interval.
+  const intervals = [];
+  const clearedIds = [];
+  global.setInterval = (fn) => { intervals.push(fn); return intervals.length; };
+  global.clearInterval = (id) => { clearedIds.push(id); };
+  global.Plotly = { newPlot: () => {}, react: () => {} };
+  const urls = [];
+  const gates = [];
+  const memberGates = [];
+  let bodyIndex = 0;
+  let pollIndex = 0;
+  const polls = opts.polls
+    || (opts.progress !== undefined ? [opts.progress] : [null]);
+  global.fetch = (url) => {
+    urls.push(String(url));
+    const u = String(url);
+    if (u.startsWith("/api/groups/progress")) {
+      if (opts.progress404) {
+        return Promise.resolve({ ok: false, status: 404,
+                                 json: () => Promise.resolve({}) });
+      }
+      const body = polls[Math.min(pollIndex++, polls.length - 1)];
+      return Promise.resolve({ ok: true, json: () => Promise.resolve(body) });
+    }
+    if (u.startsWith("/api/groups/")) {
+      if (opts.gateMembers) {
+        return new Promise((resolve) => memberGates.push(() => resolve({
+          ok: true, json: () => Promise.resolve({ ...MEMBERS_BODY }),
+        })));
+      }
+      return Promise.resolve({
+        ok: true, json: () => Promise.resolve({ ...MEMBERS_BODY }),
+      });
+    }
+    if (!u.startsWith("/api/groups?")) {
+      return Promise.resolve({
+        ok: true, json: () => Promise.resolve({ ...BENIGN }),
+      });
+    }
+    if (opts.failGroups) {
+      return Promise.resolve({ ok: false, status: 502,
+                               statusText: "Bad Gateway",
+                               json: () => Promise.resolve({}) });
+    }
+    if (opts.gateGroups) {
+      return new Promise((resolve) => gates.push(() => resolve({
+        ok: true,
+        json: () => Promise.resolve({ ...(bodies[Math.min(bodyIndex++, bodies.length - 1)]) }),
+      })));
+    }
+    return Promise.resolve({
+      ok: true,
+      json: () => Promise.resolve({ ...(bodies[Math.min(bodyIndex++, bodies.length - 1)]) }),
+    });
+  };
+  const mod = await import("../static/js/tabs/groups.js?cb=" + bust);
+  return {
+    dom, mod, urls, intervals, clearedIds,
+    releaseGroups: () => { while (gates.length) gates.shift()(); },
+    releaseOne: () => { if (gates.length) gates.shift()(); },
+    releaseMembers: () => { while (memberGates.length) memberGates.shift()(); },
+  };
+}
+
+test("the school filter re-renders without any fetch", async (t) => {
+  const ctx = await boot({}, 1);
+  t.after(() => ctx.dom.window.close());
+  const doc = ctx.dom.window.document;
+  await ctx.mod.loadGroups();
+  const fetchesAfterLoad = ctx.urls.length;
+  doc.getElementById("gSchool").value = "SCI";
+  doc.getElementById("gSchool").dispatchEvent(
+    new ctx.dom.window.Event("change"));
+  // SCI row stays, ELEC row is gone — all client-side.
+  const tbody = doc.querySelector("#groupTable tbody");
+  assert.match(tbody.textContent, /Computer Science, no professor group/);
+  assert.doesNotMatch(tbody.textContent, /Kyrki Ville/);
+  assert.equal(doc.getElementById("gCount").textContent, "1 shown");
+  assert.equal(ctx.urls.length, fetchesAfterLoad, "no fetch on school filter");
+  // the URL carries the filter
+  assert.match(ctx.urls[ctx.urls.length - 1], /^\/api\/groups/); // last fetch unchanged
+});
+
+test("a stale response is dropped and keeps the panel loading", async (t) => {
+  const ctx = await boot({ gateGroups: true, bodies: [BODY1, BODY2] }, 2);
+  t.after(() => ctx.dom.window.close());
+  const doc = ctx.dom.window.document;
+  const first = ctx.mod.loadGroups();
+  const second = ctx.mod.loadGroups();
+  // Release the FIRST (now-superseded) response only: its data must not
+  // render, and its loader must not clear the panel's loading state.
+  ctx.releaseOne();
+  await first;
+  assert.equal(doc.getElementById("gMetaCount").textContent, "",
+    "stale response must not render");
+  assert.equal(doc.getElementById("groupsResults").classList.contains("loading"),
+    true, "the newer load is still in flight");
+  ctx.releaseOne();
+  await second;
+  assert.equal(doc.getElementById("gMetaCount").textContent, "2 groups");
+  assert.equal(doc.getElementById("groupsResults").classList.contains("loading"),
+    false);
+  // the rendered rows are body2's, including the always-present row
+  const tbody = doc.querySelector("#groupTable tbody");
+  assert.match(tbody.textContent, /Electrical Engineering and Automation/);
+  assert.match(tbody.textContent, /Unaffiliated/);
+});
+
+test("the level toggle re-fetches with level=department", async (t) => {
+  const ctx = await boot({}, 3);
+  t.after(() => ctx.dom.window.close());
+  const doc = ctx.dom.window.document;
+  await ctx.mod.loadGroups();
+  assert.match(ctx.urls[0], /level=group/);
+  doc.getElementById("gLevel").value = "department";
+  doc.getElementById("gLevel").dispatchEvent(
+    new ctx.dom.window.Event("change"));
+  await new Promise((r) => setTimeout(r, 0));
+  assert.match(ctx.urls[ctx.urls.length - 1], /level=department/);
+  assert.equal(ctx.urls.length, 2, "level toggle fetches");
+});
+
+test("a pre-v2 level=unit deep link lands on the professor-group level", async (t) => {
+  const ctx = await boot({}, 7);
+  t.after(() => ctx.dom.window.close());
+  const doc = ctx.dom.window.document;
+  ctx.mod.prefillFromUrl(new URLSearchParams("level=unit"));
+  assert.equal(doc.getElementById("gLevel").value, "group");
+  await ctx.mod.loadGroups();
+  assert.match(ctx.urls[0], /level=group/);
+});
+
+test("the coverage banner shows the professor-group buckets and warns only on failures", async (t) => {
+  const ctx = await boot({}, 4);
+  t.after(() => ctx.dom.window.close());
+  const doc = ctx.dom.window.document;
+  await ctx.mod.loadGroups();
+  const banner = doc.getElementById("groupsCoverage");
+  assert.equal(banner.hidden, false);
+  assert.match(banner.textContent, /2 of 4 job owners in a professor group/);
+  assert.match(banner.textContent, /1 department-only/);
+  assert.match(banner.textContent, /1 unaffiliated/);
+  // no unknowns in this window: no parenthesis
+  assert.doesNotMatch(banner.textContent, /unknown to the directory/);
+  // unaffiliated + unresolved fold into one row: one figure matching
+  // the row's user count, the unknown count in parentheses
+  const folded = {
+    ...BODY1,
+    coverage: { ...BODY1.coverage, unaffiliated: 2, unresolved: 1 },
+  };
+  const ctx3 = await boot({ bodies: [folded] }, 15);
+  t.after(() => ctx3.dom.window.close());
+  await ctx3.mod.loadGroups();
+  const banner3 = ctx3.dom.window.document.getElementById("groupsCoverage");
+  assert.match(banner3.textContent, /2 of 4 job owners in a professor group/);
+  assert.match(banner3.textContent,
+    /3 unaffiliated \(1 unknown to the directory\)/);
+  // department-only users are the honest bucket, not a warning
+  assert.equal(banner.classList.contains("warn"), false);
+  // lookup failures tint the banner: their activity is in no row
+  const failed = {
+    ...BODY1,
+    coverage: { ...BODY1.coverage, failed: 2 },
+  };
+  const ctx2 = await boot({ bodies: [failed] }, 10);
+  t.after(() => ctx2.dom.window.close());
+  await ctx2.mod.loadGroups();
+  const banner2 = ctx2.dom.window.document.getElementById("groupsCoverage");
+  assert.match(banner2.textContent, /2 lookup failures/);
+  assert.match(banner2.textContent, /missing from every figure/);
+  assert.equal(banner2.classList.contains("warn"), true);
+});
+
+test("the Unaffiliated row renders when the server sends it", async (t) => {
+  const ctx = await boot({}, 8);
+  t.after(() => ctx.dom.window.close());
+  const doc = ctx.dom.window.document;
+  await ctx.mod.loadGroups();
+  const tbody = doc.querySelector("#groupTable tbody");
+  assert.match(tbody.textContent, /Unaffiliated/);
+  // BODY1's Unaffiliated row is populated; BODY2's is empty — either
+  // way the client renders what the API sends, so the always-present
+  // contract belongs to the API (covered in the golden and endpoint
+  // tests).
+  const ctx2 = await boot({ bodies: [BODY2] }, 9);
+  t.after(() => ctx2.dom.window.close());
+  await ctx2.mod.loadGroups();
+  assert.match(ctx2.dom.window.document.querySelector("#groupTable tbody")
+    .textContent, /Unaffiliated/);
+});
+
+test("rows without a school read as Other — cell, filter, legend agree", async (t) => {
+  const ctx = await boot({}, 12);
+  t.after(() => ctx.dom.window.close());
+  const doc = ctx.dom.window.document;
+  await ctx.mod.loadGroups();
+  // BODY1's unaffiliated row carries school_code: null; its School cell
+  // must read "Other" like the unmatched-prefix rows do.
+  const tr = doc.querySelector("#groupTable tr.row[data-gid='unaffiliated']");
+  assert.equal(tr.querySelectorAll("td")[2].textContent, "Other");
+  // the legend labels the bucket Other — never "no school"
+  const legend = doc.getElementById("groupsSchoolLegend").textContent;
+  assert.doesNotMatch(legend, /no school/);
+  assert.match(legend, /Other/);
+  // the school filter gains an Other option after the configured schools
+  const values = [...doc.getElementById("gSchool").options]
+    .map((o) => o.value);
+  assert.deepEqual(values, ["", "SCI", "ELEC", "Other"]);
+  // filtering by Other keeps only the schoolless rows, client-side
+  const fetchesAfterLoad = ctx.urls.length;
+  doc.getElementById("gSchool").value = "Other";
+  doc.getElementById("gSchool").dispatchEvent(
+    new ctx.dom.window.Event("change"));
+  const shown = [...doc.querySelectorAll("#groupTable tbody tr")];
+  assert.deepEqual(shown.map((r) => r.dataset.gid), ["unaffiliated"]);
+  assert.equal(ctx.urls.length, fetchesAfterLoad, "no fetch on the filter");
+});
+
+test("the group table lists GPU-hours held, not utilization-weighted GPU-hours", async (t) => {
+  const ctx = await boot({}, 13);
+  t.after(() => ctx.dom.window.close());
+  const doc = ctx.dom.window.document;
+  await ctx.mod.loadGroups();
+  const headers = [...doc.querySelectorAll("#groupTable th")].map(
+    (th) => th.dataset.k);
+  assert.ok(!headers.includes("util_gpu_hours"),
+    "the utilization-weighted GPU-hours column is gone");
+  assert.ok(headers.includes("gpu_hours"), "GPU-hours held stays");
+  // GPU-hours held is the default sort
+  assert.equal(
+    doc.querySelector("#groupTable th[data-k='gpu_hours']")
+      .classList.contains("sorted-desc"), true);
+});
+
+test("the group table carries one glossary trigger — by the table title", async (t) => {
+  const ctx = await boot({}, 14);
+  t.after(() => ctx.dom.window.close());
+  const doc = ctx.dom.window.document;
+  await ctx.mod.loadGroups();
+  const btns = [...doc.querySelectorAll("#tab-groups .glossary-btn")];
+  assert.equal(btns.length, 1, "a single ? — on the table title, not per column");
+  assert.equal(btns[0].dataset.glossary, "prof-groups");
+  assert.equal(btns[0].closest("h2").textContent.includes("Group table"), true);
+});
+
+test("a conf that itself maps prefixes to Other keeps one Other everywhere", async (t) => {
+  // The builder's SCHOOL_BY_PREFIX maps T5/T6/U9 to Other, so a
+  // regenerated conf can carry Other among the schools — the client must
+  // still render exactly one Other option and one Other legend entry.
+  const body = {
+    ...BODY1,
+    schools: [
+      { code: "T3", short: "SCI", full: "School of Science" },
+      { code: "T5", short: "Other", full: "Legacy / university units" },
+      { code: "T6", short: "Other", full: "Legacy / university units" },
+    ],
+  };
+  const ctx = await boot({ bodies: [body] }, 16);
+  t.after(() => ctx.dom.window.close());
+  const doc = ctx.dom.window.document;
+  await ctx.mod.loadGroups();
+  const otherOptions = [...doc.getElementById("gSchool").options]
+    .filter((o) => o.value === "Other");
+  assert.equal(otherOptions.length, 1, "one Other option in the filter");
+  const legend = doc.getElementById("groupsSchoolLegend");
+  assert.equal(
+    (legend.textContent.match(/Other/g) || []).length, 1,
+    "one Other entry in the legend");
+});
+
+test("clicking a group row fetches its members with kind and extra groups", async (t) => {
+  const ctx = await boot({}, 5);
+  t.after(() => ctx.dom.window.close());
+  const doc = ctx.dom.window.document;
+  await ctx.mod.loadGroups();
+  const tr = doc.querySelector("#groupTable tr.row[data-gid='kyrkiv1']");
+  assert.ok(tr, "the group row rendered");
+  tr.dispatchEvent(new ctx.dom.window.MouseEvent("click", { bubbles: true }));
+  await new Promise((r) => setTimeout(r, 0));
+  const membersFetch = ctx.urls.find((u) => u.includes("/api/groups/") && u.includes("/users"));
+  assert.ok(membersFetch, "row click fetched the drill-down");
+  assert.match(membersFetch, /\/api\/groups\/kyrkiv1\/users/);
+  const panel = doc.getElementById("groupMembersResults");
+  assert.equal(panel.style.display, "block");
+  const tbody = doc.querySelector("#memberTable tbody");
+  assert.match(tbody.textContent, /hannuse2/);
+  // the membership column is gone from the drill-down
+  assert.ok(![...doc.querySelectorAll("#memberTable th")].some(
+    (th) => th.dataset.k === "membership"), "no Membership header");
+  assert.match(tbody.textContent, /backstt1/, "extra groups render as chips");
+  const link = tbody.querySelector("a.userlink");
+  assert.ok(link, "members link to the Users tab");
+  assert.equal(link.getAttribute("href"), "/user/hannuse2");
+});
+
+test("a shared-unit row renders leaderless with its unit code", async (t) => {
+  const ctx = await boot({}, 11);
+  t.after(() => ctx.dom.window.close());
+  const doc = ctx.dom.window.document;
+  await ctx.mod.loadGroups();
+  const tr = doc.querySelector("#groupTable tr.row[data-gid='unit:T21204']");
+  assert.ok(tr, "the shared-unit row rendered");
+  assert.match(tr.textContent, /Mechatronics \(shared unit\)/);
+  // leader=null: the leader cell is the em-dash placeholder, never a
+  // link — a shared unit has no single leader to open in the Users tab
+  const leaderTd = tr.querySelectorAll("td")[1];
+  assert.equal(leaderTd.textContent, "—");
+  assert.equal(leaderTd.querySelector("a"), null);
+  // clicking the row still drills down through the unit:<CODE> id
+  const fetchesBefore = ctx.urls.length;
+  tr.dispatchEvent(new ctx.dom.window.MouseEvent("click", { bubbles: true }));
+  await new Promise((r) => setTimeout(r, 0));
+  assert.ok(
+    ctx.urls.slice(fetchesBefore).some(
+      (u) => u.includes("/api/groups/unit%3AT21204/users")),
+    "row click fetched the drill-down by the unit id");
+});
+
+test("the leader cell links to the Users tab and clicking it does not drill down", async (t) => {
+  const ctx = await boot({}, 6);
+  t.after(() => ctx.dom.window.close());
+  const doc = ctx.dom.window.document;
+  await ctx.mod.loadGroups();
+  const tr = doc.querySelector("#groupTable tr.row[data-gid='kyrkiv1']");
+  const leaderLink = tr.querySelector("td a.userlink");
+  assert.ok(leaderLink, "the leader cell is a link");
+  assert.equal(leaderLink.getAttribute("href"), "/user/kyrkiv1");
+  assert.equal(leaderLink.textContent, "Kyrki Ville",
+    "the leader's display name labels the link");
+  const fetchesBefore = ctx.urls.length;
+  leaderLink.dispatchEvent(
+    new ctx.dom.window.MouseEvent("click", { bubbles: true }));
+  await new Promise((r) => setTimeout(r, 0));
+  // openUser routes to the Users tab (which may fetch there), but the
+  // drill-down must NOT fire
+  assert.equal(
+    ctx.urls.slice(fetchesBefore).some((u) => u.includes("/api/groups/")),
+    false, "clicking the leader's name must not fetch the drill-down");
+  // a click elsewhere in the row still drills down
+  tr.dispatchEvent(new ctx.dom.window.MouseEvent("click", { bubbles: true }));
+  await new Promise((r) => setTimeout(r, 0));
+  assert.ok(ctx.urls.find((u) => u.includes("/api/groups/kyrkiv1/users")),
+    "row click fetched the drill-down");
+});
+
+// ---- directory-phase progress polling ----------------------------------
+
+test("the group list polls the directory phase and shows its batch text", async (t) => {
+  const ctx = await boot({
+    gateGroups: true,
+    progress: { phase: "users", done: 2, total: 5, failed_batches: 1 },
+  }, 20);
+  t.after(() => ctx.dom.window.close());
+  const doc = ctx.dom.window.document;
+  const pending = ctx.mod.loadGroups();
+  // one poll tick: the poll fetches (reusing the data request's exact
+  // params) and the owners-classification batch state lands on the chip
+  await ctx.intervals.at(-1)();
+  const dataUrl = ctx.urls.find((u) => u.startsWith("/api/groups?"));
+  const pollUrl = ctx.urls.find((u) => u.startsWith("/api/groups/progress"));
+  assert.ok(dataUrl && pollUrl, "both the data request and the poll fired");
+  assert.equal(pollUrl, "/api/groups/progress?" + dataUrl.split("?")[1]);
+  const chip = doc.querySelector("#groupsResults .results-loading");
+  assert.match(chip.textContent,
+    /Classifying job owners: batch 2 of 5 \(1 failed\)…/);
+  ctx.releaseGroups();
+  await pending;
+  assert.ok(ctx.clearedIds.length >= 1, "the poll was cleared on success");
+});
+
+test("the index phase reads as the member-lists label", async (t) => {
+  const ctx = await boot({
+    gateGroups: true,
+    progress: { phase: "index", done: 1, total: 39, failed_batches: 0 },
+  }, 21);
+  t.after(() => ctx.dom.window.close());
+  const doc = ctx.dom.window.document;
+  const pending = ctx.mod.loadGroups();
+  await ctx.intervals.at(-1)();
+  assert.match(
+    doc.querySelector("#groupsResults .results-loading").textContent,
+    /Reading group member lists: batch 1 of 39…/);
+  ctx.releaseGroups();
+  await pending;
+});
+
+test("an idle poll hands the chip back to the base label", async (t) => {
+  // Between phases (and after the directory work) the key is popped and
+  // the poll answers null — or done == total — and the chip must return
+  // to "Loading group efficiency…" instead of freezing on the last batch.
+  const ctx = await boot({
+    gateGroups: true,
+    polls: [
+      { phase: "index", done: 1, total: 2, failed_batches: 0 },
+      null,
+      { phase: "users", done: 2, total: 5, failed_batches: 0 },
+      { phase: "users", done: 5, total: 5, failed_batches: 0 },
+    ],
+  }, 22);
+  t.after(() => ctx.dom.window.close());
+  const doc = ctx.dom.window.document;
+  const chip = () => doc.querySelector("#groupsResults .results-loading");
+  const pending = ctx.mod.loadGroups();
+  const tick = ctx.intervals.at(-1);
+  await tick();
+  assert.match(chip().textContent, /Reading group member lists/);
+  await tick(); // null: onIdle resets
+  assert.equal(chip().textContent, "Loading group efficiency…");
+  await tick();
+  assert.match(chip().textContent, /Classifying job owners: batch 2 of 5…/);
+  await tick(); // done == total: idle again
+  assert.equal(chip().textContent, "Loading group efficiency…");
+  ctx.releaseGroups();
+  await pending;
+});
+
+test("the poll stops itself after a 404 from a stale backend", async (t) => {
+  const ctx = await boot({ gateGroups: true, progress404: true }, 23);
+  t.after(() => ctx.dom.window.close());
+  const doc = ctx.dom.window.document;
+  const pending = ctx.mod.loadGroups();
+  await ctx.intervals.at(-1)(); // one tick gets the 404
+  assert.ok(ctx.clearedIds.length >= 1,
+    "the 404 cleared the poll interval (no per-second request storm)");
+  ctx.releaseGroups();
+  await pending;
+});
+
+test("the poll interval is cleared when the request errors", async (t) => {
+  const ctx = await boot({ failGroups: true }, 23);
+  t.after(() => ctx.dom.window.close());
+  const doc = ctx.dom.window.document;
+  await ctx.mod.loadGroups();
+  const panel = doc.getElementById("groupsResults");
+  assert.equal(panel.classList.contains("loading"), false);
+  assert.ok(ctx.clearedIds.length >= 1, "the poll was cleared on error");
+});
+
+test("a superseded request's poll cannot overwrite the new label", async (t) => {
+  // The two polls answer DIFFERENT numbers: if the stale poll wrote the
+  // chip, its older batch count would be visible (identical numbers
+  // would prove nothing).
+  const ctx = await boot({
+    gateGroups: true,
+    polls: [
+      { phase: "users", done: 1, total: 5, failed_batches: 0 },
+      { phase: "users", done: 4, total: 5, failed_batches: 0 },
+    ],
+  }, 24);
+  t.after(() => ctx.dom.window.close());
+  const doc = ctx.dom.window.document;
+  const chip = () => doc.querySelector("#groupsResults .results-loading");
+  const first = ctx.mod.loadGroups();    // token 1, poll interval A
+  const stalePoll = ctx.intervals.at(-1);
+  await stalePoll();                     // token 1 is current: chip updates
+  assert.match(chip().textContent, /batch 1 of 5/);
+  const second = ctx.mod.loadGroups();   // token 2: chip reset synchronously
+  assert.ok(!/batch/.test(chip().textContent),
+    "a new request resets the chip before its first poll");
+  await ctx.intervals.at(-1)();          // token 2 is current: chip updates
+  assert.match(chip().textContent, /batch 4 of 5/);
+  await stalePoll();                     // token 1 is stale: must not write
+  assert.match(chip().textContent, /batch 4 of 5/,
+    "the stale request's poll left the current chip alone");
+  ctx.releaseGroups();
+  await Promise.all([first, second]);
+});
+
+test("the member drill-down polls the same key and clears the same way", async (t) => {
+  const ctx = await boot({
+    gateMembers: true,
+    progress: { phase: "users", done: 3, total: 5, failed_batches: 1 },
+  }, 25);
+  t.after(() => ctx.dom.window.close());
+  const doc = ctx.dom.window.document;
+  await ctx.mod.loadGroups();
+  const tr = doc.querySelector("#groupTable tr.row[data-gid='kyrkiv1']");
+  tr.dispatchEvent(new ctx.dom.window.MouseEvent("click", { bubbles: true }));
+  await new Promise((r) => setTimeout(r, 0));
+  // the drill-down registered the last poll interval: one tick fetches
+  // (reusing its data request's params) and shows the same batch numbers
+  // the list chip would show (one collapsed key)
+  await ctx.intervals.at(-1)();
+  const dataUrl = ctx.urls.find((u) => u.includes("/users?"));
+  const pollUrl = ctx.urls.filter((u) =>
+    u.startsWith("/api/groups/progress")).pop();
+  assert.equal(pollUrl, "/api/groups/progress?" + dataUrl.split("?")[1]);
+  const chip = doc.querySelector("#groupMembersResults .results-loading");
+  assert.match(chip.textContent,
+    /Classifying job owners: batch 3 of 5 \(1 failed\)…/);
+  ctx.releaseMembers();
+  await new Promise((r) => setTimeout(r, 0));
+  assert.ok(ctx.clearedIds.length >= 1, "the drill-down's poll was cleared");
+  // a re-click superseding the first drill-down resets its chip
+  const chipText = () =>
+    doc.querySelector("#groupMembersResults .results-loading").textContent;
+  tr.dispatchEvent(new ctx.dom.window.MouseEvent("click", { bubbles: true }));
+  assert.ok(!/batch/.test(chipText()),
+    "a new drill-down request resets the chip before its first poll");
+  ctx.releaseMembers();
+  await new Promise((r) => setTimeout(r, 0));
+});

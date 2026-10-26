@@ -12,7 +12,7 @@ collection) from:
 - **Prometheus** (`stats.triton.aalto.fi`) — `slurm_job_*` exporter metrics:
   per-GPU utilization and VRAM, live and historical
 
-The frontend is a plain-JS single page (Plotly.js via CDN) with three
+The frontend is a plain-JS single page (Plotly.js via CDN) with five
 interactive tabs.
 
 A **light/dark theme** toggle sits in the header (top right). Dark is the
@@ -69,6 +69,54 @@ OS-level preference applies when no choice has been saved.
 - **Running only** hides users with no live job and re-fetches the
   selected user's running jobs.
 
+### Groups tab
+- The Users list rolled up per **professor research group**: a row is one
+  professor's group — the Aalto AD unit their row in `prof_groups.conf`
+  names — and its members are the people in that unit's NSS groups
+  (`laitos-tNNNXX` = paid there, `tNNNXX-staff`, `tNNNXX-everyone`,
+  `auto-ext-tNNNXX` = external visitors) plus the professor themself.
+  Membership comes from `groups <user>`-style NSS reads on the dashboard
+  host (no AD call at runtime); names come from `prof_groups.conf` (see
+  Configuration). A user in several groups lands in the strongest one
+  (leader > paid > external > staff > everyone); a unit AD ties to
+  several professors gets its own leaderless **shared-unit** row
+  (`unit:<CODE>`, named "<Unit> (shared unit)"); a user
+  with no professor group but an `osasto-t*` department rolls up under
+  "<Department>, no professor group".
+- Rows show the **leader** (linked to the Users tab), school, users,
+  jobs, running jobs, **mean utilization** (weighted by every member
+  job's GPU samples — not averaged per user), the observed
+  **GPU-hours held** (the window GPU time the members' GPUs were
+  reserved), mean VRAM, and how many member jobs sit under 30%
+  utilization. A **top-30 bar chart** of mean utilization is colored by
+  school.
+- **School** filter and **search** run client-side over the fetched rows
+  (no fetch) and keep the URL in sync; the **Level** toggle
+  (Professor group / Department) and **Running only** re-fetch. Deep
+  link: `/groups?school=SCI&level=department` (old `level=unit` links
+  land on the professor-group level).
+- Click a row for the member drill-down — every member with their
+  group, their own department, and any **extra groups**, each user
+  linking to the Users tab.
+- The **Unaffiliated** row (no professor group or department; users
+  unknown to the directory roll up under it too) always renders, even
+  empty — an empty row is
+  never read as "everyone is classified". The **coverage banner** states
+  how many of the window's job owners are in a professor group and
+  discloses partial NSS failures (whose activity is in no row, never
+  folded into Unaffiliated). When every lookup fails (or the config
+  file is unreadable) the tab shows a 502 (`directory_unreachable`),
+  never a silent all-unaffiliated table.
+- **Loading progress** — a cold load shows its directory phase on the
+  chip, polled once a second from `/api/groups/progress` (the same
+  poller the Partitions tabs use): first "Reading group member lists:
+  batch k of M…", then "Classifying job owners: batch k of M…"; the
+  Prometheus phase before it and the slower remainder after it show the
+  base label with an elapsed-seconds suffix. Both the list chip and an
+  open drill-down's chip poll the same key, so both show the same
+  numbers, and the classification runs once for both. A warm load makes
+  zero directory calls and no batch text at all.
+
 ### Partitions tab
 - Per-Slurm-partition view: mean utilization per partition (time-weighted
   over the window), a utilization trend chart, a mean-occupancy chart
@@ -120,9 +168,10 @@ OS-level preference applies when no choice has been saved.
 - Shareable URLs: `/job/<id>` (Jobs tab + job detail), `/node/<name>`
   (Nodes tab + node detail), `/partition/<name>` (Partitions tab scoped
   to that partition — trend and VRAM), `/user/<name>` (Users tab with
-  that user's jobs fetched), plus `/jobs`, `/partitions`, `/users`,
-  `/nodes` for the plain tabs (plain `/partitions` clears any partition
-  selection).
+  that user's jobs fetched), `/groups?school=&level=&running=` (Groups
+  tab with those filters pre-applied), plus `/jobs`, `/partitions`,
+  `/users`, `/groups`, `/nodes` for the plain tabs (plain `/partitions`
+  clears any partition selection).
 - Cross-tab links: in the **Jobs** and **Users** job tables the **User**,
   **Partition**, and **Node** cells link to the Users, Partitions, and
   Nodes tabs respectively; in the **Nodes** tab each node name links to
@@ -155,7 +204,80 @@ Prometheus connection settings are read in this order:
 Cluster access is **strictly read-only**: the app uses explicit `sacct -j`
 lookups for job metadata, a bounded `sacct --allusers -X -S … -E …`
 query for completed-job wait statistics, `scontrol show nodes`, `squeue -t PD`,
-and Prometheus read queries.
+and Prometheus read queries. The Groups tab additionally reads the local
+NSS user directory (the same `groups <user>` / `getent group` the shell
+does) — never AD directly.
+
+### `prof_groups.conf` (Groups tab groups and names)
+
+`prof_groups.conf` at the repo root (override with `PROF_GROUPS_FILE`)
+defines the Groups tab's groups. It is **hand-editable** and reloaded
+whenever its mtime changes — no restart. Format (INI, values split on
+their last `|`):
+
+```ini
+[schools]      ; PREFIX = SHORT | Full name — a department's school key
+T4 = ELEC | School of Electrical Engineering
+
+[departments]  ; CODE = Name | school PREFIX (name from the AD `department` attribute)
+T410 = Department of Electrical Engineering and Automation | T4
+
+[units]        ; CODE = Unit name | DEPT — a unit AD ties to several
+T21204 = Mechatronics | T212   ; professors: one leaderless shared-unit row
+
+[groups]       ; leader-user = Leader Name | DEPT | unit codes
+kyrkiv1 = Kyrki Ville | T410 | T40106
+```
+
+A group's members are read at runtime from its units' NSS groups
+(`laitos-t<code>`, `t<code>-staff`, `t<code>-everyone`,
+`auto-ext-t<code>` = external visitors); the leader is
+always a member of their own group. A `[units]` row reads the same four
+lists and has no leader — it renders as "<Unit> (shared unit)" under the
+group id `unit:<CODE>`. A row with no unit codes still
+works (only its leader belongs). A professor the builder could not
+resolve is left as a commented line — uncomment and fill in their unit
+codes.
+
+The file is generated from AD dumps by `tools/build_prof_groups.py`. On
+the AD server, run:
+
+```console
+$ net ads search '(&(objectCategory=person)(objectClass=user)(title=*rofessor*))' \
+      sAMAccountName displayName sn givenName title department company division \
+      physicalDeliveryOfficeName userAccountControl distinguishedName \
+      > ad_professors.txt
+$ net ads search '(&(objectClass=group)(|(cn=laitos-*)(cn=t*-staff)))' \
+      cn description managedBy info > ad_unit_groups.txt
+```
+
+and copy both files to `~/ad_dump/` on the dashboard host (**never
+committed — they contain staff names**; this host must also resolve
+NSS, for the professors' own `osasto-*`/unit groups). Then:
+
+```console
+$ .venv/bin/python tools/build_prof_groups.py
+```
+
+writes `prof_groups.conf` and prints a report: professors with no unit
+found (written as commented lines to fill by hand), rule-d claims
+(professors who claimed their DN-leaf-OU unit — review these),
+leaderless shared units (written to `[units]`), lecturer-led units
+no professor claims, units claimed by two professors, and hand lines
+kept from a previous build. A professor's
+own unit is the AD group `managedBy` them (rule a), else the one whose
+description carries their name (rule b; surname + given name when
+surnames collide), else — when AD ties the professor to it another way
+(their DN leaf OU, exactly one professor per unit, confirmed by their AD
+department matching a unit description or their laitos/-staff
+membership) — that unit (rule d, `dn-ou` in the report) — never their
+`laitos-t*` group, which is a cost centre.
+Re-run after a fresh dump: uncommented `[groups]`/`[units]` hand lines
+in the existing file survive when the new build produces no codes for
+that key (or does not know it at all — non-professors such as a
+lecturer-led group's leader), and every kept line is listed in the
+report. Prefer fixing the rules/report loop over editing generated
+sections.
 
 ## API
 
@@ -170,6 +292,9 @@ and Prometheus read queries.
 | `GET /api/partitions/vram/progress?since_hours=&running_only=&partition=` | transient batch progress `{done, total, failed_batches}` of the window's in-flight sacct dump, or `null` when nothing is in flight (finished, cached, or failed). Keyed by the window only — the enrichment reads the same window-wide dump as the queue's wait history, so this poll and the queue's progress poll return the same batch state |
 | `GET /api/nodes?gpu_only=&refresh=` | node states (state/reason from `scontrol show node`) + live utilization/VRAM + active jobs (`refresh=true` bypasses the 30 s cache) |
 | `GET /api/nodes/{name}?view=job_start\|1\|6\|24` | per-GPU utilization/VRAM series for one node (`job_start` = since the earliest active job started) |
+| `GET /api/groups?since_hours=&running_only=&level=group\|department` | GPU efficiency per professor research group over the window: the Users aggregation rolled up by professor group (the AD unit a `prof_groups.conf` row names; membership from that unit's NSS groups, `auto-ext-` included for external visitors), a leaderless `unit:<CODE>` shared-unit row (several professors, one unit), or department, classified from each job owner's NSS groups. Rows carry leader/leader_name/unit_codes (null/— for shared-unit rows), group/department/school naming, sample-weighted `mean_util`, `util_gpu_hours` (members' Users-tab GPU-hours summed), observed `gpu_hours`, `low_eff_jobs` (<30%), `top_users`; the response adds `schools`, `coverage` (`in_prof_group`/`dept_only`/`unaffiliated`/`unresolved`/`failed` users) and `window`. The `unaffiliated` and `unresolved` rows are always present. No new upstream fetch: the window sources are the shared ones, per-user group lists are cached 24 h (1 h for unknown users) and per-group member lists 24 h |
+| `GET /api/groups/{group_id}/users?since_hours=&running_only=&level=` | the drill-down: one roll-up row's members with their own classification (`group`, `membership` kind, `dept_code`, `own_dept`, `extra_groups`); 404 for a group id absent from the window |
+| `GET /api/groups/progress?since_hours=&running_only=&level=` | batched directory progress for the classification (`level` accepted, ignored — the poll reuses the data request's query string): `{"phase": "index" \| "users", "done", "total", "failed_batches"}` while the batches run, JSON null between phases and after completion. Both group routes publish under one key, so the list and an open drill-down's chips show the same numbers |
 
 Short in-memory TTL caches (20–300 s, at both the app and Prometheus-client
 layers) avoid re-hitting the same query while the admin drags filters around.
@@ -208,11 +333,31 @@ actually pull for one window read:
   row cache (`KeyedBatchCache`, 300 s per ID, 1 h once terminal).
 - **Fan-out** — each route gathers its independent sources concurrently
   (`sources.gather`), so no window fetch waits on another.
-- **Progress keys** — the dump's chunked fetch publishes
-  `{done, total, failed_batches}` to `cache.progress_store` under one
-  window-scoped key (`cache.vram_progress_key`) that both progress polls
-  read; only the cache-miss leader writes it, and a finished or failed
-  fetch always clears it.
+- **Group classification** — the Groups tab's external reads beyond the
+  shared sources are per-user NSS (`deps.user_groups`, the same
+  `groups <user>` the shell resolves) and the configured groups'
+  member lists (`deps.group_members`, one `getent group` per
+  unit/NSS-group spelling). These live in a dedicated
+  `deps.directory_cache` — they number in the thousands and must never
+  trigger the route cache's clear-all eviction, which would otherwise
+  wipe every other tab's caches on every Groups load. The reads batch:
+  25 NSS reads per batch on 4 threads, reporting progress per finished
+  batch; the membership index is cached per `prof_groups.conf` version,
+  the classification per (conf version, owner set) for 60 s, a gid's
+  name is memoized directory-wide (`deps.group_name`), user group lists
+  are cached per user for 24 h (1 h for a user the directory does not
+  know) and member lists per group for 24 h — so a repeat request makes
+  zero directory calls, a conf edit shows on the next request, a partial
+  failure is retried instead of memoized, and `/api/users` +
+  `/api/groups` in one window add no upstream query at all.
+- **Progress keys** — batched fetches publish
+  `{done, total, failed_batches}` to `cache.progress_store` under
+  window-scoped keys their progress polls read: the sacct dump's chunked
+  fetch under `cache.vram_progress_key` (shared by the queue and VRAM
+  polls) and the Groups classification's directory batches under
+  `cache.groups_progress_key` (shared by the group-list and drill-down
+  polls). Only the cache-miss leader writes a key, and a finished or
+  failed fetch always clears it.
 
 ## Data semantics (important)
 

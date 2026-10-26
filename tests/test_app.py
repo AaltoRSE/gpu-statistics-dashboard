@@ -114,6 +114,36 @@ NODES = [
 COMPLETED_HISTORY = [{**record, "state": "COMPLETED"}
                      for record in SACCT.values()]
 
+# The Groups tab's NSS directory (deps.user_groups): each canned user's
+# group list; users outside this map are unknown to the directory (the
+# unresolved status — their activity rolls up under the Unaffiliated
+# row). Membership in a professor group does NOT come from
+# these lists — it comes from the member lists of the configured units'
+# NSS groups (GROUP_MEMBERS below); a user's own groups only ever name
+# their osasto department. dave holds no osasto group at all — the
+# Unaffiliated row. /api/users never reads this; /api/groups does.
+USER_GROUPS = {
+    "alice": ["laitos-t40106", "osasto-t410"],
+    "bob": ["laitos-t30010", "osasto-t300"],
+    "carol": ["osasto-t313"],   # own department only, no prof group
+    "dave": ["triton-users"],   # no relevant groups at all: unaffiliated
+}
+
+# The configured units' NSS member lists (deps.group_members): what the
+# membership index reads, once per group per TTL. bob's laitos-t30010 is
+# deliberately NOT a configured group's unit — T30010 belongs to no
+# professor in the test conf, so bob is honestly department-only.
+GROUP_MEMBERS = {
+    # kyrkiv1's unit T40106 (the leader is seeded by the index itself)
+    "laitos-t40106": ["alice", "kyrkiv1"],
+    "t40106-staff": ["kyrkiv1"],
+    "t40106-everyone": ["hannuse2"],
+    # backstt1's unit T40571
+    "laitos-t40571": ["linc15"],
+    "t40571-staff": ["backstt1"],
+    "t40571-everyone": ["linc15"],
+}
+
 
 class FakeProm:
     """Canned responses shaped like the real Prometheus API.
@@ -279,6 +309,10 @@ def fake_prom(monkeypatch):
     fake = FakeProm()
     monkeypatch.setattr(deps, "get_prom", lambda: fake)
     monkeypatch.setattr(deps, "route_cache", cache.TtlCache())
+    # The directory (NSS) caches get their own fresh store, the same way:
+    # a test must not inherit another test's member lists, gid->name
+    # memo, index or classification.
+    monkeypatch.setattr(deps, "directory_cache", cache.TtlCache(max_size=32768))
     # The shared window-wide sacct dump (plan §3): every chunk of the
     # window returns the completed history; the row dicts carry the raw
     # ID spelling the dump's index keys on. Each chunk is dated inside
@@ -297,6 +331,16 @@ def fake_prom(monkeypatch):
             {j: SACCT[j] for j in ids if j in SACCT}, 0))
     # No active controller jobs by default; tests opt in to a snapshot.
     monkeypatch.setattr(deps, "show_jobs", lambda: {})
+    # The Groups tab's NSS boundary (deps.user_groups): the canned
+    # directory above; an unknown user reads as None (unresolved).
+    monkeypatch.setattr(deps, "user_groups",
+                        lambda username: USER_GROUPS.get(username))
+    # The member lists of the configured units' NSS groups (the
+    # membership index's reads); an unknown group reads as None.
+    monkeypatch.setattr(
+        deps, "group_members",
+        lambda name: list(GROUP_MEMBERS[name]) if name in GROUP_MEMBERS
+        else None)
     # Empty pending queue by default; tests opt in via deps.queue_pending.
     monkeypatch.setattr(deps, "queue_pending", lambda: [])
 
@@ -1909,6 +1953,9 @@ def test_step_for_range_long_windows():
     "/api/jobs",
     "/api/jobs/1",
     "/api/users",
+    "/api/groups",
+    "/api/groups/progress",
+    "/api/groups/kyrkiv1/users",
     "/api/partitions",
     "/api/partitions/queue",
     "/api/partitions/queue/progress",
@@ -1927,6 +1974,7 @@ def test_window_routes_accept_30_days_reject_beyond(client, route):
     "/api/jobs",
     "/api/jobs/1",
     "/api/users",
+    "/api/groups",
     "/api/partitions",
 ])
 def test_window_routes_span_720_hours_with_1800s_step(client, route):

@@ -1,9 +1,9 @@
 /* Tab switching, shareable deep links (/job/<id>, /node/<name>,
- * /partition/<name>, /user/<name>, and the plain /jobs, /partitions,
- * /users, /nodes) and the cross-tab navigation helpers (openJob, openUser,
- * openNode, openPartition) that every tab module calls to jump to another
- * tab. rerenderAllPlots is the theme-toggle re-render sweep across all four
- * tabs.
+ * /partition/<name>, /user/<name>, /groups, and the plain /jobs,
+ * /partitions, /users, /groups, /nodes) and the cross-tab navigation
+ * helpers (openJob, openUser, openNode, openPartition) that every tab
+ * module calls to jump to another tab. rerenderAllPlots is the
+ * theme-toggle re-render sweep across all five tabs.
  *
  * This module imports every tab module, and every tab module imports this
  * one back (for openJob/openUser/openNode/openPartition, setUrl and the
@@ -17,17 +17,21 @@
 import { $ } from "./dom.js";
 import * as jobsTab from "../tabs/jobs.js";
 import * as usersTab from "../tabs/users.js";
+import * as groupsTab from "../tabs/groups.js";
 import * as partitionsTab from "../tabs/partitions.js";
 import * as nodesTab from "../tabs/nodes.js";
 
-export const loaded = { jobs: false, partitions: false, users: false, nodes: false };
+export const loaded = { jobs: false, partitions: false, users: false, groups: false, nodes: false };
 
 // PLAN-1 3.4: document.title was the same string on every route despite
-// real per-tab URLs already existing (/jobs, /partitions, /users, /nodes,
-// and the job/node/user/partition deep links, which all resolve to one of
-// these four tabs). Every route funnels through showTab, so setting it
-// here covers all of them in one place.
-const TAB_TITLES = { jobs: "Jobs", partitions: "Partitions", users: "Users", nodes: "Nodes" };
+// real per-tab URLs already existing (/jobs, /partitions, /users, /groups,
+// /nodes, and the job/node/user/partition deep links, which all resolve to
+// one of these five tabs). Every route funnels through showTab, so setting
+// it here covers all of them in one place.
+const TAB_TITLES = {
+  jobs: "Jobs", partitions: "Partitions", users: "Users",
+  groups: "Groups", nodes: "Nodes",
+};
 
 export function showTab(name) {
   document.querySelectorAll("nav.tabs button").forEach((b) =>
@@ -39,6 +43,7 @@ export function showTab(name) {
   if (name === "jobs" && !loaded.jobs) p = jobsTab.loadJobs();
   if (name === "partitions" && !loaded.partitions) p = partitionsTab.loadPartitions();
   if (name === "users" && !loaded.users) p = usersTab.loadUsers();
+  if (name === "groups" && !loaded.groups) p = groupsTab.loadGroups();
   if (name === "nodes" && !loaded.nodes) p = nodesTab.loadNodes();
   window.dispatchEvent(new Event("resize")); // refit hidden plots
   return p;
@@ -107,6 +112,13 @@ export function restoreFromUrl() {
     return;
   }
   if (location.pathname === "/users") { showTab("users"); return; }
+  if (location.pathname === "/groups") {
+    // The school/level/running query is the tab's own state; prefill the
+    // controls before showTab's first load reads them.
+    groupsTab.prefillFromUrl(new URLSearchParams(location.search));
+    showTab("groups");
+    return;
+  }
   if (location.pathname === "/nodes") { showTab("nodes"); return; }
 }
 
@@ -135,6 +147,7 @@ export function refreshActiveTab() {
   if (name === "jobs") jobsTab.loadJobs();
   else if (name === "partitions") partitionsTab.loadPartitions();
   else if (name === "users") usersTab.loadUsers();
+  else if (name === "groups") groupsTab.loadGroups();
   else if (name === "nodes") nodesTab.loadNodes();
 }
 
@@ -151,6 +164,9 @@ export function rerenderAllPlots() {
     partitionsTab.renderPartOccupancy();
     partitionsTab.renderPartTrend(partitionsTab.partTrendData);
     if (partitionsTab.vramJobs.length) partitionsTab.renderVram();
+  }
+  if (loaded.groups) {
+    groupsTab.renderGroupsBar();
   }
   if (nodesTab.nodeDetailData && $("nodeDetailResults").style.display !== "none") {
     nodesTab.renderNodeDetail(nodesTab.nodeDetailData, nodesTab.nodeDetailName);
