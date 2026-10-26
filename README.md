@@ -230,7 +230,7 @@ $ .venv/bin/uvicorn app:app --host 0.0.0.0 --port 8090
 
 Then open <http://localhost:8090/>. Interactive API docs at `/docs`.
 
-Requires Python 3.9+ with `fastapi`, `uvicorn`, `httpx` (see
+Requires Python 3.10+ with `fastapi`, `uvicorn`, `httpx`, `mcp` (see
 `requirements.txt`; the project `.venv` already has them).
 
 ## Configuration
