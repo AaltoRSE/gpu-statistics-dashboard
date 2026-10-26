@@ -341,9 +341,71 @@ sections.
 | `GET /api/groups?since_hours=&running_only=&level=group\|department` | GPU efficiency per professor research group over the window: the Users aggregation rolled up by professor group (the AD unit a `prof_groups.conf` row names; membership from that unit's NSS groups, `auto-ext-` included for external visitors), a leaderless `unit:<CODE>` shared-unit row (several professors, one unit), or department, classified from each job owner's NSS groups. Rows carry leader/leader_name/unit_codes (null/— for shared-unit rows), group/department/school naming, sample-weighted `mean_util`, `util_gpu_hours` (members' Users-tab GPU-hours summed), observed `gpu_hours`, `low_eff_jobs` (<30%), `top_users`; the response adds `schools`, `coverage` (`in_prof_group`/`dept_only`/`unaffiliated`/`unresolved`/`failed` users) and `window`. The `unaffiliated` and `unresolved` rows are always present. No new upstream fetch: the window sources are the shared ones, per-user group lists are cached 24 h (1 h for unknown users) and per-group member lists 24 h |
 | `GET /api/groups/{group_id}/users?since_hours=&running_only=&level=` | the drill-down: one roll-up row's members with their own classification (`group`, `membership` kind, `dept_code`, `own_dept`, `extra_groups`); 404 for a group id absent from the window |
 | `GET /api/groups/progress?since_hours=&running_only=&level=` | batched directory progress for the classification (`level` accepted, ignored — the poll reuses the data request's query string): `{"phase": "index" \| "users", "done", "total", "failed_batches"}` while the batches run, JSON null between phases and after completion. Both group routes publish under one key, so the list and an open drill-down's chips show the same numbers |
+| `POST /mcp/` | MCP (Streamable HTTP) for AI agents: the read-only tools below. Needs `Authorization: Bearer $MCP_TOKEN`; 503 while `MCP_TOKEN` is unset, 401 for a missing or wrong token |
 
 Short in-memory TTL caches (20–300 s, at both the app and Prometheus-client
 layers) avoid re-hitting the same query while the admin drags filters around.
+
+## MCP server (for AI agents)
+
+The app also serves its data to AI agents over the
+[Model Context Protocol](https://modelcontextprotocol.io) at
+**`http://<host>:8090/mcp/`** (Streamable HTTP; give clients the URL with
+the trailing slash — `/mcp` only redirects to it). The tools call the same
+route functions as the browser, so an agent sees exactly what the
+dashboard shows, from the same caches.
+
+Enable it by starting uvicorn with a token (the endpoint answers 503
+without one):
+
+```console
+$ export MCP_TOKEN=$(python3 -c "import secrets; print(secrets.token_hex(32))")
+$ .venv/bin/uvicorn app:app --host 0.0.0.0 --port 8090
+```
+
+| Tool | What it returns |
+|---|---|
+| `cluster_status` | the Status tab's live panel: occupancy, node states, running and pending jobs (CPU vs GPU), pending reasons, per-partition rows |
+| `cluster_history(include_hourly)` | past 24 h / 7 d summaries (submitted, outcomes, Eligible → Start wait); the hourly series only on request |
+| `list_jobs(since_hours, user, partition, search, limit=20, running_only)` | the Jobs tab's table, top `limit` by effective GPU-hours |
+| `job_detail(jobid, since_hours, include_series)` | metadata plus a per-GPU mean / max / last summary (raw series on request) |
+| `list_users(since_hours, limit=50)` | the Users tab's per-user aggregation |
+| `list_groups(since_hours, running_only, level, school, limit=50)` | the Groups tab's professor-group (or department) roll-up |
+| `group_members(group_id, since_hours, running_only, level)` | one group row's members and how they belong to it |
+| `partition_utilization(since_hours, running_only, include_trend)` | per-GPU-group utilization, occupancy and capacity |
+| `partition_queue(since_hours, running_only, limit=50)` | per-GPU-group pending demand and completed-job waits (Submit → Start) |
+| `list_nodes(gpu_only)` | node states, capacity, live utilization/VRAM and active jobs |
+| `node_detail(name, view, include_series)` | one node's per-GPU series summary (`job_start`, 1, 6 or 24 h) |
+
+Every tool is read-only and none takes `refresh`, so an agent calling in
+a loop is served from the caches and never adds load on sacct, squeue,
+NSS or Prometheus beyond what the dashboard itself does. A source that
+fails is a tool error carrying the HTTP error code (`slurm_unreachable`,
+`prometheus_unreachable`, `directory_unreachable`), never an empty
+result; the server's instructions tell agents that null means
+unavailable, not 0.
+
+Connecting a client:
+
+```console
+$ claude mcp add --transport http triton-gpu http://<host>:8090/mcp/ \
+      --header "Authorization: Bearer $MCP_TOKEN"
+```
+
+```toml
+# Codex: ~/.codex/config.toml
+[mcp_servers.triton-gpu]
+url = "http://<host>:8090/mcp/"
+bearer_token_env_var = "MCP_TOKEN"
+```
+
+**Exposure.** The app speaks plain HTTP, so the token (and every
+response — usernames, job names) is readable on the network path. Keep
+the agent inside the cluster network, or reach the app through an SSH
+tunnel (`ssh -L 8090:localhost:8090 <host>`) or a TLS-terminating
+reverse proxy (then run uvicorn with `--proxy-headers`). A hosted agent
+such as the Anthropic API's MCP connector needs a public HTTPS URL. The
+token guards `/mcp/` only; `/api/*` stays as open as it was.
 
 ## Data flow
 
