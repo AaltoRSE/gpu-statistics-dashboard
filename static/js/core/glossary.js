@@ -10,10 +10,11 @@ export function initGlossary() {
   const dialog = $("glossaryDialog");
   document.querySelectorAll("[data-glossary]").forEach((btn) => {
     btn.addEventListener("click", (e) => {
-      // Every glossary trigger this ships with today sits inside a
-      // sortable <th> (core/table.js's own header button covers the rest
-      // of the cell); stopping propagation keeps opening the glossary from
-      // also firing a sort.
+      // Most glossary triggers sit inside a sortable <th>
+      // (core/table.js's own header button covers the rest of the cell);
+      // stopping propagation keeps opening the glossary from also firing
+      // a sort. It is harmless on the triggers outside a <th> — the
+      // Groups table title's h2 one.
       e.stopPropagation();
       e.preventDefault();
       dialog.showModal();

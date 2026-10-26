@@ -1,0 +1,547 @@
+"""/api/groups endpoint tests: roll-up math, the always-present
+Unaffiliated row, department level, NSS failure semantics, and the
+shared-fetch guarantee (a groups request must add no Prometheus query).
+
+Run: .venv/bin/python -m pytest tests/test_groups.py -q
+"""
+
+import os
+import sys
+import threading
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+import pytest  # noqa: E402
+from test_app import GROUP_MEMBERS, USER_GROUPS  # noqa: E402
+
+import cache  # noqa: E402
+import deps  # noqa: E402
+
+
+@pytest.fixture()
+def nss(monkeypatch):
+    """Mutable in-memory directories over deps.user_groups and
+    deps.group_members, with the directory caches fresh so per-test
+    call counts are observable."""
+    monkeypatch.setattr(deps, "directory_cache", cache.TtlCache(max_size=32768))
+    accounts = {user: list(groups) for user, groups in USER_GROUPS.items()}
+    members = {name: list(m) for name, m in GROUP_MEMBERS.items()}
+    calls, member_calls = [], []
+
+    def user_groups(username):
+        calls.append(username)
+        if username not in accounts:
+            return None
+        return list(accounts[username])
+
+    def group_members(name):
+        member_calls.append(name)
+        if name not in members:
+            return None
+        return list(members[name])
+
+    monkeypatch.setattr(deps, "user_groups", user_groups)
+    monkeypatch.setattr(deps, "group_members", group_members)
+    return {"accounts": accounts, "members": members,
+            "calls": calls, "member_calls": member_calls}
+
+
+def by_id(data):
+    return {row["group_id"]: row for row in data["groups"]}
+
+
+def test_groups_rollup_math(client, nss):
+    # step=120 s; per-job figures (see test_users_aggregates_per_user):
+    # alice job 1: samples (40, 60) -> mean 50, util-gpu-h 0.03, held
+    #   2 samples x 120 s / 3600 = 0.07 GPU-hours
+    # bob job 2: sample (10) -> mean 10, util-gpu-h 0.0, held 0.03
+    # carol job 3: samples (90, 95) -> mean 92.5, util-gpu-h 0.06
+    # dave job 4: samples (80, 90) -> mean 85, util-gpu-h 0.06
+    r = client.get("/api/groups", params={"since_hours": 24})
+    assert r.status_code == 200
+    data = r.json()
+    assert data["level"] == "group"
+    rows = by_id(data)
+    # The always-present row exists even when empty.
+    assert {"kyrkiv1", "dept:T300", "dept:T313",
+            "unaffiliated"} <= set(rows)
+    kyrki = rows["kyrkiv1"]
+    assert kyrki["group_name"] == "Kyrki Ville"
+    assert kyrki["leader"] == "kyrkiv1"
+    assert kyrki["leader_name"] == "Kyrki Ville"
+    assert kyrki["unit_codes"] == ["T40106"]
+    assert kyrki["dept_code"] == "T410"
+    assert kyrki["dept_name"] \
+        == "Department of Electrical Engineering and Automation"
+    assert kyrki["school_code"] == "ELEC"
+    assert kyrki["school_name"] == "School of Electrical Engineering"
+    assert kyrki["users"] == 1 and kyrki["jobs"] == 1
+    assert kyrki["running_jobs"] == 1
+    assert kyrki["mean_util"] == pytest.approx(50.0)
+    assert kyrki["util_gpu_hours"] == pytest.approx(0.03)
+    assert kyrki["gpu_hours"] == pytest.approx(0.07)
+    assert kyrki["vram_avg"] == pytest.approx(11.0)
+    assert kyrki["low_eff_jobs"] == 0
+    assert kyrki["top_users"] == [{"user": "alice", "util_gpu_hours": 0.03}]
+    # bob's laitos-t30010 belongs to no professor in the test conf: an
+    # honest department-only row, named after the department
+    t300 = rows["dept:T300"]
+    assert t300["group_name"] \
+        == "Department of Computer Science, no professor group"
+    assert t300["leader"] is None and t300["unit_codes"] == []
+    assert t300["school_code"] == "SCI"
+    assert t300["mean_util"] == pytest.approx(10.0)
+    assert t300["low_eff_jobs"] == 1  # job 2's mean is 10 < 30
+    # carol has osasto-t313 only: no configured department name, so the
+    # code itself names the row
+    t313 = rows["dept:T313"]
+    assert t313["group_name"] == "T313, no professor group"
+    assert t313["dept_code"] == "T313" and t313["school_code"] == "SCI"
+    # dave has no relevant groups: the unaffiliated row, never a fake group
+    unaff = rows["unaffiliated"]
+    assert unaff["users"] == 1 and unaff["jobs"] == 1
+    assert unaff["mean_util"] == pytest.approx(85.0)
+    assert unaff["school_code"] is None
+    assert data["coverage"] == {
+        "users": 4, "in_prof_group": 1, "dept_only": 2, "unaffiliated": 1,
+        "unresolved": 0, "failed": 0,
+    }
+    # rows are ordered by util_gpu_hours desc (ties by name)
+    ids = [row["group_id"] for row in data["groups"]]
+    assert ids == ["dept:T313", "unaffiliated", "kyrkiv1", "dept:T300"]
+    # the school filter options ride along
+    assert {s["code"] for s in data["schools"]} == {"T1", "T2", "T3",
+                                                    "T4", "T5", "T6"}
+    assert next(s for s in data["schools"] if s["code"] == "T4") == {
+        "code": "T4", "short": "ELEC",
+        "full": "School of Electrical Engineering"}
+
+
+def test_groups_mean_util_reweights_all_member_samples(client, nss,
+                                                       monkeypatch):
+    # A group of a 10% one-sample job and a 90% one-sample job must be
+    # sample-weighted, not averaged per user mean: the 90% job has 10
+    # samples, the 10% job 1, so a per-user-mean average would give 50%
+    # but the sample-weighted figure is (900 + 10) / 11 = 82.73.
+    import sources
+
+    extra = [{"metric": {"slurmjobid": "50", "instance": "gpu1", "gpu": "0",
+                         "job": "gpu-h100", "user": "bob",
+                         "gpu_type": "h100"},
+              "values": [[1000 + i * 120, str(90)] for i in range(10)]}]
+    real = sources.gpu_util
+
+    def with_extra(win):
+        return real(win) + extra
+
+    monkeypatch.setattr(sources, "gpu_util", with_extra)
+    data = client.get("/api/groups", params={"since_hours": 24}).json()
+    rows = by_id(data)
+    # both of bob's jobs land in his department-only row regardless of
+    # GPU type
+    t300 = rows["dept:T300"]
+    assert t300["users"] == 1 and t300["jobs"] == 2
+    assert t300["mean_util"] == pytest.approx(82.73, abs=0.01)
+
+
+def test_groups_department_level(client, nss):
+    data = client.get("/api/groups",
+                      params={"since_hours": 24, "level": "department"}).json()
+    rows = by_id(data)
+    # group members collapse into the professor's department; no
+    # "no professor group" suffix
+    assert "kyrkiv1" not in rows
+    t410 = rows["dept:T410"]
+    assert t410["group_name"] \
+        == "Department of Electrical Engineering and Automation"
+    assert t410["leader"] is None
+    t300 = rows["dept:T300"]
+    assert t300["group_name"] == "Department of Computer Science"
+    assert t300["users"] == 1  # bob's own osasto
+    # the always-present row survives the level change
+    assert rows["unaffiliated"]["users"] == 1
+
+
+def test_groups_unaffiliated_always_render(client, nss):
+    # everyone classified: the row is still present — "no row" must never
+    # be read as "everyone is classified"
+    data = client.get("/api/groups", params={"since_hours": 24}).json()
+    rows = by_id(data)
+    assert "unaffiliated" in rows
+    assert rows["unaffiliated"]["users"] == 1
+
+
+def test_groups_unknown_user_folds_into_unaffiliated(client, nss,
+                                                     monkeypatch):
+    # a user the directory does not know is unresolved in coverage — an
+    # answer, not a failure — and rolls up under the Unaffiliated row
+    # (never a fake group of its own).
+    def unknown_dave(username):
+        if username == "dave":
+            return None
+        return USER_GROUPS.get(username)
+
+    monkeypatch.setattr(deps, "user_groups", unknown_dave)
+    data = client.get("/api/groups", params={"since_hours": 24}).json()
+    rows = by_id(data)
+    assert "unresolved" not in rows
+    assert rows["unaffiliated"]["users"] == 1
+    assert rows["unaffiliated"]["jobs"] == 1
+    assert rows["unaffiliated"]["mean_util"] == pytest.approx(85.0)
+    assert data["coverage"]["unresolved"] == 1
+
+
+def test_groups_partial_nss_failure_keeps_the_rest(client, nss, monkeypatch):
+    real = deps.user_groups
+
+    def flaky(username):
+        if username == "alice":
+            raise deps.DirectoryError("sssd worker timeout")
+        return real(username)
+
+    monkeypatch.setattr(deps, "user_groups", flaky)
+    r = client.get("/api/groups", params={"since_hours": 24})
+    assert r.status_code == 200
+    data = r.json()
+    assert data["coverage"]["failed"] == 1
+    rows = by_id(data)
+    # alice's activity is in NO row (disclosed as failed, never faked)
+    assert "kyrkiv1" not in rows
+    assert rows["dept:T300"]["users"] == 1  # bob still resolves
+
+
+def test_groups_total_nss_failure_is_502(client, nss, monkeypatch):
+    def boom(username):
+        raise deps.DirectoryError("sssd down")
+
+    monkeypatch.setattr(deps, "user_groups", boom)
+    r = client.get("/api/groups", params={"since_hours": 24})
+    assert r.status_code == 502
+    assert r.json()["error"] == "directory_unreachable"
+
+
+def test_groups_missing_conf_file_is_502(client, nss, monkeypatch, tmp_path):
+    monkeypatch.setenv("PROF_GROUPS_FILE",
+                       str(tmp_path / "does-not-exist.conf"))
+    r = client.get("/api/groups", params={"since_hours": 24})
+    assert r.status_code == 502
+    assert r.json()["error"] == "directory_unreachable"
+    assert "does-not-exist.conf" in r.json()["detail"]
+
+
+def test_groups_repeat_request_makes_zero_directory_calls(client, nss):
+    client.get("/api/groups", params={"since_hours": 24})
+    assert len(nss["calls"]) == 4
+    assert len(nss["member_calls"]) == 12  # 3 configured units x 4 lists
+    client.get("/api/groups", params={"since_hours": 24})
+    client.get("/api/groups", params={"since_hours": 24, "level": "department"})
+    # per-user group lists and per-group member lists are both cached:
+    # same users, same groups, same directory answers
+    assert len(nss["calls"]) == 4
+    assert len(nss["member_calls"]) == 12
+
+
+def test_groups_running_only_filters_in_process(client, nss, fake_prom):
+    r = client.get("/api/groups",
+                   params={"since_hours": 24, "running_only": "true"})
+    assert r.status_code == 200
+    rows = by_id(r.json())
+    # job 3 (carol) is not running: her department row is gone; the
+    # util ranges carry no matcher (in-process filter over the shared fetch)
+    assert "dept:T313" not in rows
+    assert all("=~" not in q for t, q in fake_prom.calls if t == "range")
+
+
+def test_groups_drilldown_members(client, nss):
+    r = client.get("/api/groups/kyrkiv1/users",
+                   params={"since_hours": 24})
+    assert r.status_code == 200
+    data = r.json()
+    assert data["group_id"] == "kyrkiv1"
+    assert data["group_name"] == "Kyrki Ville"
+    assert data["count"] == 1
+    member = data["users"][0]
+    assert member["user"] == "alice"
+    assert member["group"] == "kyrkiv1"
+    assert member["membership"] == "paid"
+    assert member["dept_code"] == "T410"
+    assert member["own_dept"] == "T410"
+    assert member["extra_groups"] == []
+    assert member["status"] == "group"
+    # a department-only user's drill-down carries no group
+    r = client.get("/api/groups/dept:T300/users", params={"since_hours": 24})
+    assert r.status_code == 200
+    member = r.json()["users"][0]
+    assert member["user"] == "bob"
+    assert member["group"] is None and member["dept_code"] == "T300"
+    # unknown group: 404, never an empty member list
+    r = client.get("/api/groups/nobody/users",
+                   params={"since_hours": 24})
+    assert r.status_code == 404
+
+
+def test_groups_drilldown_shows_extra_groups(client, nss):
+    # a user claimed by two configured groups: the strongest (here tied
+    # -> lowest leader name) owns the row, the other rides along as an
+    # extra group in the drill-down.
+    nss["members"]["laitos-t40106"] = ["alice", "kyrkiv1", "bob"]
+    nss["members"]["laitos-t40571"] = ["linc15", "bob"]
+    data = client.get("/api/groups/backstt1/users",
+                      params={"since_hours": 24}).json()
+    member = data["users"][0]
+    assert member["user"] == "bob"
+    assert member["group"] == "backstt1"
+    assert member["extra_groups"] == ["kyrkiv1"]
+
+
+def test_groups_member_kind_reflects_the_membership_list(client, nss):
+    # the same user lands with a different membership kind depending on
+    # which of the unit's lists they are in
+    nss["members"]["t40106-everyone"] = ["hannuse2", "carol"]
+    data = client.get("/api/groups/kyrkiv1/users",
+                      params={"since_hours": 24}).json()
+    members = {m["user"]: m for m in data["users"]}
+    assert members["alice"]["membership"] == "paid"
+    assert members["carol"]["membership"] == "everyone"
+    # carol's row department is the professor's, her own osasto rides along
+    assert members["carol"]["dept_code"] == "T410"
+    assert members["carol"]["own_dept"] == "T313"
+
+
+def test_groups_auto_ext_member_is_external(client, nss):
+    # an auto-ext-<code> member is the external kind — the membership
+    # list the runtime reads since external visitors carry no osasto
+    nss["members"]["auto-ext-t40106"] = ["carol"]
+    data = client.get("/api/groups", params={"since_hours": 24}).json()
+    rows = by_id(data)
+    # carol leaves her department-only row for kyrki's group row
+    assert rows["kyrkiv1"]["users"] == 2  # alice + carol
+    assert "dept:T313" not in rows  # its only member left: no row at all
+    r = client.get("/api/groups/kyrkiv1/users", params={"since_hours": 24})
+    members = {m["user"]: m for m in r.json()["users"]}
+    member = members["carol"]
+    assert member["membership"] == "external"
+    assert member["group"] == "kyrkiv1"
+
+
+def test_groups_shared_unit_row_and_drilldown(client, nss):
+    # a [units] member: a leaderless shared-unit row named after the
+    # unit, and the drill-down reached through its unit:<CODE> id
+    nss["members"]["laitos-t21204"] = ["bob"]
+    data = client.get("/api/groups", params={"since_hours": 24}).json()
+    rows = by_id(data)
+    unit = rows["unit:T21204"]
+    assert unit["group_name"] == "Mechatronics (shared unit)"
+    assert unit["leader"] is None and unit["leader_name"] is None
+    assert unit["unit_codes"] == ["T21204"]
+    assert unit["dept_code"] == "T212"
+    assert unit["users"] == 1 and unit["jobs"] == 1
+    r = client.get("/api/groups/unit:T21204/users",
+                   params={"since_hours": 24})
+    assert r.status_code == 200
+    data = r.json()
+    assert data["group_id"] == "unit:T21204"
+    assert data["group_name"] == "Mechatronics (shared unit)"
+    member = data["users"][0]
+    assert member["user"] == "bob"
+    assert member["group"] == "unit:T21204"
+    assert member["membership"] == "paid"
+
+
+def test_users_then_groups_add_no_prometheus_query(client, nss, fake_prom):
+    client.get("/api/users", params={"since_hours": 24})
+    before = list(fake_prom.calls)
+    r = client.get("/api/groups", params={"since_hours": 24})
+    assert r.status_code == 200
+    # the groups pipeline reads the same shared window sources: no new
+    # range or instant query, only per-user NSS classification
+    assert fake_prom.calls == before
+
+
+# ---- the directory caches and the progress poll -------------------------
+
+def _unit_job(i):
+    """One synthetic window series for owner u%04d (the shape fake_prom's
+    extra_jobs carry)."""
+    return {"metric": {"slurmjobid": str(100 + i), "instance": "gpu1",
+                       "job": "gpu-h100", "user": "u%04d" % i,
+                       "gpu_type": "h100"},
+            "values": [[1000, "50"]]}
+
+
+def test_groups_above_route_cache_size_stay_warm_and_keep_other_tabs(
+        client, nss, fake_prom, tmp_path):
+    # A real Groups load holds THOUSANDS of directory entries (956
+    # configured member lists, ~1k owners): held in the route cache,
+    # every write past 256 cleared the WHOLE store — wiping the
+    # just-built index and every other tab's pinned windows, window
+    # series and sacct dump with it. In the dedicated directory cache:
+    # a second load makes zero NSS calls, and a planted route-cache
+    # entry (another tab's shared sacct dump) survives the whole load.
+    conf = tmp_path / "prof_groups.conf"
+    conf.write_text(
+        "[units]\n" + "\n".join(
+            "T4%04d = Unit %d | T400" % (i, i) for i in range(300)) + "\n",
+        encoding="utf-8")
+    for i in range(300):
+        nss["members"]["laitos-t4%04d" % i] = ["u%04d" % i]
+        nss["accounts"]["u%04d" % i] = ["laitos-t4%04d" % i]
+    fake_prom.extra_jobs = [_unit_job(i) for i in range(300)]
+    deps.route_cache.set(cache.sacct_window_key(24), 300, "keep")
+
+    r1 = client.get("/api/groups", params={"since_hours": 24})
+    assert r1.status_code == 200
+    assert r1.json()["count"] >= 300
+    nss_calls = len(nss["calls"]) + len(nss["member_calls"])
+    # every owner (300 synthetic + the 4 canned ones) + every member list
+    assert nss_calls == (300 + 4) + 300 * 4
+
+    r2 = client.get("/api/groups", params={"since_hours": 24})
+    assert r2.status_code == 200
+    assert len(nss["calls"]) + len(nss["member_calls"]) == nss_calls, \
+        "a second load must make zero NSS calls"
+    # the planted entry survived: no clear-all eviction ever fired
+    assert deps.route_cache.peek(cache.sacct_window_key(24)) == \
+        (True, "keep")
+
+
+def test_groups_progress_route_resolves_the_groups_key(client, nss):
+    # Declared before the {group_id} route, so "progress" polls the
+    # progress store instead of reading as a group id (which would 404).
+    pkey = cache.groups_progress_key(24, False)
+    assert client.get("/api/groups/progress",
+                      params={"since_hours": 24}).json() is None
+    cache.progress_store[pkey] = {
+        "phase": "users", "done": 2, "total": 5, "failed_batches": 1}
+    try:
+        assert client.get("/api/groups/progress",
+                          params={"since_hours": 24}).json() == {
+            "phase": "users", "done": 2, "total": 5, "failed_batches": 1}
+        # keyed per (window, running_only): other scopes read null
+        assert client.get("/api/groups/progress",
+                          params={"since_hours": 72}).json() is None
+        assert client.get("/api/groups/progress", params={
+            "since_hours": 24, "running_only": "true"}).json() is None
+        # level rides along in the reused query string and is ignored
+        assert client.get("/api/groups/progress", params={
+            "since_hours": 24, "level": "department"}).json() == {
+            "phase": "users", "done": 2, "total": 5, "failed_batches": 1}
+    finally:
+        cache.progress_store.clear()
+
+
+def test_groups_progress_published_during_load_and_cleared_after(
+        client, nss, monkeypatch):
+    # A cold load publishes the directory phases' batch states under the
+    # (window, running_only) key while it runs, and the key is popped
+    # when the request finishes — a poll after completion reads null.
+    started = threading.Event()
+    release = threading.Event()
+
+    def slow_user_groups(username):
+        started.set()
+        release.wait(timeout=10)
+        return USER_GROUPS.get(username)
+
+    monkeypatch.setattr(deps, "user_groups", slow_user_groups)
+    result = {}
+
+    def load():
+        result["r"] = client.get("/api/groups", params={"since_hours": 24})
+
+    loader = threading.Thread(target=load)
+    loader.start()
+    try:
+        assert started.wait(timeout=10)
+        # the user phase is in flight: the index's 12 member lists went
+        # first, then the owners' one batch, seeded at done=0
+        state = cache.progress_store[cache.groups_progress_key(24, False)]
+        assert state == {"phase": "users", "done": 0, "total": 1,
+                         "failed_batches": 0}
+    finally:
+        release.set()
+        loader.join(timeout=10)
+    assert result["r"].status_code == 200
+    assert cache.progress_store == {}
+
+
+def test_groups_and_drilldown_run_one_classification(
+        client, nss, monkeypatch):
+    # A window/level change fires /api/groups and the open drill-down
+    # together; both classify the same owners under the same key, so the
+    # second must join the first's Future — one look-up per owner, one
+    # publisher — never doubling the NSS work or racing the progress key.
+    started = threading.Event()
+    release = threading.Event()
+    calls = []
+    call_lock = threading.Lock()
+
+    def slow_user_groups(username):
+        with call_lock:
+            calls.append(username)
+        started.set()
+        release.wait(timeout=10)
+        return USER_GROUPS.get(username)
+
+    monkeypatch.setattr(deps, "user_groups", slow_user_groups)
+    results = {}
+
+    def run(name, path):
+        results[name] = client.get(path, params={"since_hours": 24})
+
+    leader = threading.Thread(target=run, args=("leader", "/api/groups"))
+    follower = threading.Thread(
+        target=run, args=("follower", "/api/groups/kyrkiv1/users"))
+    leader.start()
+    try:
+        assert started.wait(timeout=10)
+        follower.start()
+        follower.join(timeout=2)
+        assert follower.is_alive(), \
+            "the drill-down must join the list's in-flight classification"
+        # the leader's live state was neither rewound nor erased by the
+        # follower's arrival
+        state = cache.progress_store[cache.groups_progress_key(24, False)]
+        assert state["phase"] == "users" and state["done"] == 0
+    finally:
+        release.set()
+        leader.join(timeout=10)
+    follower.join(timeout=10)
+    assert results["leader"].status_code == 200
+    assert results["follower"].status_code == 200
+    # one look-up per owner — the follower ran none of its own
+    assert sorted(calls) == sorted(set(calls))
+    assert cache.progress_store == {}
+
+
+def test_groups_progress_cleared_after_a_total_outage(client, nss,
+                                                      monkeypatch):
+    def boom(username):
+        raise deps.DirectoryError("sssd down")
+
+    monkeypatch.setattr(deps, "user_groups", boom)
+    r = client.get("/api/groups", params={"since_hours": 24})
+    assert r.status_code == 502
+    # the finally popped the key: no in-flight-looking state survives a
+    # failed fetch
+    assert cache.progress_store == {}
+
+
+def test_groups_partial_failure_is_not_memoized(client, nss, monkeypatch):
+    flaky_users = {"alice"}
+
+    def flaky(username):
+        if username in flaky_users:
+            raise deps.DirectoryError("sssd worker timeout")
+        return USER_GROUPS.get(username)
+
+    monkeypatch.setattr(deps, "user_groups", flaky)
+    r = client.get("/api/groups", params={"since_hours": 24})
+    assert r.status_code == 200
+    assert r.json()["coverage"]["failed"] == 1
+    # the directory heals: the next request must re-ask, not read the
+    # 60 s classification memo
+    flaky_users.clear()
+    r = client.get("/api/groups", params={"since_hours": 24})
+    assert r.status_code == 200
+    assert r.json()["coverage"]["failed"] == 0

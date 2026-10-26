@@ -18,6 +18,7 @@ import {
 import "./tabs/status.js";
 import "./tabs/jobs.js";
 import "./tabs/users.js";
+import "./tabs/groups.js";
 import "./tabs/partitions.js";
 import "./tabs/nodes.js";
 
