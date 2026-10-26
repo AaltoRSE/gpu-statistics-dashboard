@@ -4,17 +4,29 @@ Data is collected on demand: each route queries only the Prometheus /
 sacct / scontrol sources it needs, with short in-memory TTL caches.
 
 This module is assembly only: create the app, register the exception
-handlers and routers, mount static files. Every route and every piece
-of domain logic lives in api/ and domain/ respectively.
+handlers and routers, mount static files and the MCP endpoint. Every
+route and every piece of domain logic lives in api/ and domain/
+respectively.
 """
 
 import os
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from api import groups, health, jobs, nodes, partitions, spa, status, users
+from api import (
+    groups,
+    health,
+    jobs,
+    mcp_server,
+    nodes,
+    partitions,
+    spa,
+    status,
+    users,
+)
 from deps import DirectoryError
 from prom import PrometheusError
 from slurm import SlurmError
@@ -22,7 +34,20 @@ from slurm import SlurmError
 HERE = os.path.dirname(os.path.abspath(__file__))
 STATIC = os.path.join(HERE, "static")
 
-app = FastAPI(title="GPU Efficiency Dashboard")
+# Built before the lifespan runs: the session manager it enters is
+# created by build_app().
+mcp_app = mcp_server.build_app()
+
+
+@asynccontextmanager
+async def lifespan(app):
+    # A mounted app's own lifespan never runs, so the host starts the MCP
+    # session manager (it owns every MCP request's task group).
+    async with mcp_server.mcp.session_manager.run():
+        yield
+
+
+app = FastAPI(title="GPU Efficiency Dashboard", lifespan=lifespan)
 
 
 @app.exception_handler(PrometheusError)
@@ -56,6 +81,8 @@ app.include_router(nodes.router)
 app.include_router(spa.router)
 
 app.mount("/static", StaticFiles(directory=STATIC), name="static")
+# MCP (Streamable HTTP) for AI agents at /mcp/, bearer-token protected.
+app.mount("/mcp", mcp_app)
 
 
 if __name__ == "__main__":
