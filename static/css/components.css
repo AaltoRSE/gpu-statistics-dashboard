@@ -66,6 +66,10 @@
 .table-scroll.compact { overflow-x: auto; }
 .table-scroll.compact th, .table-scroll.compact td { padding: 4px 6px; }
 .table-scroll.compact th { font-size: 10px; }
+/* Bounded variant (the Users tab's pending-jobs table): one user's array
+   can queue hundreds of job x partition rows, which would push their job
+   table off screen; this one scrolls inside a fixed height instead. */
+.table-scroll.capped { max-height: 420px; overflow-y: auto; }
 .table-scroll::-webkit-scrollbar-corner { background: transparent; }
 /* Sticky first (entity) column so the row identity stays visible while the
    table scrolls horizontally at narrow widths; header keeps priority. */
@@ -95,6 +99,10 @@ th[data-k] > button:not(.glossary-btn) { all:unset; box-sizing:border-box; curso
   text-align:inherit; white-space:inherit; }
 th[data-k] > button:not(.glossary-btn):focus-visible { outline: 2px solid var(--acc);
   outline-offset: -2px; }
+/* A header with a glossary trigger keeps the corner free for it: in a
+   narrow right-aligned column (the Users table's Fairshare) the label
+   would otherwise run under the button. */
+th[data-k]:has(> .glossary-btn) > button:not(.glossary-btn) { padding-right:18px; }
 /* Sits in the corner, above the sort button beneath it (later in DOM
    order, so it paints on top at the same default stacking level without
    needing an explicit z-index) and independently clickable there. */
